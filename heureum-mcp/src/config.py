@@ -50,7 +50,10 @@ class Settings(BaseSettings):
 
     SERVERS: dict[str, ServerConfig] = {
         "web": ServerConfig(name="heureum-web", port=3001),
+        "filesystem": ServerConfig(name="heureum-filesystem", port=3002),
     }
+
+    FILESYSTEM_CWD: str = "/tmp"
 
     OPENAI_API_KEY: str = ""
     OPENAI_SEARCH_MODEL: str = "gpt-4o-mini-search-preview"

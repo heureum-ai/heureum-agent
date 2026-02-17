@@ -28,6 +28,10 @@ def create_server(server_key: str) -> FastMCP:
             from src.tools.web import register_web_tools
 
             register_web_tools(mcp)
+        case "filesystem":
+            from src.tools.filesystem import register_filesystem_tools
+
+            register_filesystem_tools(mcp)
         case _:
             raise ValueError(f"Unknown server: {server_key}")
 
