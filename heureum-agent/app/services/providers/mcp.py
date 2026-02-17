@@ -81,12 +81,12 @@ class MCPClient:
 
         Args:
             server_urls (Optional[List[str]]): List of MCP server base URLs.
-                Defaults to ``[settings.MCP_SERVER_URL]`` if not provided.
+                Defaults to ``settings.get_mcp_server_urls()`` if not provided.
             chain_registry (Optional[ToolChainRegistry]): Shared registry for
                 tool chain rules. MCP chain metadata is registered here during
                 discovery. If None, chain rules from MCP metadata are ignored.
         """
-        self._server_urls = server_urls or [settings.MCP_SERVER_URL]
+        self._server_urls = server_urls or settings.get_mcp_server_urls()
         self._connections: Dict[str, _ServerConnection] = {}
         self._server_tool_names: Set[str] = set()
         self._tool_to_server: Dict[str, str] = {}  # tool_name -> server_url

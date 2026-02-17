@@ -67,7 +67,7 @@ class NotificationService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    f"{settings.MCP_SERVER_URL}/api/v1/notifications/internal/send/",
+                    f"{settings.PLATFORM_API_URL}/api/v1/notifications/internal/send/",
                     json=payload,
                 )
                 if resp.status_code in (200, 201):

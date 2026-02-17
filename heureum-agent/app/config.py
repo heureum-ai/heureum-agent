@@ -17,14 +17,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Only server-side tools need to be known to the server.
 # ---------------------------------------------------------------------------
 
-# Session file tools — executed server-side via Platform API
-SESSION_FILE_TOOLS: Set[str] = {
-    "read_file",
-    "write_file",
-    "list_files",
-    "delete_file",
-}
-
 # Agent-internal tools — executed server-side by the agent itself
 AGENT_TOOLS: Set[str] = {"manage_todo", "manage_periodic_task", "notify_user"}
 
@@ -71,7 +63,8 @@ class Settings(BaseSettings):
         CORS_ORIGINS (str): Comma-separated list of allowed CORS origins.
         LANGCHAIN_TRACING_V2 (bool): Whether to enable LangChain tracing.
         LANGCHAIN_API_KEY (str): API key for LangChain/LangSmith.
-        MCP_SERVER_URL (str): URL of the MCP server.
+        PLATFORM_API_URL (str): URL of the MCP server (used for session files, notifications, periodic tasks).
+        MCP_SERVER_URLS (str): Comma-separated MCP server URLs for tool discovery.
         AGENT_MODEL (str): Model identifier for the agent LLM.
         AGENT_TEMPERATURE (float): Sampling temperature for the agent.
         AGENT_MAX_TOKENS (int): Maximum token limit for agent responses.
@@ -98,7 +91,8 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:8001"
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""
-    MCP_SERVER_URL: str = "http://localhost:8001"
+    PLATFORM_API_URL: str = "http://localhost:8001"
+    MCP_SERVER_URLS: str = "http://localhost:3001,http://localhost:3002"
     AGENT_MODEL: str = "gemini-3-flash-preview"
     AGENT_TEMPERATURE: float = 0.7
     AGENT_MAX_TOKENS: int = 2000
@@ -130,6 +124,14 @@ class Settings(BaseSettings):
                 comma-separated CORS_ORIGINS setting.
         """
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    def get_mcp_server_urls(self) -> List[str]:
+        """Parse MCP server URLs as list.
+
+        Returns:
+            List[str]: A list of MCP server URLs for tool discovery.
+        """
+        return [url.strip() for url in self.MCP_SERVER_URLS.split(",") if url.strip()]
 
 
 settings = Settings()

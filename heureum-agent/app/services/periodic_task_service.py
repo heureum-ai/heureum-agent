@@ -130,7 +130,7 @@ class PeriodicTaskService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    f"{settings.MCP_SERVER_URL}/api/v1/periodic-tasks/internal/create/",
+                    f"{settings.PLATFORM_API_URL}/api/v1/periodic-tasks/internal/create/",
                     json=payload,
                 )
                 if resp.status_code in (200, 201):
@@ -159,7 +159,7 @@ class PeriodicTaskService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
-                    f"{settings.MCP_SERVER_URL}/api/v1/periodic-tasks/internal/list/",
+                    f"{settings.PLATFORM_API_URL}/api/v1/periodic-tasks/internal/list/",
                     params={"session_id": session_id},
                 )
                 if resp.status_code == 200:
@@ -194,7 +194,7 @@ class PeriodicTaskService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.patch(
-                    f"{settings.MCP_SERVER_URL}/api/v1/periodic-tasks/internal/{task_id}/update/",
+                    f"{settings.PLATFORM_API_URL}/api/v1/periodic-tasks/internal/{task_id}/update/",
                     json={"status": status},
                 )
                 if resp.status_code == 200:
@@ -213,7 +213,7 @@ class PeriodicTaskService:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
-                    f"{settings.MCP_SERVER_URL}/api/v1/periodic-tasks/internal/{task_id}/resume/",
+                    f"{settings.PLATFORM_API_URL}/api/v1/periodic-tasks/internal/{task_id}/resume/",
                 )
                 if resp.status_code == 200:
                     data = resp.json()

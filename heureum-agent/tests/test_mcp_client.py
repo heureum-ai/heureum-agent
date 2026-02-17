@@ -71,9 +71,15 @@ from app.services.providers.mcp import (  # noqa: E402
 class TestMCPClientInit:
     def test_default_server_urls(self):
         with patch("app.services.providers.mcp.settings") as mock_settings:
-            mock_settings.MCP_SERVER_URL = "http://localhost:8001"
+            mock_settings.get_mcp_server_urls.return_value = [
+                "http://localhost:3001",
+                "http://localhost:3002",
+            ]
             client = MCPClient()
-            assert client._server_urls == ["http://localhost:8001"]
+            assert client._server_urls == [
+                "http://localhost:3001",
+                "http://localhost:3002",
+            ]
 
     def test_custom_server_urls(self):
         urls = ["http://a:8000", "http://b:9000"]
