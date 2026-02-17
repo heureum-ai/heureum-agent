@@ -1,9 +1,9 @@
 import { CODING_TOOLS } from '@heureum/coding'
-import { DOCX_TOOLS } from '@heureum/word'
 import { PDF_TOOLS } from '@heureum/pdf'
 import { PPT_TOOLS } from '@heureum/ppt'
-import { XLSX_TOOLS } from '@heureum/xlsx'
 import { WEB_TOOLS } from '@heureum/web'
+import { DOCX_TOOLS } from '@heureum/word'
+import { XLSX_TOOLS } from '@heureum/xlsx'
 
 interface ToolDefinition {
   type: 'function'
@@ -124,7 +124,7 @@ export function getTools(context?: { cwd?: string | null }): ToolDefinition[] {
   return [
     ...CODING_TOOLS,
     buildSelectCwdTool(context?.cwd ?? null),
-    // ...BROWSER_TOOLS,
+    ...BROWSER_TOOLS,
     ...DOCX_TOOLS,
     ...PDF_TOOLS,
     ...PPT_TOOLS,

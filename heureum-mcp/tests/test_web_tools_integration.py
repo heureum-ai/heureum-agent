@@ -10,7 +10,6 @@ import pytest
 
 from src.common.cache import search_cache, fetch_cache
 from src.common.security import SSRFError
-from src.servers import create_server
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -18,8 +17,15 @@ from src.servers import create_server
 
 
 def _make_server():
-    """Create a web MCP server with OpenAI mocking-ready."""
-    return create_server("web")
+    """Create a web MCP server with Tavily search + web_fetch registered."""
+    from mcp.server.fastmcp import FastMCP
+    from src.tools.web.tavily import register_tavily_search
+    from src.tools.web.fetch import register_web_fetch
+
+    mcp = FastMCP("test-web-integration")
+    register_tavily_search(mcp)
+    register_web_fetch(mcp)
+    return mcp
 
 
 async def _call_tool(server, name: str, args: dict) -> dict:
@@ -47,7 +53,7 @@ def _clear_caches():
 @pytest.fixture(autouse=True)
 def _disable_cache():
     """Disable cache by default. Tests that need cache can override."""
-    with patch("src.tools.web.search.settings") as mock_search_settings, \
+    with patch("src.tools.web.tavily.settings") as mock_search_settings, \
          patch("src.tools.web.fetch.settings") as mock_fetch_settings:
         # Copy real settings attrs, then disable cache
         from src.config import settings as real_settings
@@ -56,34 +62,17 @@ def _disable_cache():
                 setattr(mock_search_settings, attr, getattr(real_settings, attr))
                 setattr(mock_fetch_settings, attr, getattr(real_settings, attr))
         mock_search_settings.CACHE_ENABLED = False
+        mock_search_settings.TAVILY_API_KEY = "tvly-test-key"
         mock_fetch_settings.CACHE_ENABLED = False
         yield mock_search_settings, mock_fetch_settings
 
 
-def _build_openai_response(
-    text: str,
-    citations: list[dict] | None = None,
-):
-    """Build a fake OpenAI chat completion response."""
-    annotations = []
-    for c in citations or []:
-        ann = MagicMock()
-        ann.url_citation.title = c["title"]
-        ann.url_citation.url = c["url"]
-        ann.url_citation.start_index = c.get("start_index", 0)
-        ann.url_citation.end_index = c.get("end_index", len(text))
-        annotations.append(ann)
-
-    message = MagicMock()
-    message.content = text
-    message.annotations = annotations
-
-    choice = MagicMock()
-    choice.message = message
-
-    response = MagicMock()
-    response.choices = [choice]
-    return response
+def _build_tavily_response(results: list[dict] | None = None) -> dict:
+    """Build a fake Tavily API response dict."""
+    return {
+        "query": "test",
+        "results": results or [],
+    }
 
 
 def _build_httpx_response(
@@ -105,11 +94,22 @@ def _build_httpx_response(
     return resp
 
 
-def _patch_openai(openai_response):
-    """Context manager that patches AsyncOpenAI to return given response."""
-    mock_client = AsyncMock()
-    mock_client.chat.completions.create.return_value = openai_response
-    return patch("src.tools.web.search.AsyncOpenAI", return_value=mock_client)
+def _patch_tavily(tavily_response):
+    """Context manager that patches _search_tavily to return given response."""
+    return patch(
+        "src.tools.web.tavily._search_tavily",
+        new_callable=AsyncMock,
+        return_value=tavily_response,
+    )
+
+
+def _patch_tavily_error(exc):
+    """Context manager that patches _search_tavily to raise."""
+    return patch(
+        "src.tools.web.tavily._search_tavily",
+        new_callable=AsyncMock,
+        side_effect=exc,
+    )
 
 
 def _patch_fetch(httpx_response):
@@ -140,17 +140,21 @@ class TestSearchThenFetch:
     @pytest.mark.asyncio
     async def test_single_result_pipeline(self):
         """검색 결과 1개 → fetch 성공."""
-        openai_resp = _build_openai_response(
-            "Example Domain is reserved for documentation.",
-            citations=[{"title": "Example Page", "url": "https://example.com/article"}],
-        )
+        tavily_resp = _build_tavily_response([
+            {
+                "title": "Example Page",
+                "url": "https://example.com/article",
+                "content": "Example Domain is reserved for documentation.",
+                "score": 0.95,
+            },
+        ])
         httpx_resp = _build_httpx_response(
             url="https://example.com/article",
             html="<html><head><title>Example Page</title></head>"
                  "<body><p>This is the full article content.</p></body></html>",
         )
 
-        with _patch_openai(openai_resp):
+        with _patch_tavily(tavily_resp):
             server = _make_server()
             search = await _call_tool(server, "web_search", {"query": "example 2026"})
 
@@ -166,17 +170,14 @@ class TestSearchThenFetch:
         assert "full article content" in fetch["text"].lower()
 
     @pytest.mark.asyncio
-    async def test_multiple_citations(self):
-        """복수 citation이 있는 검색 결과."""
-        openai_resp = _build_openai_response(
-            "Python is a programming language. Rust is also popular.",
-            citations=[
-                {"title": "Python Docs", "url": "https://python.org/docs", "start_index": 0, "end_index": 30},
-                {"title": "Rust Lang", "url": "https://rust-lang.org", "start_index": 31, "end_index": 55},
-            ],
-        )
+    async def test_multiple_results(self):
+        """복수 결과가 있는 검색 결과."""
+        tavily_resp = _build_tavily_response([
+            {"title": "Python Docs", "url": "https://python.org/docs", "content": "Python info.", "score": 0.9},
+            {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "Rust info.", "score": 0.8},
+        ])
 
-        with _patch_openai(openai_resp):
+        with _patch_tavily(tavily_resp):
             server = _make_server()
             result = await _call_tool(server, "web_search", {"query": "python rust 2026"})
 
@@ -194,26 +195,22 @@ class TestWebSearch:
     """Tests for the web_search tool including error handling and URL cleanup."""
 
     @pytest.mark.asyncio
-    async def test_no_annotations(self):
-        """검색 결과에 annotation이 없는 경우."""
-        openai_resp = _build_openai_response("No specific results found.")
-        openai_resp.choices[0].message.annotations = []
+    async def test_no_results(self):
+        """검색 결과가 없는 경우."""
+        tavily_resp = _build_tavily_response([])
 
-        with _patch_openai(openai_resp):
+        with _patch_tavily(tavily_resp):
             server = _make_server()
             result = await _call_tool(server, "web_search", {"query": "nothing"})
 
         assert result["count"] == 0
         assert result["results"] == []
-        assert result["text"]  # 텍스트 자체는 있어야 함
+        assert result["text"] == "(no search results)"
 
     @pytest.mark.asyncio
     async def test_api_error_returns_json(self):
-        """OpenAI API 에러 시 에러 JSON 반환."""
-        mock_client = AsyncMock()
-        mock_client.chat.completions.create.side_effect = RuntimeError("API rate limit")
-
-        with patch("src.tools.web.search.AsyncOpenAI", return_value=mock_client):
+        """Tavily API 에러 시 에러 JSON 반환."""
+        with _patch_tavily_error(RuntimeError("API rate limit")):
             server = _make_server()
             result = await _call_tool(server, "web_search", {"query": "test"})
 
@@ -222,9 +219,9 @@ class TestWebSearch:
 
     @pytest.mark.asyncio
     async def test_missing_api_key(self, _disable_cache):
-        """OPENAI_API_KEY가 비어있으면 에러 반환."""
+        """TAVILY_API_KEY가 비어있으면 에러 반환."""
         mock_search_settings, _ = _disable_cache
-        mock_search_settings.OPENAI_API_KEY = ""
+        mock_search_settings.TAVILY_API_KEY = ""
 
         server = _make_server()
         result = await _call_tool(server, "web_search", {"query": "test"})
@@ -235,12 +232,11 @@ class TestWebSearch:
     async def test_utm_params_stripped(self):
         """UTM 트래킹 파라미터가 URL에서 제거되는지 확인."""
         url_with_utm = "https://example.com/page?utm_source=google&utm_medium=cpc&id=123"
-        openai_resp = _build_openai_response(
-            "Result text",
-            citations=[{"title": "Page", "url": url_with_utm}],
-        )
+        tavily_resp = _build_tavily_response([
+            {"title": "Page", "url": url_with_utm, "content": "Result text.", "score": 0.9},
+        ])
 
-        with _patch_openai(openai_resp):
+        with _patch_tavily(tavily_resp):
             server = _make_server()
             result = await _call_tool(server, "web_search", {"query": "utm test"})
 
@@ -250,16 +246,17 @@ class TestWebSearch:
         assert "id=123" in cleaned_url
 
     @pytest.mark.asyncio
-    async def test_null_content(self):
-        """OpenAI가 content=None 반환 시 처리."""
-        openai_resp = _build_openai_response("ignored")
-        openai_resp.choices[0].message.content = None
-        openai_resp.choices[0].message.annotations = []
+    async def test_empty_content(self):
+        """Tavily가 content 없는 결과 반환 시 처리."""
+        tavily_resp = _build_tavily_response([
+            {"title": "Empty", "url": "https://example.com", "content": "", "score": 0.5},
+        ])
 
-        with _patch_openai(openai_resp):
+        with _patch_tavily(tavily_resp):
             server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "null content test"})
+            result = await _call_tool(server, "web_search", {"query": "empty content test"})
 
+        assert result["count"] == 1
         assert result["text"] == "(no search results)"
 
 
@@ -401,14 +398,12 @@ class TestCaching:
         mock_search_settings, _ = _disable_cache
         mock_search_settings.CACHE_ENABLED = True
 
-        openai_resp = _build_openai_response(
-            "Cached result text",
-            citations=[{"title": "Cached", "url": "https://example.com/cached"}],
-        )
-        mock_client = AsyncMock()
-        mock_client.chat.completions.create.return_value = openai_resp
+        tavily_resp = _build_tavily_response([
+            {"title": "Cached", "url": "https://example.com/cached", "content": "Cached text.", "score": 0.9},
+        ])
 
-        with patch("src.tools.web.search.AsyncOpenAI", return_value=mock_client):
+        mock_fn = AsyncMock(return_value=tavily_resp)
+        with patch("src.tools.web.tavily._search_tavily", mock_fn):
             server = _make_server()
 
             first = await _call_tool(server, "web_search", {"query": "cache test"})
@@ -416,7 +411,7 @@ class TestCaching:
 
         assert first["cached"] is False
         assert second["cached"] is True
-        assert mock_client.chat.completions.create.call_count == 1
+        assert mock_fn.call_count == 1
 
     @pytest.mark.asyncio
     async def test_fetch_cache_hit(self, _disable_cache):
