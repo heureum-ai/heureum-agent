@@ -34,7 +34,7 @@ from app.services.compaction.truncation import (
     truncate_oversized_tool_results,
     truncate_tool_result_text,
 )
-from app.services.prompts.base import COMPACTION_PREFIX
+from app.services.prompts.compaction import COMPACTION_PREFIX
 
 # ---------------------------------------------------------------------------
 # Common helpers

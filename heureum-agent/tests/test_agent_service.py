@@ -131,12 +131,13 @@ class TestPreparePromptAndTools:
         assert '<tool_guide name="bash">' in prompt
 
     def test_no_client_schemas_returns_server_only(self):
-        """Verify no client schemas returns server-only tools."""
+        """Verify no client schemas returns server-only tools (agent-internal only).
+        Filesystem tools are now discovered dynamically via MCP."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
         assert "manage_todo" in names
-        assert "read_file" in names
+        assert "notify_user" in names
 
     def test_client_schemas_returned(self):
         """Verify client schemas are passed through."""
@@ -224,7 +225,7 @@ class TestPromptReconstruction:
         system_content = lc_msgs[0].content
         assert "CRITICAL RULE" not in system_content
         assert "NEVER write a question mark" not in system_content
-        # Server-side tool guides (todo, session_files, etc.) are always present;
+        # Server-side tool guides (todo, periodic_task) are always present;
         # client-specific guides are only injected when provided via client_tool_prompts.
         # Verify no client-tool-name-based injection happens by default.
         assert '<tool_guide name="bash">' not in system_content

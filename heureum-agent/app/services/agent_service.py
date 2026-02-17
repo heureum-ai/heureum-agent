@@ -26,15 +26,15 @@ from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
 from app.services.notification_service import NOTIFY_USER_TOOL_SCHEMA
 from app.services.periodic_task_service import MANAGE_PERIODIC_TASK_TOOL_SCHEMA
-from app.services.session_file_schemas import SESSION_FILE_TOOL_SCHEMAS
 from app.services.todo_service import MANAGE_TODO_TOOL_SCHEMA
 
-# Server-only tool schemas — always bound to the LLM
+# Server-only tool schemas — always bound to the LLM.
+# Filesystem tools (read, write, edit, find, ls) are discovered
+# dynamically via MCP and added through ``self.mcp_tools``.
 SERVER_TOOL_SCHEMAS = [
     MANAGE_TODO_TOOL_SCHEMA,
     MANAGE_PERIODIC_TASK_TOOL_SCHEMA,
     NOTIFY_USER_TOOL_SCHEMA,
-    *SESSION_FILE_TOOL_SCHEMAS,
 ]
 from app.schemas.open_responses import (
     InputTokenDetails,

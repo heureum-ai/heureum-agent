@@ -30,10 +30,10 @@ class TestBuildSystemPrompt:
 
     def test_no_client_tools_no_client_guides(self):
         """Without client_tool_prompts, no client-provided guides appear.
-        Server-side guides (todo, session_files, etc.) are always present."""
+        Server-side guides (todo, periodic_task) are always present."""
         result = build_system_prompt()
         # Server-side guides are always present
-        assert "manage_todo" in result or "session_file" in result.lower()
+        assert "manage_todo" in result
 
     def test_client_tools_included(self):
         guides = ['<tool_guide name="bash">\nUse bash to run commands.\n</tool_guide>']

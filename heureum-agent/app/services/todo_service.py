@@ -13,11 +13,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
-
-import httpx
-
-from app.config import settings
+from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -90,12 +86,26 @@ class SessionTodo:
     updated_at: float = field(default_factory=time.time)
 
 
+# Type alias for the async write callback:
+#   (tool_name: str, arguments: dict) -> str
+WriteToolFn = Callable[[str, Dict[str, Any]], Coroutine[Any, Any, str]]
+
+
 class TodoService:
     """Manages TODO plans per session with markdown persistence."""
 
     def __init__(self) -> None:
         self._session_todos: Dict[str, SessionTodo] = {}
         self._session_history: Dict[str, List[SessionTodo]] = {}
+        self._write_tool_fn: Optional[WriteToolFn] = None
+
+    def set_write_tool_fn(self, fn: WriteToolFn) -> None:
+        """Inject the MCP tool caller used to persist TODO files.
+
+        Args:
+            fn: Async callable matching ``mcp_client.call_tool(name, args)``.
+        """
+        self._write_tool_fn = fn
 
     async def execute(
         self, name: str, arguments: Dict[str, Any], session_id: str
@@ -326,19 +336,14 @@ class TodoService:
         return "\n".join(lines)
 
     async def _write_todo_file(self, session_id: str, todo: SessionTodo) -> None:
-        """Write TODO plan file to session files via Platform API."""
-        content = self.render_markdown(todo)
-        url = f"{settings.MCP_SERVER_URL}/api/v1/sessions/{session_id}/files/write/"
+        """Write TODO plan file via MCP filesystem write tool."""
+        if not self._write_tool_fn:
+            logger.warning("No write tool configured; skipping TODO file write for %s", todo.filename)
+            return
 
+        content = self.render_markdown(todo)
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.post(url, json={
-                    "path": todo.filename,
-                    "content": content,
-                    "created_by": "agent",
-                })
-                if resp.status_code not in (200, 201):
-                    logger.warning("Failed to write %s: %s", todo.filename, resp.text)
+            await self._write_tool_fn("write", {"path": todo.filename, "content": content})
         except Exception as e:
             logger.warning("Failed to write %s: %s", todo.filename, e)
 
