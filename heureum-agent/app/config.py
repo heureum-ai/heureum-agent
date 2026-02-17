@@ -105,6 +105,7 @@ class Settings(BaseSettings):
 
     # Agent loop
     MAX_AGENT_ITERATIONS: int = 50
+    MAX_CHAIN_DEPTH: int = 10  # max consecutive chain steps without returning to LLM
 
     # Session
     SESSION_TTL_SECONDS: int = 3600  # 1 hour

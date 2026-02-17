@@ -74,7 +74,21 @@ atexit.register(_atexit_close_mcp)
 
 
 def _get_loop_lock(session_id: str) -> asyncio.Lock:
-    """Serialize full loop executions per session."""
+    """Serialize full loop executions per session.
+
+    The per-session lock guarantees that:
+      1. Session history is appended in a deterministic order — concurrent
+         requests for the same session cannot interleave tool-result writes.
+      2. ``_active_chains`` in :class:`ToolChainRegistry` is accessed
+         sequentially per session, preventing chain-step tracking races.
+
+    The lock is intentionally coarse (one lock per session covering the
+    entire agent loop).  Within a single lock acquisition, the pipelined
+    tool executor (``_execute_tool_calls_pipelined``) achieves parallelism
+    by running multiple tool calls concurrently via ``asyncio.wait``, so
+    splitting the lock further would add complexity without measurable
+    benefit.
+    """
     return _session_loop_locks.setdefault(session_id, asyncio.Lock())
 
 
@@ -125,64 +139,16 @@ async def _ensure_initialized() -> None:
                     "MCP tools discovered: %s",
                     [t["function"]["name"] for t in mcp_tools],
                 )
+            # Wire TodoService to use the MCP write tool for TODO file persistence
+            todo_service.set_write_tool_fn(mcp_client.call_tool)
         except BaseException as e:
             logger.warning("MCP initialization failed (continuing without MCP tools): %s", e)
         _initialized = True
 
 
-async def _execute_session_file_tool(
-    name: str, arguments: Dict[str, Any], session_id: str
-) -> str:
-    """Execute session file tools via Platform API."""
-    import httpx
-
-    base = f"{settings.MCP_SERVER_URL}/api/v1/sessions/{session_id}/files"
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        if name == "read_file":
-            resp = await client.get(f"{base}/read/", params={"path": arguments.get("path", "")})
-            if resp.status_code == 200:
-                data = resp.json()
-                return data.get("content", "(no content)")
-            return f"Error: {resp.json().get('error', 'File not found')}"
-
-        elif name == "write_file":
-            resp = await client.post(f"{base}/write/", json={
-                "path": arguments.get("path", ""),
-                "content": arguments.get("content", ""),
-                "created_by": "agent",
-            })
-            if resp.status_code in (200, 201):
-                return f"File written: {arguments.get('path', '')}"
-            return f"Error writing file: {resp.json().get('error', resp.text)}"
-
-        elif name == "list_files":
-            params = {}
-            if arguments.get("path"):
-                params["path"] = arguments["path"]
-            resp = await client.get(f"{base}/", params=params)
-            if resp.status_code == 200:
-                files = resp.json()
-                if not files:
-                    return "No files in session."
-                lines = [f"- {f['path']} ({f['size']} bytes, {f['content_type']})" for f in files]
-                return "\n".join(lines)
-            return f"Error listing files: {resp.text}"
-
-        elif name == "delete_file":
-            resp = await client.delete(
-                f"{base}/delete-by-path/", params={"path": arguments.get("path", "")}
-            )
-            if resp.status_code == 204:
-                return f"File deleted: {arguments.get('path', '')}"
-            return f"Error deleting file: {resp.json().get('error', resp.text)}"
-
-    return f"Unknown session file tool: {name}"
-
-
 async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = "") -> str:
     """Dispatch tool execution by name."""
-    from app.config import AGENT_TOOLS, SESSION_FILE_TOOLS
+    from app.config import AGENT_TOOLS
 
     if name == "manage_periodic_task":
         return await periodic_task_service.execute(name, arguments, session_id)
@@ -192,9 +158,6 @@ async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = 
 
     if name in AGENT_TOOLS:
         return await todo_service.execute(name, arguments, session_id)
-
-    if name in SESSION_FILE_TOOLS:
-        return await _execute_session_file_tool(name, arguments, session_id)
 
     if mcp_client.is_server_tool(name):
         return await mcp_client.call_tool(name, arguments)
@@ -381,6 +344,116 @@ async def _execute_tool_calls(
     return tool_results
 
 
+def _make_tool_result_message(tc: ToolCallInfo, result_str: str) -> Message:
+    """Build a tool-result Message from a completed tool call."""
+    return Message(
+        role=MessageRole.TOOL,
+        content=result_str,
+        tool_call_id=tc.id,
+        tool_name=tc.name,
+    )
+
+
+def _append_tool_output_items(
+    tc: ToolCallInfo, result_str: str, all_output_items: list
+) -> None:
+    """Append FunctionToolCall + FunctionToolResult output items."""
+    all_output_items.append(_tool_call_output(tc.name, tc.args, tc.id))
+    all_output_items.append(
+        FunctionToolResult(
+            id=f"out_{uuid.uuid4().hex}",
+            call_id=tc.id,
+            output=result_str,
+        )
+    )
+
+
+async def _execute_tool_calls_pipelined(
+    tool_calls: List[ToolCallInfo],
+    all_output_items: list,
+    session_id: str,
+    max_depth: int = 0,
+    result_queue: Optional[asyncio.Queue] = None,
+) -> Tuple[List[Message], List[ToolCallInfo]]:
+    """Execute tool calls with pipelined chain follow-ups.
+
+    Instead of waiting for *all* tools to finish before detecting chain
+    follow-ups, this function uses ``asyncio.wait(FIRST_COMPLETED)`` so
+    that each tool's result can immediately trigger chain follow-up calls.
+
+    Follow-up calls that do *not* require approval are added to the
+    in-flight task set immediately.  Calls that require approval are
+    collected in a ``deferred_approval`` list and returned to the caller.
+
+    Args:
+        tool_calls: Initial batch of tool calls.
+        all_output_items: Mutable list for output items (modified in place).
+        session_id: Current session ID.
+        max_depth: Maximum chain depth (0 = use ``settings.MAX_CHAIN_DEPTH``).
+        result_queue: If provided, each ``(tc, result_str)`` is put on the
+            queue as soon as it completes (for streaming).
+
+    Returns:
+        ``(all_results, deferred_approval)`` — all result Messages and
+        any chained calls that still need user approval.
+    """
+    if max_depth <= 0:
+        max_depth = settings.MAX_CHAIN_DEPTH
+
+    all_results: List[Message] = []
+    deferred_approval: List[ToolCallInfo] = []
+    depth = 0
+
+    # Map asyncio.Task -> ToolCallInfo for the current in-flight set.
+    pending: Dict[asyncio.Task, ToolCallInfo] = {
+        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id)): tc
+        for tc in tool_calls
+    }
+
+    while pending:
+        done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
+
+        for task in done:
+            tc_orig = pending.pop(task)
+            tc_done, result_str = task.result()
+
+            msg = _make_tool_result_message(tc_done, result_str)
+            all_results.append(msg)
+            _append_tool_output_items(tc_done, result_str, all_output_items)
+
+            if result_queue is not None:
+                await result_queue.put((tc_done, result_str))
+
+            # Record tool interaction
+            await agent_service.append_tool_interaction(
+                session_id, [], [tc_done.model_dump()], [msg],
+            )
+
+            # Detect chain follow-ups for this single result
+            if depth < max_depth:
+                follow_ups = chain_registry.build_per_result(
+                    tc_done, msg, session_id=session_id,
+                )
+                for fu in follow_ups:
+                    if mcp_client.needs_approval(fu.name, session_id):
+                        deferred_approval.append(fu)
+                    else:
+                        pending[
+                            asyncio.create_task(_safe_execute_tool(fu, session_id=session_id))
+                        ] = fu
+
+        depth += 1
+        if depth >= max_depth and pending:
+            # Still tasks in-flight from earlier depths — let them finish
+            # but don't spawn new chain steps.
+            continue
+
+    if result_queue is not None:
+        await result_queue.put(None)  # sentinel
+
+    return all_results, deferred_approval
+
+
 async def _handle_chained_calls(
     chained: List[ToolCallInfo],
     session_id: str,
@@ -391,38 +464,57 @@ async def _handle_chained_calls(
     all_output_items: list,
     iteration: int | None = None,
 ) -> ResponseObject | None:
-    """Execute or gate chained calls, returning ask_question when approval is needed."""
-    if any(mcp_client.needs_approval(tc.name, session_id) for tc in chained):
-        unapproved = [tc for tc in chained if mcp_client.needs_approval(tc.name, session_id)]
-        first = [unapproved[0]]
-        remaining = unapproved[1:]
-        auto = [tc for tc in chained if not mcp_client.needs_approval(tc.name, session_id)]
-        info = mcp_client.request_approval(
-            first + auto,
+    """Execute or gate chained calls, looping through follow-up chains.
+
+    After executing a batch of chained calls, the results are fed back into
+    ``chain_registry.build()`` to detect further chain steps.  This loop
+    continues up to ``MAX_CHAIN_DEPTH`` times, ensuring multi-step chains
+    run to completion without returning to the LLM between steps.
+
+    Returns an approval response if any tool in a batch requires user
+    approval; otherwise returns ``None`` after all chain steps complete.
+    """
+    current = chained
+    for _ in range(settings.MAX_CHAIN_DEPTH):
+        if not current:
+            break
+
+        # Gate on approval — if any tool needs it, return immediately.
+        if any(mcp_client.needs_approval(tc.name, session_id) for tc in current):
+            unapproved = [tc for tc in current if mcp_client.needs_approval(tc.name, session_id)]
+            first = [unapproved[0]]
+            remaining = unapproved[1:]
+            auto = [tc for tc in current if not mcp_client.needs_approval(tc.name, session_id)]
+            info = mcp_client.request_approval(
+                first + auto,
+                session_id,
+                None,
+                [],
+                remaining_chained=remaining,
+            )
+            return _build_response(
+                [_tool_call_output("ask_question", info["question"], info["approval_call_id"])],
+                ResponseStatus.INCOMPLETE,
+                session_id,
+                created_at,
+                model,
+                usage=total_usage,
+                tool_call_count=tool_call_count,
+                iterations=iteration,
+                tool_history=all_output_items or None,
+            )
+
+        chain_results = await _execute_tool_calls(current, all_output_items, session_id=session_id)
+        await agent_service.append_tool_interaction(
             session_id,
-            None,
             [],
-            remaining_chained=remaining,
-        )
-        return _build_response(
-            [_tool_call_output("ask_question", info["question"], info["approval_call_id"])],
-            ResponseStatus.INCOMPLETE,
-            session_id,
-            created_at,
-            model,
-            usage=total_usage,
-            tool_call_count=tool_call_count,
-            iterations=iteration,
-            tool_history=all_output_items or None,
+            [tc.model_dump() for tc in current],
+            chain_results,
         )
 
-    chain_results = await _execute_tool_calls(chained, all_output_items, session_id=session_id)
-    await agent_service.append_tool_interaction(
-        session_id,
-        [],
-        [tc.model_dump() for tc in chained],
-        chain_results,
-    )
+        # Check for further chain steps from the results just produced.
+        current = chain_registry.build(current, chain_results, session_id=session_id)
+
     return None
 
 
@@ -557,7 +649,7 @@ def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set
           - client_tool_names: names of client-side tools (for classification)
           - client_tool_prompts: guide texts provided by clients for system prompt
     """
-    from app.config import AGENT_TOOLS, SESSION_FILE_TOOLS
+    from app.config import AGENT_TOOLS
 
     client_tool_names: Set[str] = set()
     client_tool_schemas: List[dict] = []
@@ -572,12 +664,9 @@ def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set
             if t.guide:
                 client_tool_prompts.append(t.guide)
 
+    # MCP tools (includes filesystem tools discovered dynamically)
     for name in mcp_client.server_tool_names:
         if name not in client_tool_names:
-            tool_names.append(name)
-    # Always include session file tools (executed server-side via Platform API)
-    for name in SESSION_FILE_TOOLS:
-        if name not in tool_names:
             tool_names.append(name)
     # Always include agent-internal tools
     for name in AGENT_TOOLS:
@@ -709,7 +798,7 @@ class _AgentLoopRunner:
         )
 
     async def _handle_tool_call_iteration(self, result: Any, iteration: int) -> ResponseObject | None:
-        from app.config import AGENT_TOOLS, SESSION_FILE_TOOLS
+        from app.config import AGENT_TOOLS
 
         all_tool_calls = result.tool_calls or []
         client_calls, server_calls = mcp_client.classify_tool_calls(
@@ -721,7 +810,6 @@ class _AgentLoopRunner:
             tc
             for tc in server_calls
             if not mcp_client.is_server_tool(tc.name)
-            and tc.name not in SESSION_FILE_TOOLS
             and tc.name not in AGENT_TOOLS
             and not mcp_client.needs_approval(tc.name, self.ctx.session_id)
         ]
@@ -748,11 +836,16 @@ class _AgentLoopRunner:
                 tool_history=self.ctx.output_items or None,
             )
 
-        tool_results = await _execute_tool_calls(server_calls, self.ctx.output_items, session_id=self.ctx.session_id)
-        self.ctx.tool_call_count += len(tool_results)
+        # Pipelined execution: run server tools and follow chain steps
+        # as results arrive (FIRST_COMPLETED), instead of waiting for all.
+        pipeline_results, deferred_approval = await _execute_tool_calls_pipelined(
+            server_calls, self.ctx.output_items, session_id=self.ctx.session_id,
+        )
+        self.ctx.tool_call_count += len(pipeline_results)
 
+        # Append client-side tool placeholders for the LLM history
         for tc in client_calls:
-            tool_results.append(
+            pipeline_results.append(
                 Message(
                     role=MessageRole.TOOL,
                     content=json.dumps(tc.args),
@@ -761,19 +854,20 @@ class _AgentLoopRunner:
                 )
             )
 
+        # Record the original LLM tool-call turn (client + server together)
         await agent_service.append_tool_interaction(
             self.ctx.session_id,
             self.ctx.messages,
             [tc.model_dump() for tc in all_tool_calls],
-            tool_results,
+            pipeline_results,
             usage=result.usage.model_dump(),
             assistant_lc_message=result.assistant_lc_message,
         )
 
-        chained = chain_registry.build(server_calls, tool_results, session_id=self.ctx.session_id)
-        if chained:
+        # Handle any chained calls that need user approval
+        if deferred_approval:
             chain_resp = await _handle_chained_calls(
-                chained,
+                deferred_approval,
                 self.ctx.session_id,
                 self.ctx.created_at,
                 self.ctx.model,
@@ -968,6 +1062,8 @@ class _AgentLoopRunner:
             response = await self._handle_tool_call_iteration(result_obj, iteration)
 
             # Emit tool_result.done for newly executed server tools
+            # (includes pipelined chain results that were appended during
+            # _execute_tool_calls_pipelined)
             for item in self.ctx.output_items[items_before:]:
                 if isinstance(item, FunctionToolResult):
                     yield _sse_event({

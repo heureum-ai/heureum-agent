@@ -100,6 +100,122 @@ class ToolChainRegistry:
         """Read-only access to registered rules."""
         return self._rules
 
+    # ------------------------------------------------------------------
+    # Parsing / extraction helpers (Phase 1 caching support)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_result(result_json: str) -> Optional[Any]:
+        """Parse a JSON result string, returning ``None`` on failure."""
+        try:
+            return json.loads(result_json)
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _extract_chain_args_from_data(
+        data: Any, step: ChainStep
+    ) -> List[Dict[str, Any]]:
+        """Build argument dicts from already-parsed *data* and a chain step."""
+        values = ToolChainRegistry._resolve_jsonpath(data, step.extract)
+        return [
+            {k: (val if v == "$value" else v) for k, v in step.arg_mapping.items()}
+            for val in values
+        ]
+
+    # ------------------------------------------------------------------
+    # Per-result builder (Phase 2)
+    # ------------------------------------------------------------------
+
+    def build_per_result(
+        self,
+        tc: ToolCallInfo,
+        result_msg: Message,
+        session_id: Optional[str] = None,
+        *,
+        _parse_cache: Optional[Dict[int, Any]] = None,
+        _path_cache: Optional[Dict[Tuple[int, str], List]] = None,
+    ) -> List[ToolCallInfo]:
+        """Generate follow-up tool calls for a single (tc, result_msg) pair.
+
+        This is the per-result building block used by :meth:`build`.  It
+        handles both new chain detection and active chain continuation.
+
+        Args:
+            tc: The tool call that was just executed.
+            result_msg: The corresponding tool result message.
+            session_id: Session ID for multi-step chain tracking.
+            _parse_cache: Optional shared parse cache (id(content) -> parsed).
+            _path_cache: Optional shared path cache ((id(content), extract) -> values).
+
+        Returns:
+            List of follow-up ToolCallInfo to execute next.
+        """
+        if _parse_cache is None:
+            _parse_cache = {}
+        if _path_cache is None:
+            _path_cache = {}
+
+        chained: List[ToolCallInfo] = []
+        new_active: List[Tuple[ChainRule, int]] = []
+
+        content = result_msg.content
+        content_id = id(content)
+
+        # Cached parse
+        if content_id not in _parse_cache:
+            _parse_cache[content_id] = self._parse_result(content)
+        data = _parse_cache[content_id]
+
+        # 1) New chains triggered by this tool
+        rules = self._rules.get(tc.name, [])
+        for rule in rules:
+            if not rule.steps:
+                continue
+            step = rule.steps[0]
+            if data is not None:
+                path_key = (content_id, step.extract)
+                if path_key not in _path_cache:
+                    _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
+                for args in self._extract_chain_args_from_data(data, step):
+                    chained.append(
+                        ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
+                    )
+            if len(rule.steps) > 1:
+                new_active.append((rule, 1))
+
+        # 2) Active chains continuing from this tool
+        if session_id:
+            remaining = []
+            for rule, step_idx in self._active_chains.get(session_id, []):
+                if step_idx >= len(rule.steps):
+                    continue
+                expected_target = rule.steps[step_idx - 1].target if step_idx > 0 else rule.source
+                if tc.name != expected_target:
+                    remaining.append((rule, step_idx))
+                    continue
+                step = rule.steps[step_idx]
+                if data is not None:
+                    path_key = (content_id, step.extract)
+                    if path_key not in _path_cache:
+                        _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
+                    for args in self._extract_chain_args_from_data(data, step):
+                        chained.append(
+                            ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
+                        )
+                if step_idx + 1 < len(rule.steps):
+                    new_active.append((rule, step_idx + 1))
+            remaining.extend(new_active)
+            if remaining:
+                self._active_chains[session_id] = remaining
+            else:
+                self._active_chains.pop(session_id, None)
+        return chained
+
+    # ------------------------------------------------------------------
+    # Bulk builder (delegates to build_per_result)
+    # ------------------------------------------------------------------
+
     def build(
         self,
         executed_calls: List[ToolCallInfo],
@@ -122,49 +238,18 @@ class ToolChainRegistry:
             List of follow-up ToolCallInfo to execute next.
         """
         chained: List[ToolCallInfo] = []
-        new_active: List[Tuple[ChainRule, int]] = []
+        # Shared caches across all (tc, result_msg) pairs in this batch
+        _parse_cache: Dict[int, Any] = {}
+        _path_cache: Dict[Tuple[int, str], List] = {}
 
         for tc, result_msg in zip(executed_calls, tool_results):
-            # 1) Check for new chains triggered by this tool
-            rules = self._rules.get(tc.name, [])
-            for rule in rules:
-                if not rule.steps:
-                    continue
-                step = rule.steps[0]
-                for args in self._extract_chain_args(result_msg.content, step):
-                    chained.append(
-                        ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
-                    )
-                # Track remaining steps
-                if len(rule.steps) > 1:
-                    new_active.append((rule, 1))
+            chained.extend(
+                self.build_per_result(
+                    tc, result_msg, session_id=session_id,
+                    _parse_cache=_parse_cache, _path_cache=_path_cache,
+                )
+            )
 
-            # 2) Check for active chains continuing from this tool
-            if session_id:
-                remaining = []
-                for rule, step_idx in self._active_chains.get(session_id, []):
-                    if step_idx >= len(rule.steps):
-                        continue
-                    expected_target = rule.steps[step_idx - 1].target if step_idx > 0 else rule.source
-                    if tc.name != expected_target:
-                        remaining.append((rule, step_idx))
-                        continue
-                    step = rule.steps[step_idx]
-                    for args in self._extract_chain_args(result_msg.content, step):
-                        chained.append(
-                            ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
-                        )
-                    if step_idx + 1 < len(rule.steps):
-                        new_active.append((rule, step_idx + 1))
-                # Replace with remaining (unmatched) + newly queued
-                remaining.extend(new_active)
-                if remaining:
-                    self._active_chains[session_id] = remaining
-                else:
-                    self._active_chains.pop(session_id, None)
-                new_active = []
-
-        # If no session_id, just store new_active chains won't be tracked
         return chained
 
     @staticmethod
@@ -173,6 +258,9 @@ class ToolChainRegistry:
     ) -> List[Dict[str, Any]]:
         """Extract chained tool arguments from a result using a chain step.
 
+        Kept for backward compatibility. Internally delegates to
+        :meth:`_parse_result` and :meth:`_extract_chain_args_from_data`.
+
         Args:
             result_json: JSON string from the previous tool's output.
             step: Chain step with extract path and arg mapping.
@@ -180,16 +268,10 @@ class ToolChainRegistry:
         Returns:
             List of argument dicts for the target tool.
         """
-        try:
-            data = json.loads(result_json)
-        except (json.JSONDecodeError, TypeError):
+        data = ToolChainRegistry._parse_result(result_json)
+        if data is None:
             return []
-
-        values = ToolChainRegistry._resolve_jsonpath(data, step.extract)
-        return [
-            {k: (val if v == "$value" else v) for k, v in step.arg_mapping.items()}
-            for val in values
-        ]
+        return ToolChainRegistry._extract_chain_args_from_data(data, step)
 
     @staticmethod
     def _resolve_jsonpath(data: Any, path: str) -> List[Any]:

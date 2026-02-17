@@ -202,3 +202,142 @@ class TestResolveJsonpath:
 
     def test_missing_key(self):
         assert ToolChainRegistry._resolve_jsonpath({"a": 1}, "b") == []
+
+
+# ---------------------------------------------------------------------------
+# 5. build_per_result
+# ---------------------------------------------------------------------------
+
+
+class TestBuildPerResult:
+    def test_single_result_generates_chain(self):
+        """build_per_result produces chained calls for a single (tc, result) pair."""
+        registry = ToolChainRegistry()
+        registry.register(
+            ChainRule(
+                source="web_search",
+                steps=[
+                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
+                ],
+            )
+        )
+        tc = ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")
+        result_msg = Message(
+            role=MessageRole.TOOL,
+            content=json.dumps({"results": [{"url": "https://example.com/1"}]}),
+            tool_call_id="c1",
+        )
+
+        chained = registry.build_per_result(tc, result_msg)
+
+        assert len(chained) == 1
+        assert chained[0].name == "web_fetch"
+        assert chained[0].args == {"url": "https://example.com/1"}
+
+    def test_active_chain_continuation(self):
+        """build_per_result tracks and continues multi-step chains."""
+        registry = ToolChainRegistry()
+        registry.register(
+            ChainRule(
+                source="web_search",
+                steps=[
+                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
+                    ChainStep(target="summarize", extract="content", arg_mapping={"text": "$value"}),
+                ],
+            )
+        )
+
+        # Step 0
+        tc0 = ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")
+        result0 = Message(
+            role=MessageRole.TOOL,
+            content=json.dumps({"results": [{"url": "https://example.com/1"}]}),
+            tool_call_id="c1",
+        )
+        step0 = registry.build_per_result(tc0, result0, session_id="s1")
+        assert len(step0) == 1
+        assert step0[0].name == "web_fetch"
+
+        # Step 1
+        result1 = Message(
+            role=MessageRole.TOOL,
+            content=json.dumps({"content": "Page text"}),
+            tool_call_id=step0[0].id,
+        )
+        step1 = registry.build_per_result(step0[0], result1, session_id="s1")
+        assert len(step1) == 1
+        assert step1[0].name == "summarize"
+        assert step1[0].args == {"text": "Page text"}
+
+
+# ---------------------------------------------------------------------------
+# 6. Caching behaviour
+# ---------------------------------------------------------------------------
+
+
+class TestBuildCaching:
+    def test_caches_json_parse(self):
+        """Two rules against the same source share a single parse."""
+        registry = ToolChainRegistry()
+        registry.register(
+            ChainRule(
+                source="tool_a",
+                steps=[ChainStep(target="b", extract="x", arg_mapping={"v": "$value"})],
+            )
+        )
+        registry.register(
+            ChainRule(
+                source="tool_a",
+                steps=[ChainStep(target="c", extract="y", arg_mapping={"v": "$value"})],
+            )
+        )
+
+        content = json.dumps({"x": 1, "y": 2})
+        tc = ToolCallInfo(name="tool_a", args={}, id="c1")
+        result_msg = Message(role=MessageRole.TOOL, content=content, tool_call_id="c1")
+
+        parse_cache: dict = {}
+        path_cache: dict = {}
+        chained = registry.build_per_result(
+            tc, result_msg, _parse_cache=parse_cache, _path_cache=path_cache,
+        )
+
+        # Both rules should produce results
+        assert len(chained) == 2
+        targets = {c.name for c in chained}
+        assert targets == {"b", "c"}
+
+        # Parse cache should have exactly one entry (same content string obj)
+        assert len(parse_cache) == 1
+
+    def test_caches_jsonpath(self):
+        """Same extract path on the same content is resolved once."""
+        registry = ToolChainRegistry()
+        # Two rules with the same extract path but different targets
+        registry.register(
+            ChainRule(
+                source="tool_a",
+                steps=[ChainStep(target="b", extract="items[*].id", arg_mapping={"v": "$value"})],
+            )
+        )
+        registry.register(
+            ChainRule(
+                source="tool_a",
+                steps=[ChainStep(target="c", extract="items[*].id", arg_mapping={"v": "$value"})],
+            )
+        )
+
+        content = json.dumps({"items": [{"id": 1}, {"id": 2}]})
+        tc = ToolCallInfo(name="tool_a", args={}, id="c1")
+        result_msg = Message(role=MessageRole.TOOL, content=content, tool_call_id="c1")
+
+        parse_cache: dict = {}
+        path_cache: dict = {}
+        chained = registry.build_per_result(
+            tc, result_msg, _parse_cache=parse_cache, _path_cache=path_cache,
+        )
+
+        # 2 rules x 2 items = 4 chained calls
+        assert len(chained) == 4
+        # Path cache should have exactly one entry (same content + same extract)
+        assert len(path_cache) == 1
