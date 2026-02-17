@@ -16,6 +16,70 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+MANAGE_PERIODIC_TASK_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "manage_periodic_task",
+        "description": (
+            "Register, list, or manage periodic (scheduled) tasks. "
+            "Use this after successfully completing a dry run of a repeating task "
+            "to register it as a periodic task that runs automatically on schedule."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["register", "list", "cancel", "pause", "resume"],
+                    "description": "Action to perform on periodic tasks",
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Short title for the periodic task (required for 'register')",
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Longer description of what the task does (for 'register')",
+                },
+                "recipe": {
+                    "type": "object",
+                    "description": (
+                        "Execution recipe JSON learned from the dry run (required for 'register'). "
+                        "Must include: objective, instructions (array), tools_required (array), "
+                        "output_spec (object with file_pattern and summary_template), "
+                        "dry_run_result (object with success boolean and sample_output_path)"
+                    ),
+                },
+                "schedule": {
+                    "type": "object",
+                    "description": (
+                        "Schedule specification (required for 'register'). "
+                        'Example: {"type": "cron", "cron": {"minute": 0, "hour": 9, '
+                        '"day_of_month": "*", "month": "*", "day_of_week": "*"}}'
+                    ),
+                },
+                "timezone": {
+                    "type": "string",
+                    "description": "IANA timezone for the schedule (default: Asia/Seoul)",
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "ID of the periodic task (required for 'cancel', 'pause', 'resume')",
+                },
+                "notify_on_success": {
+                    "type": "boolean",
+                    "description": (
+                        "Whether to send a system notification when the task completes successfully. "
+                        "Set to false if the task already sends its own notification via notify_user. "
+                        "Default: true. Only used with 'register' action."
+                    ),
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 
 class PeriodicTaskService:
     """Manages periodic tasks via Platform API."""

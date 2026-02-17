@@ -25,26 +25,23 @@ import json
 import logging
 from typing import List, Optional
 
-from app.services.prompts.base import COMPACTION_PREFIX, DEFAULT_SUMMARY_FALLBACK
 from app.models import Message
 from app.schemas.open_responses import MessageRole
 from app.services.compaction.repair import repair_tool_use_result_pairing
 from app.services.compaction.settings import CompactionSettings
 from app.services.compaction.tokens import estimate_messages_tokens, estimate_tokens
-from app.services.prompts.base import (
-    COMPACTION_PROMPT,
+from app.services.prompts.compaction import (
+    COMPACTION_MERGE_INSTRUCTIONS,
+    COMPACTION_PREFIX,
     COMPACTION_SYSTEM_PROMPT,
-    COMPACTION_UPDATE_PROMPT,
+    DEFAULT_SUMMARY_FALLBACK,
+    build_compaction_prompt,
 )
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
-_MERGE_INSTRUCTIONS = (
-    "Merge these partial summaries into a single cohesive summary. "
-    "Preserve decisions, TODOs, open questions, and any constraints."
-)
 
 
 def _messages_to_text(
@@ -133,13 +130,7 @@ async def _generate_summary(
     if not conversation.strip():
         return previous_summary or DEFAULT_SUMMARY_FALLBACK
 
-    if previous_summary:
-        prompt = COMPACTION_UPDATE_PROMPT.format(
-            previous_summary=previous_summary,
-            conversation=conversation,
-        )
-    else:
-        prompt = COMPACTION_PROMPT.format(conversation=conversation)
+    prompt = build_compaction_prompt(conversation, previous_summary)
 
     response = await llm.ainvoke(
         [
@@ -440,7 +431,7 @@ async def summarize_in_stages(
         llm,
         settings,
         max_chunk_tokens,
-        _MERGE_INSTRUCTIONS,
+        COMPACTION_MERGE_INSTRUCTIONS,
     )
 
 

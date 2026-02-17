@@ -57,7 +57,7 @@ sys.modules.setdefault("mcp.client.streamable_http", _fake_mcp.client.streamable
 from app.models import Message, ToolCallInfo  # noqa: E402
 from app.schemas.open_responses import MessageRole  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.config import CLIENT_TOOLS, ApprovalChoice  # noqa: E402
+from app.config import ApprovalChoice  # noqa: E402
 from app.services.providers.mcp import (  # noqa: E402
     MCPClient,
     _ServerConnection,
@@ -460,7 +460,9 @@ class TestClassifyToolCalls:
             ToolCallInfo(name="calculator", args={}, id="c3"),
         ]
 
-        client_calls, server_calls = client.classify_tool_calls(tool_calls, "s1")
+        client_calls, server_calls = client.classify_tool_calls(
+            tool_calls, "s1", client_tool_names={"ask_question"},
+        )
 
         assert [tc.name for tc in client_calls] == ["ask_question"]
         assert [tc.name for tc in server_calls] == ["web_search", "calculator"]
@@ -497,7 +499,8 @@ class TestRequestApproval:
         assert "approval_call_id" in info
         assert "question" in info
         assert "web_search" in info["question"]["question"]
-        assert ApprovalChoice.ALLOW_ONCE in info["question"]["choices"]
+        choice_labels = [c["label"] for c in info["question"]["choices"]]
+        assert ApprovalChoice.ALLOW_ONCE.value in choice_labels
         # Pending state was stored
         assert "s1" in client._pending_tool_calls
         pending = client._pending_tool_calls["s1"]

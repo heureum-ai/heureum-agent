@@ -11,32 +11,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 # ---------------------------------------------------------------------------
-# MCP constants
+# Server-side tool sets (Client-Owns-Schema architecture)
+#
+# Client tools are defined by the client in each request (request.tools).
+# Only server-side tools need to be known to the server.
 # ---------------------------------------------------------------------------
-
-# TODO: client-side에서 tool 목록을 관리하도록 이전 필요 (서버가 결정할 사항이 아님)
-CLIENT_TOOLS: Set[str] = {
-    "ask_question",
-    "bash",
-    "select_cwd",
-    "browser_navigate",
-    "browser_new_tab",
-    "browser_click",
-    "browser_type",
-    "browser_get_content",
-    "get_device_info",
-    "get_sensor_data",
-    "get_contacts",
-    "get_location",
-    "take_photo",
-    "send_notification",
-    "get_clipboard",
-    "set_clipboard",
-    "send_sms",
-    "share_content",
-    "trigger_haptic",
-    "open_url",
-}
 
 # Session file tools — executed server-side via Platform API
 SESSION_FILE_TOOLS: Set[str] = {

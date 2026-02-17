@@ -21,6 +21,54 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+MANAGE_TODO_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "manage_todo",
+        "description": (
+            "Create or update a TODO execution plan for the current task. "
+            "Use this for multi-step tasks to plan before executing."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["create", "update_step", "add_steps"],
+                    "description": "Action to perform",
+                },
+                "task": {
+                    "type": "string",
+                    "description": "Overall task description (required for 'create')",
+                },
+                "steps": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Step descriptions (required for 'create' and 'add_steps')",
+                },
+                "step_index": {
+                    "type": "integer",
+                    "description": "Index of step to update (required for 'update_step')",
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["in_progress", "completed", "failed"],
+                    "description": "New status for the step (required for 'update_step')",
+                },
+                "result": {
+                    "type": "string",
+                    "description": "Brief result description for completed/failed steps",
+                },
+                "after_index": {
+                    "type": "integer",
+                    "description": "Insert new steps after this index (for 'add_steps', defaults to end)",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
+
 
 @dataclass
 class TodoStep:

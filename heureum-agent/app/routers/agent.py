@@ -15,7 +15,7 @@ import time
 import uuid
 from collections.abc import MutableMapping
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import ApprovalChoice, settings
 from app.models import LLMResult, LLMResultType, Message, ToolCallInfo
@@ -202,6 +202,28 @@ async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = 
     # TODO: bash executor
     # TODO: browser executor
     raise NotImplementedError(f"Tool executor not implemented: {name}")
+
+
+@router.post("/tools/execute")
+async def execute_tool_endpoint(request: dict) -> dict:
+    """Execute a single server tool and return the result.
+
+    Called by the client to execute tools that run on the server side
+    (MCP, session files, agent tools, etc.).
+    """
+    await _ensure_initialized()
+    name = request.get("name", "")
+    arguments = request.get("arguments", {})
+    session_id = request.get("session_id", "")
+
+    try:
+        result = await _execute_tool(name, arguments, session_id=session_id)
+        return {"output": result, "success": True}
+    except NotImplementedError:
+        return {"output": f"Error: unknown server tool '{name}'", "success": False}
+    except Exception as e:
+        logger.warning("Tool execution failed (%s): %s", name, e)
+        return {"output": f"Error executing tool '{name}': {e}", "success": False}
 
 
 def _parse_input(request: ResponseRequest) -> List[Message]:
@@ -525,13 +547,33 @@ def _prepare_messages_for_session(
     return [m for m in messages if (m.role, m.content) not in history_set]
 
 
-def _resolve_tool_names(request: ResponseRequest) -> List[str]:
-    """Resolve tool names from request + dynamically discovered MCP tools + session file tools."""
+def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set[str], List[str]]:
+    """Resolve tool names, schemas, client tool names, and guides from request + MCP.
+
+    Returns:
+        (tool_names, client_tool_schemas, client_tool_names, client_tool_prompts) where:
+          - tool_names: all tool names (client + MCP + server) for system prompt
+          - client_tool_schemas: OpenAI-format dicts for LLM binding
+          - client_tool_names: names of client-side tools (for classification)
+          - client_tool_prompts: guide texts provided by clients for system prompt
+    """
     from app.config import AGENT_TOOLS, SESSION_FILE_TOOLS
 
-    tool_names = [t.function.name for t in request.tools] if request.tools else []
+    client_tool_names: Set[str] = set()
+    client_tool_schemas: List[dict] = []
+    tool_names: List[str] = []
+    client_tool_prompts: List[str] = []
+
+    if request.tools:
+        for t in request.tools:
+            client_tool_names.add(t.function.name)
+            tool_names.append(t.function.name)
+            client_tool_schemas.append(t.model_dump(exclude_none=True, exclude={"guide"}))
+            if t.guide:
+                client_tool_prompts.append(t.guide)
+
     for name in mcp_client.server_tool_names:
-        if name not in tool_names:
+        if name not in client_tool_names:
             tool_names.append(name)
     # Always include session file tools (executed server-side via Platform API)
     for name in SESSION_FILE_TOOLS:
@@ -541,7 +583,8 @@ def _resolve_tool_names(request: ResponseRequest) -> List[str]:
     for name in AGENT_TOOLS:
         if name not in tool_names:
             tool_names.append(name)
-    return tool_names
+
+    return tool_names, client_tool_schemas, client_tool_names, client_tool_prompts
 
 
 @dataclass
@@ -552,6 +595,9 @@ class _LoopContext:
     model: str
     messages: List[Message]
     tool_names: List[str]
+    client_tool_schemas: List[dict] = field(default_factory=list)
+    client_tool_names: Set[str] = field(default_factory=set)
+    client_tool_prompts: List[str] = field(default_factory=list)
     total_usage: Usage = field(default_factory=Usage.zero)
     tool_call_count: int = 0
     output_items: list = field(default_factory=list)
@@ -617,9 +663,10 @@ class _AgentLoopRunner:
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             result = await agent_service.process_messages_with_tools(
                 messages=self.ctx.messages,
-                tool_names=self.ctx.tool_names,
                 session_id=self.ctx.session_id,
                 instructions=self._augmented_instructions(),
+                client_tool_schemas=self.ctx.client_tool_schemas,
+                client_tool_prompts=self.ctx.client_tool_prompts,
             )
             self.ctx.session_id = result.session_id
             if result.usage:
@@ -665,7 +712,10 @@ class _AgentLoopRunner:
         from app.config import AGENT_TOOLS, SESSION_FILE_TOOLS
 
         all_tool_calls = result.tool_calls or []
-        client_calls, server_calls = mcp_client.classify_tool_calls(all_tool_calls, self.ctx.session_id)
+        client_calls, server_calls = mcp_client.classify_tool_calls(
+            all_tool_calls, self.ctx.session_id,
+            client_tool_names=self.ctx.client_tool_names,
+        )
 
         unsupported = [
             tc
@@ -802,10 +852,10 @@ class _AgentLoopRunner:
 
         async for chunk in agent_service.stream_messages_with_tools(
             messages=self.ctx.messages,
-            tool_names=self.ctx.tool_names if use_tools else [],
             session_id=self.ctx.session_id,
             instructions=self.ctx.request.instructions,
-            use_tools=use_tools,
+            client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
+            client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
         ):
             delta = agent_service._extract_text(chunk.content) if chunk.content else ""
             if delta:
@@ -991,7 +1041,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             error=ErrorObject(type=ErrorType.INVALID_REQUEST, message="No input messages"),
         )
 
-    tool_names = _resolve_tool_names(request)
+    tool_names, client_tool_schemas, client_tool_names, client_tool_prompts = _resolve_tools(request)
 
     # Handle pending approval BEFORE _prepare_messages_for_session, because
     # the approval answer arrives as a tool-role message that
@@ -1034,6 +1084,9 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         model=model,
         messages=messages,
         tool_names=tool_names,
+        client_tool_schemas=client_tool_schemas,
+        client_tool_names=client_tool_names,
+        client_tool_prompts=client_tool_prompts,
         total_usage=approval_usage,
         tool_call_count=approval_tc_count,
         output_items=approval_output_items,

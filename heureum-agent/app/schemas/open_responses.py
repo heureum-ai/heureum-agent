@@ -262,10 +262,14 @@ class ToolDefinition(BaseModel):
     Attributes:
         type (Literal["function"]): Tool type discriminator.
         function (FunctionDefinition): The function specification.
+        guide (Optional[str]): System prompt guide text provided by the
+            client. Included in the system prompt but excluded from the
+            LLM tool schema.
     """
 
     type: Literal["function"] = "function"
     function: FunctionDefinition
+    guide: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -279,6 +283,7 @@ class ToolDefinition(BaseModel):
                     "description": values.get("description"),
                     "parameters": values.get("parameters"),
                 },
+                "guide": values.get("guide"),
             }
         return values
 

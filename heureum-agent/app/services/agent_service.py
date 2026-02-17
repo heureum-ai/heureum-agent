@@ -24,13 +24,24 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
+from app.services.notification_service import NOTIFY_USER_TOOL_SCHEMA
+from app.services.periodic_task_service import MANAGE_PERIODIC_TASK_TOOL_SCHEMA
+from app.services.session_file_schemas import SESSION_FILE_TOOL_SCHEMAS
+from app.services.todo_service import MANAGE_TODO_TOOL_SCHEMA
+
+# Server-only tool schemas — always bound to the LLM
+SERVER_TOOL_SCHEMAS = [
+    MANAGE_TODO_TOOL_SCHEMA,
+    MANAGE_PERIODIC_TASK_TOOL_SCHEMA,
+    NOTIFY_USER_TOOL_SCHEMA,
+    *SESSION_FILE_TOOL_SCHEMAS,
+]
 from app.schemas.open_responses import (
     InputTokenDetails,
     MessageRole,
     OutputTokenDetails,
     Usage,
 )
-from app.schemas.tool_schema import TOOL_SCHEMA_MAP
 from app.services.compaction import (
     CompactionSettings,
     prune_context_messages,
@@ -38,7 +49,9 @@ from app.services.compaction import (
 )
 from app.services.compaction.summarizer import compact_history
 from app.services.compaction.tokens import estimate_messages_tokens
+from app.services.error import LLMErrorClassifier
 from app.services.prompts.base import build_system_prompt
+from app.services.prompts.compaction import COMPACTION_PREFIX
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -169,73 +182,6 @@ def create_llm():
             temperature=settings.AGENT_TEMPERATURE,
             max_completion_tokens=settings.AGENT_MAX_TOKENS,
         )
-
-
-def _is_context_overflow_error(error: Exception) -> bool:
-    """Check whether an exception indicates a context window overflow.
-
-    Args:
-        error (Exception): The exception to inspect.
-
-    Returns:
-        bool: True if the error message matches a known overflow pattern.
-    """
-    msg = str(error).lower()
-    return any(
-        s in msg
-        for s in (
-            "context_length_exceeded",
-            "context window",
-            "maximum context length",
-            "token limit",
-            "too many tokens",
-            "request too large",
-            "content_too_large",
-            "max_tokens",
-            "string too long",
-            "prompt is too long",
-            "input too long",
-        )
-    )
-
-
-def _is_retryable_error(error: Exception) -> bool:
-    """Check whether an LLM error is transient and worth retrying.
-
-    Covers server errors (5xx), rate limits (429), and other transient
-    provider-side availability failures.
-
-    Args:
-        error (Exception): The exception to inspect.
-
-    Returns:
-        bool: True if the error is likely transient.
-    """
-    msg = str(error).lower()
-    retryable_patterns = (
-        "500",
-        "502",
-        "503",
-        "504",
-        "529",
-        "rate limit",
-        "rate_limit",
-        "429",
-        "overloaded",
-        "temporarily unavailable",
-        "internal server error",
-        "service unavailable",
-        "resource exhausted",
-        "resource_exhausted",
-        "deadline exceeded",
-    )
-    return any(s in msg for s in retryable_patterns)
-
-
-def _is_thought_signature_error(error: Exception) -> bool:
-    """Detect Gemini thought-signature validation failures."""
-    msg = str(error).lower()
-    return "thought signature" in msg and "not valid" in msg
 
 
 def _strip_tool_messages(lc_messages: list) -> tuple[list, bool]:
@@ -763,35 +709,48 @@ class AgentService:
                 exc_info=True,
             )
 
-    def _make_system_prompt(
+    def _prepare_prompt_and_tools(
         self,
-        tool_names: List[str],
         instructions: Optional[str] = None,
-    ) -> str:
-        """Build system prompt with optional instructions appended.
+        client_tool_prompts: Optional[List[str]] = None,
+        client_tool_schemas: Optional[List[dict]] = None,
+    ) -> tuple:
+        """Build system prompt and resolve tool schemas together.
+
+        Centralises prompt and tool-binding decisions so that future
+        dynamic-prompting logic (e.g. tool filtering, conditional guides)
+        can live in one place.
 
         Args:
-            tool_names (List[str]): Names of tools available to the agent.
             instructions (Optional[str]): Extra instructions to append
                 inside an ``<instructions>`` XML block.
+            client_tool_prompts (Optional[List[str]]): Guide texts from
+                clients for inclusion in the system prompt.
+            client_tool_schemas (Optional[List[dict]]): Client-provided
+                OpenAI-format tool schemas.
 
         Returns:
-            str: The assembled system prompt string.
+            tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
         """
         prompt = build_system_prompt(
-            tool_names=tool_names,
-            mcp_tools=self.mcp_tools,
+            client_tool_prompts=client_tool_prompts,
+            instructions=instructions,
         )
-        if instructions:
-            prompt += f"\n\n<instructions>\n{instructions}\n</instructions>"
-        return prompt
+
+        tools = list(client_tool_schemas or [])
+        # Server-only tools are always available
+        tools.extend(SERVER_TOOL_SCHEMAS)
+        if self.mcp_tools:
+            tools.extend(self.mcp_tools)
+
+        return prompt, tools
 
     def _build_lc_messages(
         self,
         history: List[Message],
         new_messages: List[Message],
-        tool_names: List[str],
         instructions: Optional[str] = None,
+        client_tool_prompts: Optional[List[str]] = None,
     ) -> list:
         """Build LangChain message list: [system] + [history] + [new].
 
@@ -801,30 +760,21 @@ class AgentService:
         Args:
             history (List[Message]): Previously stored session messages.
             new_messages (List[Message]): Messages from the current request.
-            tool_names (List[str]): Tool names for system prompt generation.
             instructions (Optional[str]): Extra instructions for the prompt.
+            client_tool_prompts (Optional[List[str]]): Guide texts from
+                clients for inclusion in the system prompt.
 
         Returns:
             list: Ordered list of LangChain message objects.
         """
-        lc_messages = [SystemMessage(content=self._make_system_prompt(tool_names, instructions))]
+        prompt, _ = self._prepare_prompt_and_tools(
+            instructions=instructions,
+            client_tool_prompts=client_tool_prompts,
+        )
+        lc_messages = [SystemMessage(content=prompt)]
         lc_messages.extend(self._to_lc_message(msg) for msg in history)
         lc_messages.extend(self._to_lc_message(msg) for msg in new_messages)
         return lc_messages
-
-    def _resolve_tool_schemas(self, tool_names: List[str]) -> list:
-        """Resolve tool names to OpenAI function-calling schemas.
-
-        Args:
-            tool_names (List[str]): Names of tools to look up.
-
-        Returns:
-            list: OpenAI-compatible function-calling schema dicts.
-        """
-        schemas = [TOOL_SCHEMA_MAP[n] for n in tool_names if n in TOOL_SCHEMA_MAP]
-        if self.mcp_tools:
-            schemas.extend(self.mcp_tools)
-        return schemas
 
     async def _call_llm(self, lc_messages: list, tools: list):
         """Invoke LLM, optionally with tool binding.
@@ -891,7 +841,7 @@ class AgentService:
         original_len = len(original_lc)
         kept_tail_len = 0
         for msg in history:
-            if msg.role == MessageRole.SYSTEM and msg.content.startswith("[compaction]"):
+            if msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX):
                 lc_result.append(self._to_lc_message(msg))
             else:
                 kept_tail_len += 1
@@ -902,7 +852,7 @@ class AgentService:
         else:
             # Fallback: convert all non-summary messages
             for msg in history:
-                if not (msg.role == MessageRole.SYSTEM and msg.content.startswith("[compaction]")):
+                if not (msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX)):
                     lc_result.append(self._to_lc_message(msg))
 
         self._lc_sessions[session_id] = lc_result
@@ -944,7 +894,7 @@ class AgentService:
             try:
                 history = await self._compact_session(session_id)
             except Exception as compact_err:
-                if _is_context_overflow_error(compact_err):
+                if LLMErrorClassifier.is_context_overflow(compact_err):
                     logger.warning("Compaction itself overflowed, skipping to truncation")
                     return (
                         self.get_history(session_id),
@@ -1029,10 +979,10 @@ class AgentService:
     async def _invoke_with_recovery(
         self,
         new_messages: List[Message],
-        tool_names: List[str],
         session_id: str,
-        use_tools: bool = False,
         instructions: Optional[str] = None,
+        client_tool_schemas: Optional[List[dict]] = None,
+        client_tool_prompts: Optional[List[str]] = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -1044,10 +994,12 @@ class AgentService:
 
         Args:
             new_messages (List[Message]): Messages for the current request.
-            tool_names (List[str]): Available tool names.
             session_id (str): Active session identifier.
-            use_tools (bool): Whether to bind tools to the LLM call.
             instructions (Optional[str]): Extra instructions for the prompt.
+            client_tool_schemas (Optional[List[dict]]): Client-provided tool
+                schemas.
+            client_tool_prompts (Optional[List[str]]): Guide texts from
+                clients for the system prompt.
 
         Returns:
             AIMessage: The successful LLM response.
@@ -1064,7 +1016,11 @@ class AgentService:
                 f"(minimum {settings.CONTEXT_WINDOW_HARD_MIN_TOKENS})"
             )
 
-        tools = self._resolve_tool_schemas(tool_names) if use_tools else []
+        prompt, tools = self._prepare_prompt_and_tools(
+            instructions=instructions,
+            client_tool_prompts=client_tool_prompts,
+            client_tool_schemas=client_tool_schemas,
+        )
         lc_new_messages = [self._to_lc_message(msg) for msg in new_messages]
         overflow_retries = 0
         truncation_attempted = False
@@ -1079,7 +1035,7 @@ class AgentService:
                 proactive_done = True
 
             self._ensure_lc_session(session_id)
-            lc_messages = [SystemMessage(content=self._make_system_prompt(tool_names, instructions))]
+            lc_messages = [SystemMessage(content=prompt)]
             lc_messages.extend(self._lc_sessions.get(session_id, []))
             lc_messages.extend(lc_new_messages)
             try:
@@ -1091,7 +1047,7 @@ class AgentService:
                 )
                 return await self._call_llm(lc_messages, tools)
             except Exception as e:
-                if _is_context_overflow_error(e):
+                if LLMErrorClassifier.is_context_overflow(e):
                     (
                         _,
                         overflow_retries,
@@ -1106,7 +1062,7 @@ class AgentService:
                         raise
                     continue
 
-                if _is_retryable_error(e) and not _is_thought_signature_error(e) and llm_retries < settings.MAX_LLM_RETRIES:
+                if LLMErrorClassifier.is_retryable(e) and not LLMErrorClassifier.is_thought_signature(e) and llm_retries < settings.MAX_LLM_RETRIES:
                     llm_retries += 1
                     delay = settings.LLM_RETRY_BASE_DELAY * (2 ** (llm_retries - 1))
                     logger.warning(
@@ -1311,7 +1267,6 @@ class AgentService:
         async with self._get_session_lock(session_id):
             response = await self._invoke_with_recovery(
                 messages,
-                [],
                 session_id,
                 instructions=instructions,
             )
@@ -1330,19 +1285,24 @@ class AgentService:
     async def process_messages_with_tools(
         self,
         messages: List[Message],
-        tool_names: List[str],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
+        client_tool_schemas: Optional[List[dict]] = None,
+        client_tool_prompts: Optional[List[str]] = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
         Args:
             messages (List[Message]): Input messages to send to the LLM.
-            tool_names (List[str]): Names of tools available for this call.
             session_id (Optional[str]): Session ID for history tracking.
                 A new session is created if None or unknown.
             instructions (Optional[str]): Extra instructions appended to
                 the system prompt.
+            client_tool_schemas (Optional[List[dict]]): Client-provided
+                OpenAI-format tool schemas. MCP tools are appended
+                automatically.
+            client_tool_prompts (Optional[List[str]]): Guide texts from
+                clients for the system prompt.
 
         Returns:
             LLMResult: A text result or tool call result with usage.
@@ -1352,10 +1312,10 @@ class AgentService:
         async with self._get_session_lock(session_id):
             response = await self._invoke_with_recovery(
                 messages,
-                tool_names,
                 session_id,
-                use_tools=True,
                 instructions=instructions,
+                client_tool_schemas=client_tool_schemas,
+                client_tool_prompts=client_tool_prompts,
             )
 
             usage = self._extract_usage(response)
@@ -1391,10 +1351,10 @@ class AgentService:
     async def stream_messages_with_tools(
         self,
         messages: List[Message],
-        tool_names: List[str],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
-        use_tools: bool = True,
+        client_tool_schemas: Optional[List[dict]] = None,
+        client_tool_prompts: Optional[List[str]] = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1403,16 +1363,23 @@ class AgentService:
 
         Args:
             messages: Input messages for the current request.
-            tool_names: Names of tools available for this call.
             session_id: Session ID for history tracking.
             instructions: Extra instructions for the system prompt.
-            use_tools: Whether to bind tools to the LLM call.
+            client_tool_schemas (Optional[List[dict]]): Client-provided
+                OpenAI-format tool schemas. MCP tools are appended
+                automatically.
+            client_tool_prompts (Optional[List[str]]): Guide texts from
+                clients for the system prompt.
 
         Yields:
             AIMessageChunk: Incremental response chunks.
         """
         session_id = await self._ensure_session(session_id)
-        tools = self._resolve_tool_schemas(tool_names) if use_tools else []
+        prompt, tools = self._prepare_prompt_and_tools(
+            instructions=instructions,
+            client_tool_prompts=client_tool_prompts,
+            client_tool_schemas=client_tool_schemas,
+        )
         lc_new = [self._to_lc_message(msg) for msg in messages]
         overflow_retries = 0
         truncation_attempted = False
@@ -1421,7 +1388,7 @@ class AgentService:
 
         while True:
             self._ensure_lc_session(session_id)
-            lc_messages = [SystemMessage(content=self._make_system_prompt(tool_names, instructions))]
+            lc_messages = [SystemMessage(content=prompt)]
             lc_messages.extend(self._lc_sessions.get(session_id, []))
             lc_messages.extend(lc_new)
 
@@ -1436,7 +1403,7 @@ class AgentService:
                     yield chunk
                 return
             except Exception as e:
-                if _is_context_overflow_error(e):
+                if LLMErrorClassifier.is_context_overflow(e):
                     (
                         _,
                         overflow_retries,

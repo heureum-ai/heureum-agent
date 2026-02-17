@@ -15,7 +15,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.config import ApprovalChoice, CLIENT_TOOLS, settings
+from app.config import ApprovalChoice, settings
 from app.services.prompts.base import NO_OUTPUT
 from app.services.tool_chain import ChainRule, ChainStep, ToolChainRegistry
 from app.models import Message, ToolCallInfo
@@ -282,11 +282,20 @@ class MCPClient:
         return tool_name in pending
 
     def classify_tool_calls(
-        self, tool_calls: List[ToolCallInfo], session_id: str
+        self, tool_calls: List[ToolCallInfo], session_id: str,
+        client_tool_names: Set[str] | None = None,
     ) -> Tuple[List[ToolCallInfo], List[ToolCallInfo]]:
-        """2-way classification: (client_calls, server_calls)."""
-        client_calls = [tc for tc in tool_calls if tc.name in CLIENT_TOOLS]
-        server_calls = [tc for tc in tool_calls if tc.name not in CLIENT_TOOLS]
+        """2-way classification: (client_calls, server_calls).
+
+        Args:
+            tool_calls: All tool calls from the LLM response.
+            session_id: Active session identifier.
+            client_tool_names: Names of client-side tools (from request).
+                Falls back to empty set if not provided.
+        """
+        names = client_tool_names or set()
+        client_calls = [tc for tc in tool_calls if tc.name in names]
+        server_calls = [tc for tc in tool_calls if tc.name not in names]
         return client_calls, server_calls
 
     def request_approval(

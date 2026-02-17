@@ -7,15 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from app.models import LLMResultType, Message
 from app.schemas.open_responses import MessageRole
-from app.schemas.tool_schema import TOOL_SCHEMA_MAP
+# TOOL_SCHEMA_MAP removed — use inline schema dicts in tests
 from app.config import settings
-from app.services.prompts.base import COMPACTION_PREFIX
+from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.agent_service import (
     AgentService,
-    _is_thought_signature_error,
     _strip_tool_messages,
-    _is_context_overflow_error,
 )
+from app.services.error import LLMErrorClassifier
 from app.services.compaction.settings import CompactionSettings
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -42,10 +41,9 @@ def _mock_tool_call(name="bash", args=None, call_id="call_1"):
 
 def _create_service(**kwargs) -> AgentService:
     """Instantiate an AgentService with a mocked LLM for unit testing."""
-    with patch("app.services.agent_service.ChatOpenAI") as mock_cls:
-        mock_llm = AsyncMock()
-        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-        mock_cls.return_value = mock_llm
+    mock_llm = AsyncMock()
+    mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+    with patch("app.services.agent_service.create_llm", return_value=mock_llm):
         svc = AgentService(**kwargs)
         svc.llm = mock_llm
         return svc
@@ -62,7 +60,7 @@ class TestIsContextOverflowError:
     def test_context_length_exceeded(self):
         """Verify detection of maximum context length error messages."""
         assert (
-            _is_context_overflow_error(
+            LLMErrorClassifier.is_context_overflow(
                 Exception("This model's maximum context length is 128000 tokens")
             )
             is True
@@ -70,108 +68,105 @@ class TestIsContextOverflowError:
 
     def test_too_many_tokens(self):
         """Verify detection of too many tokens error messages."""
-        assert _is_context_overflow_error(Exception("too many tokens")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("too many tokens")) is True
 
     def test_content_too_large(self):
         """Verify detection of content_too_large error messages."""
-        assert _is_context_overflow_error(Exception("content_too_large")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("content_too_large")) is True
 
     def test_max_tokens(self):
         """Verify detection of max_tokens exceeded error messages."""
-        assert _is_context_overflow_error(Exception("max_tokens exceeded")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("max_tokens exceeded")) is True
 
     def test_prompt_too_long(self):
         """Verify detection of prompt is too long error messages."""
-        assert _is_context_overflow_error(Exception("prompt is too long")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("prompt is too long")) is True
 
     def test_input_too_long(self):
         """Verify detection of input too long for model error messages."""
-        assert _is_context_overflow_error(Exception("input too long for model")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("input too long for model")) is True
 
     def test_string_too_long(self):
         """Verify detection of string too long error messages."""
-        assert _is_context_overflow_error(Exception("string too long")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("string too long")) is True
 
     def test_unrelated_error(self):
         """Verify that unrelated errors are not classified as overflow."""
-        assert _is_context_overflow_error(Exception("connection timeout")) is False
+        assert LLMErrorClassifier.is_context_overflow(Exception("connection timeout")) is False
 
 
 # ---------------------------------------------------------------------------
-# _make_system_prompt
+# _prepare_prompt_and_tools
 # ---------------------------------------------------------------------------
 
 
-class TestMakeSystemPrompt:
-    """Tests for system prompt construction via _make_system_prompt."""
+class TestPreparePromptAndTools:
+    """Tests for the unified prompt + tool resolution method."""
 
-    def test_without_instructions(self):
-        """Verify prompt includes tool names but omits instructions tag when none given."""
+    _BASH_SCHEMA = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
+    _ASK_SCHEMA = {"type": "function", "function": {"name": "ask_question", "description": "Ask", "parameters": {"type": "object"}}}
+
+    def test_prompt_without_instructions(self):
+        """Verify prompt includes identity but omits instructions tag when none given."""
         svc = _create_service()
-        prompt = svc._make_system_prompt(["bash"])
-        assert "bash" in prompt
+        prompt, tools = svc._prepare_prompt_and_tools()
+        assert "<identity>" in prompt
         assert "<instructions>" not in prompt
+        # Server-only tools are always included
+        server_names = {t["function"]["name"] for t in tools}
+        assert "manage_todo" in server_names
 
-    def test_with_instructions(self):
+    def test_prompt_with_instructions(self):
         """Verify custom instructions are wrapped in instructions tags."""
         svc = _create_service()
-        prompt = svc._make_system_prompt(["bash"], instructions="Be concise.")
+        prompt, _ = svc._prepare_prompt_and_tools(instructions="Be concise.")
         assert "<instructions>" in prompt
         assert "Be concise." in prompt
 
-    def test_mcp_tools_included(self):
-        """Verify MCP tool descriptions are included in the system prompt."""
-        mcp_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
-        svc = _create_service(mcp_tools=mcp_tools)
-        prompt = svc._make_system_prompt([])
-        assert "web_search" in prompt
-
-
-# ---------------------------------------------------------------------------
-# _resolve_tool_schemas
-# ---------------------------------------------------------------------------
-
-
-class TestResolveToolSchemas:
-    """Tests for resolving tool name strings into OpenAI-format schemas."""
-
-    def test_known_tools(self):
-        """Verify known tool names are resolved to their schemas."""
+    def test_client_tools_included(self):
+        """Verify client-provided tool guides are included in the system prompt."""
         svc = _create_service()
-        schemas = svc._resolve_tool_schemas(["bash", "ask_question"])
-        names = [s["function"]["name"] for s in schemas]
+        guides = ['<tool_guide name="bash">\nUse bash.\n</tool_guide>']
+        prompt, _ = svc._prepare_prompt_and_tools(client_tool_prompts=guides)
+        assert '<tool_guide name="bash">' in prompt
+
+    def test_no_client_schemas_returns_server_only(self):
+        """Verify no client schemas returns server-only tools."""
+        svc = _create_service()
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_todo" in names
+        assert "read_file" in names
+
+    def test_client_schemas_returned(self):
+        """Verify client schemas are passed through."""
+        svc = _create_service()
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[self._BASH_SCHEMA, self._ASK_SCHEMA],
+        )
+        names = [s["function"]["name"] for s in tools]
         assert "bash" in names
         assert "ask_question" in names
 
-    def test_unknown_tools_ignored(self):
-        """Verify unknown tool names are silently skipped."""
-        svc = _create_service()
-        schemas = svc._resolve_tool_schemas(["nonexistent", "bash"])
-        assert len(schemas) == 1
-        assert schemas[0]["function"]["name"] == "bash"
-
     def test_mcp_tools_appended(self):
-        """Verify MCP tool schemas are appended alongside built-in tools."""
+        """Verify MCP tool schemas are appended alongside client schemas."""
         mcp = [{"type": "function", "function": {"name": "mcp_tool"}}]
         svc = _create_service(mcp_tools=mcp)
-        schemas = svc._resolve_tool_schemas(["bash"])
-        names = [s["function"]["name"] for s in schemas]
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[self._BASH_SCHEMA],
+        )
+        names = [s["function"]["name"] for s in tools]
         assert "bash" in names
         assert "mcp_tool" in names
 
-    def test_empty(self):
-        """Verify an empty tool list returns an empty schema list."""
+    def test_empty_schemas_no_mcp(self):
+        """Verify an empty client schema list still includes server tools."""
         svc = _create_service()
-        assert svc._resolve_tool_schemas([]) == []
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        # Server tools always present, no MCP
+        assert "manage_todo" in names
+        assert len(tools) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +191,8 @@ class TestCallLlm:
         """Verify LLM is bound with tools before invocation when tools are provided."""
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("hi")
-        result = await svc._call_llm([MagicMock()], tools=[TOOL_SCHEMA_MAP["bash"]])
+        _dummy_schema = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}}}}
+        result = await svc._call_llm([MagicMock()], tools=[_dummy_schema])
         svc.llm.bind_tools.assert_called_once()
         assert result.content == "hi"
 
@@ -215,22 +211,24 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [Message(role=MessageRole.USER, content="hi")],
             [Message(role=MessageRole.USER, content="hello")],
-            ["bash"],
         )
         assert lc_msgs[0].type == "system"
 
     def test_no_inline_prompts(self):
-        """Verify inline tool-specific prompts are not injected into the system message."""
+        """Verify no hardcoded legacy tool prompts are injected."""
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            ["ask_question"],
         )
         system_content = lc_msgs[0].content
         assert "CRITICAL RULE" not in system_content
         assert "NEVER write a question mark" not in system_content
-        assert "ask_question" in system_content
+        # Server-side tool guides (todo, session_files, etc.) are always present;
+        # client-specific guides are only injected when provided via client_tool_prompts.
+        # Verify no client-tool-name-based injection happens by default.
+        assert '<tool_guide name="bash">' not in system_content
+        assert '<tool_guide name="ask_question">' not in system_content
 
     def test_compaction_summary_in_history(self):
         """Verify compaction summary is separated from the fresh system prompt."""
@@ -239,7 +237,7 @@ class TestPromptReconstruction:
             Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\nOld summary"),
             Message(role=MessageRole.USER, content="q"),
         ]
-        lc_msgs = svc._build_lc_messages(history, [], [])
+        lc_msgs = svc._build_lc_messages(history, [])
 
         # [0] = fresh system prompt, [1] = compaction summary, [2] = user
         assert COMPACTION_PREFIX not in lc_msgs[0].content
@@ -251,7 +249,6 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            [],
             instructions="Be concise.",
         )
         assert "Be concise." in lc_msgs[0].content
@@ -263,29 +260,8 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            [],
         )
         assert "<instructions>" not in lc_msgs[0].content
-
-    def test_mcp_tools_in_prompt(self):
-        """Verify MCP tool descriptions are embedded in the system prompt."""
-        mcp_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"query": {"type": "string", "description": "Search query"}},
-                        "required": ["query"],
-                    },
-                },
-            }
-        ]
-        svc = _create_service(mcp_tools=mcp_tools)
-        lc_msgs = svc._build_lc_messages([], [Message(role=MessageRole.USER, content="hi")], [])
-        assert "web_search" in lc_msgs[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +465,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_response("answer")
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="hi")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TEXT
         assert result.text == "answer"
@@ -505,7 +480,6 @@ class TestProcessMessagesWithTools:
         )
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="list files")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 1
@@ -521,7 +495,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_tool_call()
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="run ls")],
-            tool_names=["bash"],
         )
         assert len(svc.sessions[result.session_id]) == 0
 
@@ -532,7 +505,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_response("done")
         await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="hi")],
-            tool_names=["bash"],
             instructions="Be brief.",
         )
         call_args = svc.llm.ainvoke.call_args[0][0]
@@ -646,11 +618,11 @@ class TestToolMessageFallback:
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
         svc._maybe_proactive_compact = AsyncMock(return_value=None)
 
+        bash_schema = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
         resp = await svc._invoke_with_recovery(
             new_messages=[],
-            tool_names=["bash"],
             session_id=sid,
-            use_tools=True,
+            client_tool_schemas=[bash_schema],
         )
 
         assert resp.content == "Recovered from tool context"
@@ -692,15 +664,15 @@ class TestToolMessageFallback:
 
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
 
+        bash_schema = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
         with patch("app.services.agent_service.asyncio.sleep", new=AsyncMock()) as sleep_mock:
             resp = await svc._invoke_with_recovery(
                 new_messages=[],
-                tool_names=["bash"],
                 session_id=sid,
-                use_tools=True,
+                client_tool_schemas=[bash_schema],
             )
 
-        assert _is_thought_signature_error(Exception("Thought signature is not valid")) is True
+        assert LLMErrorClassifier.is_thought_signature(Exception("Thought signature is not valid")) is True
         assert resp.content == "ok"
         assert len(calls) == 2  # initial tools-bound + immediate no-tools fallback
         sleep_mock.assert_not_awaited()
@@ -804,7 +776,6 @@ class TestMultipleToolCalls:
         svc.llm.ainvoke.return_value = resp
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="run both")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 2

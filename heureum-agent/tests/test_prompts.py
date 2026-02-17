@@ -2,12 +2,11 @@
 
 """Unit tests for app.services.prompts.base module."""
 
-import pytest
-
-from app.services.prompts.base import COMPACTION_PREFIX, HARD_CLEAR_PLACEHOLDER
+from app.config import settings
+from app.services.prompts.base import HARD_CLEAR_PLACEHOLDER
+from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.prompts.base import (
     AGENT_IDENTITY_PROMPT,
-    _build_mcp_tools_prompt,
     build_system_prompt,
 )
 
@@ -20,129 +19,58 @@ class TestBuildSystemPrompt:
     """Tests for build_system_prompt()."""
 
     def test_default_includes_identity(self):
-        result = build_system_prompt(tool_names=[])
+        result = build_system_prompt()
         assert "<identity>" in result
         assert "Heureum Agent" in result
 
-    def test_no_tools_no_tool_guides(self):
-        result = build_system_prompt(tool_names=[])
-        assert "<tool_guide" not in result
+    def test_default_includes_all_sections(self):
+        result = build_system_prompt()
+        for tag in ["<safety>", "<response_style>", "<tool_usage>", "<conversation>", "<language>"]:
+            assert tag in result, f"Missing section: {tag}"
 
-    def test_ask_question_tool_included(self):
-        result = build_system_prompt(tool_names=["ask_question"])
-        assert '<tool_guide name="ask_question">' in result
+    def test_no_client_tools_no_client_guides(self):
+        """Without client_tool_prompts, no client-provided guides appear.
+        Server-side guides (todo, session_files, etc.) are always present."""
+        result = build_system_prompt()
+        # Server-side guides are always present
+        assert "manage_todo" in result or "session_file" in result.lower()
 
-    def test_bash_tool_included(self):
-        result = build_system_prompt(tool_names=["bash"])
+    def test_client_tools_included(self):
+        guides = ['<tool_guide name="bash">\nUse bash to run commands.\n</tool_guide>']
+        result = build_system_prompt(client_tool_prompts=guides)
         assert '<tool_guide name="bash">' in result
+        assert "Use bash to run commands." in result
 
-    def test_browser_tools_included(self):
-        result = build_system_prompt(tool_names=["browser_navigate"])
-        assert '<tool_guide name="browser">' in result
-
-    def test_browser_partial_match(self):
-        result = build_system_prompt(tool_names=["browser_click"])
-        assert '<tool_guide name="browser">' in result
-
-    def test_mcp_tools_appended(self):
-        mcp_tools = [
-            {
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {"properties": {}, "required": []},
-                }
-            }
+    def test_multiple_client_tools(self):
+        guides = [
+            '<tool_guide name="ask_question">\nAsk questions.\n</tool_guide>',
+            '<tool_guide name="bash">\nRun commands.\n</tool_guide>',
         ]
-        result = build_system_prompt(tool_names=[], mcp_tools=mcp_tools)
-        assert "<tooling>" in result
-        assert "web_search" in result
-
-    def test_multiple_tools(self):
-        mcp_tools = [
-            {
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {"properties": {}, "required": []},
-                }
-            }
-        ]
-        result = build_system_prompt(
-            tool_names=["ask_question", "bash", "browser_navigate"],
-            mcp_tools=mcp_tools,
-        )
+        result = build_system_prompt(client_tool_prompts=guides)
         assert '<tool_guide name="ask_question">' in result
         assert '<tool_guide name="bash">' in result
-        assert '<tool_guide name="browser">' in result
-        assert "<tooling>" in result
 
+    def test_ordering_static_before_dynamic(self):
+        """Static identity comes before dynamic tool guides."""
+        guides = ['<tool_guide name="bash">\nRun commands.\n</tool_guide>']
+        result = build_system_prompt(client_tool_prompts=guides)
+        identity_pos = result.index("<identity>")
+        guide_pos = result.index("<tool_guide")
+        assert identity_pos < guide_pos
 
-# ---------------------------------------------------------------------------
-# TestBuildMcpToolsPrompt
-# ---------------------------------------------------------------------------
+    def test_instructions_included(self):
+        result = build_system_prompt(instructions="Be concise.")
+        assert "<instructions>" in result
+        assert "Be concise." in result
 
-class TestBuildMcpToolsPrompt:
-    """Tests for _build_mcp_tools_prompt()."""
+    def test_no_instructions_no_tag(self):
+        result = build_system_prompt()
+        assert "<instructions>" not in result
 
-    def test_empty_returns_empty_string(self):
-        assert _build_mcp_tools_prompt([]) == ""
-
-    def test_single_tool_formatted(self):
-        tools = [
-            {
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {"properties": {}, "required": []},
-                }
-            }
-        ]
-        result = _build_mcp_tools_prompt(tools)
-        assert "<tooling>" in result
-        assert "**web_search**" in result
-        assert "Search the web" in result
-        assert "</tooling>" in result
-
-    def test_tool_with_parameters_and_required(self):
-        tools = [
-            {
-                "function": {
-                    "name": "fetch",
-                    "description": "Fetch a URL",
-                    "parameters": {
-                        "properties": {
-                            "url": {
-                                "type": "string",
-                                "description": "The URL to fetch",
-                            },
-                            "timeout": {
-                                "type": "integer",
-                                "description": "Timeout in seconds",
-                            },
-                        },
-                        "required": ["url"],
-                    },
-                }
-            }
-        ]
-        result = _build_mcp_tools_prompt(tools)
-        assert "url: string (required)" in result
-        assert "The URL to fetch" in result
-        assert "timeout: integer" in result
-        assert "(required)" not in result.split("timeout")[1].split("\n")[0] or "timeout: integer —" in result
-
-    def test_tool_without_description(self):
-        tools = [
-            {
-                "function": {
-                    "name": "noop",
-                    "parameters": {"properties": {}, "required": []},
-                }
-            }
-        ]
-        result = _build_mcp_tools_prompt(tools)
-        assert "**noop**" in result
+    def test_instructions_present(self):
+        result = build_system_prompt(instructions="Be concise.")
+        assert "<instructions>" in result
+        assert "Be concise." in result
 
 
 # ---------------------------------------------------------------------------
@@ -155,8 +83,8 @@ class TestPromptConstants:
     def test_identity_contains_app_name(self):
         assert "Heureum Agent" in AGENT_IDENTITY_PROMPT
 
-    def test_identity_contains_model(self):
-        assert "gpt-4o-mini" in AGENT_IDENTITY_PROMPT
+    def test_prompt_contains_model(self):
+        assert settings.AGENT_MODEL in AGENT_IDENTITY_PROMPT
 
     def test_compaction_prefix_value(self):
         assert COMPACTION_PREFIX == "[compaction] Previous conversation summary:"

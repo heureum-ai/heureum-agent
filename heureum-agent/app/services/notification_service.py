@@ -16,6 +16,32 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+NOTIFY_USER_TOOL_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "notify_user",
+        "description": (
+            "Send a push notification to the user. Use this to deliver results, "
+            "alerts, or updates directly to the user's devices. "
+            "Periodic tasks MUST call this at the end to report their results."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "title": {
+                    "type": "string",
+                    "description": "Notification title (short, descriptive)",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "Notification body with the detailed message or results",
+                },
+            },
+            "required": ["title", "body"],
+        },
+    },
+}
+
 
 class NotificationService:
     """Sends notifications via Platform API internal endpoint."""

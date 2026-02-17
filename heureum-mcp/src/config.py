@@ -55,6 +55,8 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_SEARCH_MODEL: str = "gpt-4o-mini-search-preview"
 
+    TAVILY_API_KEY: str = ""
+
     WEB_FETCH_MAX_LENGTH: int = 50000
     WEB_FETCH_TIMEOUT: float = 30.0
     WEB_FETCH_USER_AGENT: str = "HeureumMCP/0.1"

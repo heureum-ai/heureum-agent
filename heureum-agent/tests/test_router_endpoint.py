@@ -120,8 +120,10 @@ class TestCreateResponseText:
 
     async def test_text_response_no_tools(self, client, mock_svc):
         """A simple text request returns status=completed and the expected text."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hello!",
+        # Server-only tools are always present, so process_messages_with_tools is called
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="Hello!",
             session_id="test_session",
             usage=Usage.zero(),
         )
@@ -146,8 +148,9 @@ class TestCreateResponseText:
 
     async def test_session_id_in_metadata(self, client, mock_svc):
         """The response metadata includes the session_id."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="OK",
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="OK",
             session_id="my_session",
             usage=Usage.zero(),
         )
@@ -186,17 +189,9 @@ class TestCreateResponseToolCall:
         assert fc_items[0]["name"] == "ask_question"
 
     async def test_server_tool_execution(self, client, mock_svc, mock_mcp):
-        """A server tool is executed via mcp_client and the final text is returned."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculator",
-                    "description": "Do math",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        """A server (MCP) tool is executed via mcp_client and the final text is returned."""
+        # MCP tools are NOT in request.tools — they are discovered server-side
+        mock_mcp.server_tool_names = ["calculator"]
         # First call: LLM wants to invoke a server tool
         # Second call: LLM produces the final text answer
         mock_svc.process_messages_with_tools.side_effect = [
@@ -218,7 +213,7 @@ class TestCreateResponseToolCall:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "2"
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("calculate", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("calculate", tools=[]))
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "completed"
@@ -233,16 +228,8 @@ class TestCreateResponseToolCall:
 
     async def test_tool_call_with_result_in_output(self, client, mock_svc, mock_mcp):
         """Server tool call + result pairs appear as adjacent output items."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculator",
-                    "description": "Do math",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        # MCP tools are NOT in request.tools
+        mock_mcp.server_tool_names = ["calculator"]
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
                 type=LLMResultType.TOOL_CALL,
@@ -262,7 +249,7 @@ class TestCreateResponseToolCall:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "result text"
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("go", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("go", tools=[]))
         data = resp.json()
         # Server tool history is in metadata, not output
         tool_history = data["metadata"]["tool_history"]
@@ -281,16 +268,7 @@ class TestErrorHandling:
 
     async def test_not_implemented_tool(self, client, mock_svc, mock_mcp):
         """A tool with no executor returns status=failed, error type=server_error with code."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "unknown_tool",
-                    "description": "No executor",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        # unknown_tool is NOT a client tool (not in request.tools) — classified as server call
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
             tool_calls=[
@@ -299,10 +277,10 @@ class TestErrorHandling:
             session_id="s1",
             usage=Usage.zero(),
         )
-        # is_server_tool returns False, so _execute_tool raises NotImplementedError
+        # is_server_tool returns False, so classified as unsupported
         mock_mcp.is_server_tool.return_value = False
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("run it", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("run it", tools=[]))
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "failed"
@@ -311,7 +289,7 @@ class TestErrorHandling:
 
     async def test_server_error(self, client, mock_svc):
         """A general exception returns status=failed, error type=server_error."""
-        mock_svc.process_messages.side_effect = RuntimeError("kaboom")
+        mock_svc.process_messages_with_tools.side_effect = RuntimeError("kaboom")
 
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         assert resp.status_code == 200
@@ -336,10 +314,8 @@ class TestResponseStructure:
 
     async def test_response_has_required_fields(self, client, mock_svc):
         """The response JSON contains all required top-level fields."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
-            session_id="s1",
-            usage=Usage.zero(),
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         data = resp.json()
@@ -348,10 +324,8 @@ class TestResponseStructure:
 
     async def test_response_object_literal(self, client, mock_svc):
         """The 'object' field is always the literal string 'response'."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
-            session_id="s1",
-            usage=Usage.zero(),
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         data = resp.json()
@@ -359,10 +333,8 @@ class TestResponseStructure:
 
     async def test_usage_structure(self, client, mock_svc):
         """The usage object contains input_tokens, output_tokens, and total_tokens."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
-            session_id="s1",
-            usage=Usage.zero(),
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         usage = resp.json()["usage"]
@@ -401,6 +373,8 @@ class TestToolApproval:
 
     async def test_approval_tool_returns_ask_question(self, client, mock_svc, mock_mcp):
         """web_search triggers an ask_question approval instead of executing."""
+        # web_search is an MCP server tool, not in request.tools
+        mock_mcp.server_tool_names = ["web_search"]
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
             tool_calls=[
@@ -412,7 +386,7 @@ class TestToolApproval:
 
         resp = await client.post(
             ENDPOINT,
-            json=_tool_payload("search", tools=WEB_SEARCH_TOOLS, session_id="s1"),
+            json=_tool_payload("search", tools=[], session_id="s1"),
         )
         data = resp.json()
 
@@ -422,9 +396,10 @@ class TestToolApproval:
         assert fc_items[0]["name"] == "ask_question"
         args = json.loads(fc_items[0]["arguments"])
         assert "web_search" in args["question"]
-        assert ApprovalChoice.ALLOW_ONCE in args["choices"]
-        assert ApprovalChoice.ALWAYS_ALLOW in args["choices"]
-        assert ApprovalChoice.DENY in args["choices"]
+        choice_labels = [c["label"] for c in args["choices"]]
+        assert ApprovalChoice.ALLOW_ONCE.value in choice_labels
+        assert ApprovalChoice.ALWAYS_ALLOW.value in choice_labels
+        assert ApprovalChoice.DENY.value in choice_labels
 
         # Tool was NOT executed
         mock_mcp.call_tool.assert_not_called()
@@ -542,6 +517,7 @@ class TestToolApproval:
     async def test_auto_approved_tool_skips_approval(self, client, mock_svc, mock_mcp):
         """A tool in _auto_approved_tools is executed without asking."""
         mock_mcp._auto_approved_tools["s1"] = {"web_search"}
+        mock_mcp.server_tool_names = ["web_search"]
 
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
@@ -561,7 +537,7 @@ class TestToolApproval:
 
         resp = await client.post(
             ENDPOINT,
-            json=_tool_payload("go", tools=WEB_SEARCH_TOOLS, session_id="s1"),
+            json=_tool_payload("go", tools=[], session_id="s1"),
         )
         data = resp.json()
 

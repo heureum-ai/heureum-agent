@@ -16,7 +16,6 @@ from app.routers.agent import (
     _text_output,
     _tool_call_output,
 )
-from app.config import CLIENT_TOOLS
 from app.schemas.open_responses import (
     AssistantMessageItem,
     ErrorObject,
@@ -303,14 +302,3 @@ class TestBuildResponse:
 class TestConstants:
     def test_max_agent_iterations(self):
         assert settings.MAX_AGENT_ITERATIONS == 50
-
-    def test_client_tools(self):
-        assert CLIENT_TOOLS == {
-            "ask_question",
-            "bash",
-            "browser_navigate",
-            "browser_new_tab",
-            "browser_click",
-            "browser_type",
-            "browser_get_content",
-        }
