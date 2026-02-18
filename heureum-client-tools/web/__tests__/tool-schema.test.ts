@@ -85,12 +85,12 @@ describe('truncateAtWord', () => {
 // --- buildSnippet ---
 
 describe('buildSnippet', () => {
-  const outputPath = '/tmp/web_fetch_example_123.json'
+  const outputPath = '/tmp/fetch_example_123.json'
 
   it('builds header with metadata', () => {
     const parsed = { title: 'My Page', url: 'https://example.com', status: 200, total_length: 5000, text: '' }
     const result = buildSnippet(parsed, outputPath)
-    expect(result).toContain('[web_fetch] My Page')
+    expect(result).toContain('[fetch] My Page')
     expect(result).toContain('URL: https://example.com')
     expect(result).toContain('Status: 200 | 5000 chars')
     expect(result).toContain(`Saved to ${outputPath}`)
@@ -150,7 +150,7 @@ describe('buildSnippet', () => {
   it('uses Untitled as default title', () => {
     const parsed = { url: 'https://x.com', status: 200, total_length: 0 }
     const result = buildSnippet(parsed, outputPath)
-    expect(result).toContain('[web_fetch] Untitled')
+    expect(result).toContain('[fetch] Untitled')
   })
 })
 
@@ -164,13 +164,13 @@ describe('handleWebTool', () => {
   it('returns snippet with metadata for real fetch', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-test-'))
     try {
-      const result = await handleWebTool('web_fetch', {
+      const result = await handleWebTool('fetch', {
         url: 'https://example.com',
         working_directory: tmpDir,
         session_id: 'test-session',
       })
       expect(result.success).toBe(true)
-      expect(result.output).toContain('[web_fetch]')
+      expect(result.output).toContain('[fetch]')
       expect(result.output).toContain('URL: https://example.com')
       expect(result.output).toContain('Status: 200')
       expect(result.output).toContain('Saved to')
@@ -184,7 +184,7 @@ describe('handleWebTool', () => {
   it('saves JSON file to working directory', async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-test-'))
     try {
-      await handleWebTool('web_fetch', {
+      await handleWebTool('fetch', {
         url: 'https://example.com',
         working_directory: tmpDir,
         session_id: 'sid',
@@ -192,7 +192,7 @@ describe('handleWebTool', () => {
       const sessionDir = path.join(tmpDir, 'tmp', 'sid')
       const files = fs.readdirSync(sessionDir)
       expect(files.length).toBe(1)
-      expect(files[0]).toMatch(/^web_fetch_example_com_\d+\.json$/)
+      expect(files[0]).toMatch(/^fetch_example_com_\d+\.json$/)
 
       const saved = JSON.parse(fs.readFileSync(path.join(sessionDir, files[0]), 'utf-8'))
       expect(saved.url).toBe('https://example.com')
@@ -203,7 +203,7 @@ describe('handleWebTool', () => {
   })
 
   it('returns raw result when no working directory', async () => {
-    const result = await handleWebTool('web_fetch', { url: 'https://example.com' })
+    const result = await handleWebTool('fetch', { url: 'https://example.com' })
     expect(result.success).toBe(true)
     // Without workingDir, returns raw JSON
     const parsed = JSON.parse(result.output)
@@ -218,7 +218,7 @@ describe('handleWebTool', () => {
   })
 
   it('handles invalid URL gracefully', async () => {
-    const result = await handleWebTool('web_fetch', { url: 'not-a-url' })
+    const result = await handleWebTool('fetch', { url: 'not-a-url' })
     // webFetch may return success with error status or throw — either is acceptable
     expect(typeof result.success).toBe('boolean')
     expect(typeof result.output).toBe('string')

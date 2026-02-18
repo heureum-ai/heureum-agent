@@ -42,10 +42,10 @@ export function getToolDisplay(tc: ToolCallInfo): { action: string; detail?: str
     case 'grep':
     case 'find':
       return { action, detail: args.pattern ? String(args.pattern) : undefined };
-    case 'web_search':
+    case 'search':
     case 'tavily_search':
       return { action, detail: args.query ? String(args.query) : undefined };
-    case 'web_fetch':
+    case 'fetch':
       return { action, detail: args.url ? String(args.url) : undefined };
     case 'browser_navigate':
     case 'browser_new_tab':

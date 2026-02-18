@@ -1,6 +1,6 @@
 /**
  * Web ToolDefinition + handler for LLM tool binding.
- * 1 tool: web_fetch — fetch a URL and extract readable content.
+ * 1 tool: fetch — fetch a URL and extract readable content.
  *
  * working_directory and session_id are injected by the frontend at call time,
  * not specified by the LLM. They are hidden from the tool schema.
@@ -27,14 +27,14 @@ export interface ToolResult {
 
 const WEB_FETCH: ToolDefinition = {
   type: 'function',
-  name: 'web_fetch',
+  name: 'fetch',
   description:
     'Fetch a URL and extract its readable content. Returns a snippet (first ~1500 chars) directly in the tool response plus saves the full content as a JSON file. Includes SSRF protection and caching.',
   guide:
-    '<tool_guide name="web_research">\n'
-    + 'web_search returns brief snippets and URLs. Follow up with web_fetch to get actual page content.\n'
-    + 'Each web_fetch returns a ~1500 char snippet; use read or grep on the saved file for the full page.\n'
-    + 'Multiple web_fetch calls in the same turn run in parallel.\n'
+    '<tool_guide name="fetch_task">\n'
+    + 'mcp_web__search returns brief snippets and URLs. Follow up with fetch to get actual page content.\n'
+    + 'Each fetch returns a ~1500 char snippet; use read or grep on the saved file for the full page.\n'
+    + 'Multiple fetch calls in the same turn run in parallel.\n'
     + '</tool_guide>',
   parameters: {
     type: 'object',
@@ -93,7 +93,7 @@ export function buildSnippet(parsed: Record<string, unknown>, outputPath: string
   const totalLength = parsed.total_length ?? 0
 
   const header =
-    `[web_fetch] ${title}\n`
+    `[fetch] ${title}\n`
     + `URL: ${url}\n`
     + `Status: ${status} | ${totalLength} chars | Saved to ${outputPath}`
 
@@ -122,7 +122,7 @@ export async function handleWebTool(
   args: Record<string, unknown>
 ): Promise<ToolResult> {
   switch (toolName) {
-    case 'web_fetch': {
+    case 'fetch': {
       try {
         const url = args.url as string
         const workingDir = args.working_directory as string | undefined
@@ -136,7 +136,7 @@ export async function handleWebTool(
           headers: args.headers as Record<string, string> | undefined,
         })
 
-        // Build save path: {working_directory}/tmp/{session_id}/web_fetch_*.json
+        // Build save path: {working_directory}/tmp/{session_id}/fetch_*.json
         if (!workingDir) {
           return { success: true, output: result }
         }
@@ -147,7 +147,7 @@ export async function handleWebTool(
 
         const hostname = new URL(url).hostname.replace(/\./g, '_')
         const timestamp = Date.now()
-        const filename = `web_fetch_${hostname}_${timestamp}.json`
+        const filename = `fetch_${hostname}_${timestamp}.json`
         const outputPath = path.join(sessionDir, filename)
 
         fs.mkdirSync(sessionDir, { recursive: true })
@@ -161,7 +161,7 @@ export async function handleWebTool(
           return { success: true, output: `Saved to ${outputPath}` }
         }
       } catch (err: any) {
-        return { success: false, output: err.message || 'web_fetch failed' }
+        return { success: false, output: err.message || 'fetch failed' }
       }
     }
     default:
