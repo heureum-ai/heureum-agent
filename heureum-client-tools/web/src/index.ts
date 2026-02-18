@@ -2,7 +2,7 @@ export { webFetch } from './fetch.js'
 export {
   extractContent,
   htmlToMarkdown,
-  markdownToText,
+  htmlToText,
   fetchFirecrawl,
   type ExtractedContent,
   type ExtractMode,

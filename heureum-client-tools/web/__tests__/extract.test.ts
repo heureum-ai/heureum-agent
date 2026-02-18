@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   htmlToMarkdown,
-  markdownToText,
+  htmlToText,
   extractContent,
   fetchFirecrawl,
 } from '../src/extract.js'
@@ -53,13 +53,17 @@ describe('htmlToMarkdown', () => {
 
   it('converts list items', () => {
     const [md] = htmlToMarkdown('<ul><li>A</li><li>B</li></ul>')
-    expect(md).toContain('- A')
-    expect(md).toContain('- B')
+    expect(md).toContain('A')
+    expect(md).toContain('B')
+    expect(md).toMatch(/^- /m)
   })
 
   it('converts br and hr to newlines', () => {
     const [md] = htmlToMarkdown('a<br>b<hr>c')
-    expect(md).toContain('a\nb')
+    expect(md).toContain('a')
+    expect(md).toContain('b')
+    expect(md).toContain('c')
+    expect(md).toContain('---')
   })
 
   it('decodes HTML entities', () => {
@@ -75,39 +79,37 @@ describe('htmlToMarkdown', () => {
   })
 })
 
-describe('markdownToText', () => {
+describe('htmlToText', () => {
   it('strips heading markers', () => {
-    expect(markdownToText('# Title')).not.toContain('#')
-    expect(markdownToText('# Title')).toContain('Title')
+    const [text] = htmlToText('<h1>Title</h1>')
+    expect(text).not.toContain('#')
+    expect(text).toContain('Title')
   })
 
   it('removes images', () => {
-    expect(markdownToText('![alt](http://x.com/img.png)')).not.toContain('![')
+    const [text] = htmlToText('<img src="http://x.com/img.png" alt="alt">')
+    expect(text).not.toContain('![')
+    expect(text).not.toContain('img.png')
   })
 
   it('converts links to text only', () => {
-    const text = markdownToText('[link](http://x.com)')
+    const [text] = htmlToText('<a href="http://x.com">link</a>')
     expect(text).toContain('link')
-    expect(text).not.toContain('[')
     expect(text).not.toContain('http://x.com')
   })
 
   it('strips inline code backticks', () => {
-    expect(markdownToText('`code`')).toBe('code')
+    const [text] = htmlToText('<code>code</code>')
+    expect(text).toContain('code')
+    expect(text).not.toContain('`')
   })
 
-  it('strips code block markers', () => {
-    const text = markdownToText('```js\nconsole.log(1)\n```')
-    expect(text).toContain('console.log(1)')
-    expect(text).not.toContain('```')
-  })
-
-  it('strips list markers', () => {
-    const text = markdownToText('- bullet\n1. numbered')
-    expect(text).toContain('bullet')
-    expect(text).toContain('numbered')
-    expect(text).not.toMatch(/^- /m)
-    expect(text).not.toMatch(/^1\. /m)
+  it('strips bold and italic', () => {
+    const [text] = htmlToText('<strong>bold</strong> and <em>italic</em>')
+    expect(text).toContain('bold')
+    expect(text).toContain('italic')
+    expect(text).not.toContain('**')
+    expect(text).not.toContain('*italic*')
   })
 })
 

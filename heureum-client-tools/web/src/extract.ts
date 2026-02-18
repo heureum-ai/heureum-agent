@@ -1,7 +1,7 @@
 /**
  * Web fetch content extraction utilities.
  *
- * Provides HTML→Markdown conversion, plain text extraction, content truncation,
+ * Provides HTML→Markdown conversion (via Turndown), plain text extraction,
  * and Firecrawl fallback for content extraction.
  */
 
@@ -10,6 +10,7 @@ import https from 'node:https'
 
 import { Readability } from '@mozilla/readability'
 import { parseHTML } from 'linkedom'
+import TurndownService from 'turndown'
 
 import { settings } from './config.js'
 
@@ -21,26 +22,42 @@ export interface ExtractedContent {
   extractor: string
 }
 
+// ---------------------------------------------------------------------------
+// HTML / Markdown helpers (powered by Turndown)
+// ---------------------------------------------------------------------------
+
 /**
- * Decode common HTML entities.
+ * Create a pre-configured Turndown converter.
  */
-function decodeEntities(value: string): string {
-  value = value.replace(/&nbsp;/g, ' ')
-  value = value.replace(/&amp;/g, '&')
-  value = value.replace(/&quot;/g, '"')
-  value = value.replace(/&#39;/g, "'")
-  value = value.replace(/&lt;/g, '<')
-  value = value.replace(/&gt;/g, '>')
-  value = value.replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
-  value = value.replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
-  return value
+function makeTurndown(): TurndownService {
+  const td = new TurndownService({
+    headingStyle: 'atx',          // # Heading
+    hr: '---',
+    bulletListMarker: '-',
+    codeBlockStyle: 'fenced',
+    emDelimiter: '*',
+  })
+  // Remove script/style/noscript
+  td.remove(['script', 'style', 'noscript'])
+  return td
 }
 
 /**
- * Remove all HTML tags and decode entities.
+ * Strip all HTML tags and decode entities (for plain text extraction).
  */
 function stripTags(value: string): string {
-  return decodeEntities(value.replace(/<[^>]+>/g, ''))
+  // Use a minimal Turndown with everything stripped
+  const text = value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(parseInt(dec, 10)))
+  return normalizeWhitespace(text)
 }
 
 /**
@@ -55,85 +72,51 @@ function normalizeWhitespace(value: string): string {
 }
 
 /**
- * Convert HTML to Markdown, preserving links, headings, and lists.
+ * Convert HTML to Markdown using Turndown.
  *
  * Returns [markdownText, title].
  */
 export function htmlToMarkdown(html: string): [string, string | null] {
-  // Extract title
+  // Extract title before Turndown strips it
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  const title = titleMatch ? normalizeWhitespace(stripTags(titleMatch[1])) : null
+  const title = titleMatch ? stripTags(titleMatch[1]).trim() : null
 
-  let text = html
+  const td = makeTurndown()
+  let text = td.turndown(html)
 
-  // Remove script/style/noscript blocks
-  text = text.replace(/<script[\s\S]*?<\/script>/gi, '')
-  text = text.replace(/<style[\s\S]*?<\/style>/gi, '')
-  text = text.replace(/<noscript[\s\S]*?<\/noscript>/gi, '')
-
-  // Convert links: <a href="url">text</a> → [text](url)
-  text = text.replace(
-    /<a\s+[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
-    (_, href, body) => {
-      const cleaned = normalizeWhitespace(stripTags(body))
-      if (!cleaned) return href
-      return `[${cleaned}](${href})`
-    },
-  )
-
-  // Convert headings: <h1>text</h1> → # text
-  text = text.replace(
-    /<h([1-6])[^>]*>([\s\S]*?)<\/h\1>/gi,
-    (_, level, body) => {
-      const lvl = Math.max(1, Math.min(6, parseInt(level, 10)))
-      const prefix = '#'.repeat(lvl)
-      const cleaned = normalizeWhitespace(stripTags(body))
-      return `\n${prefix} ${cleaned}\n`
-    },
-  )
-
-  // Convert list items: <li>text</li> → - text
-  text = text.replace(
-    /<li[^>]*>([\s\S]*?)<\/li>/gi,
-    (_, body) => {
-      const cleaned = normalizeWhitespace(stripTags(body))
-      return cleaned ? `\n- ${cleaned}` : ''
-    },
-  )
-
-  // Convert breaks and block elements
-  text = text.replace(/<(br|hr)\s*\/?>/gi, '\n')
-  text = text.replace(
-    /<\/(p|div|section|article|header|footer|table|tr|ul|ol)>/gi,
-    '\n',
-  )
-
-  // Strip remaining tags and normalize
-  text = stripTags(text)
-  text = normalizeWhitespace(text)
+  // Collapse 3+ blank lines to 2
+  text = text.replace(/\n{3,}/g, '\n\n')
+  text = text.trim()
 
   return [text, title]
 }
 
 /**
- * Strip Markdown formatting to plain text.
+ * Convert HTML to plain text (no Markdown formatting).
+ *
+ * Returns [plainText, title].
  */
-export function markdownToText(markdown: string): string {
-  let text = markdown
-  // Remove images
-  text = text.replace(/!\[[^\]]*]\([^)]+\)/g, '')
-  // Convert links to just the label
-  text = text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1')
-  // Strip code blocks
-  text = text.replace(/```[\s\S]*?```/g, (m) => m.replace(/```[^\n]*\n?/g, ''))
-  // Strip inline code
-  text = text.replace(/`([^`]+)`/g, '$1')
-  // Strip heading markers
-  text = text.replace(/^#{1,6}\s+/gm, '')
-  // Strip list markers
-  text = text.replace(/^\s*[-*+]\s+/gm, '')
-  text = text.replace(/^\s*\d+\.\s+/gm, '')
-  return normalizeWhitespace(text)
+export function htmlToText(html: string): [string, string | null] {
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  const title = titleMatch ? stripTags(titleMatch[1]).trim() : null
+
+  // Convert to markdown first, then strip markdown formatting
+  const td = makeTurndown()
+  let text = td.turndown(html)
+
+  // Strip markdown formatting
+  text = text.replace(/!\[[^\]]*]\([^)]+\)/g, '')                     // images
+  text = text.replace(/\[([^\]]+)]\([^)]+\)/g, '$1')                 // links → text
+  text = text.replace(/```[\s\S]*?```/g, (m) => m.replace(/```[^\n]*\n?/g, ''))  // code blocks
+  text = text.replace(/`([^`]+)`/g, '$1')                             // inline code
+  text = text.replace(/^#{1,6}\s+/gm, '')                             // headings
+  text = text.replace(/^\s*[-*+]\s+/gm, '')                           // unordered lists
+  text = text.replace(/^\s*\d+\.\s+/gm, '')                           // ordered lists
+  text = text.replace(/(\*\*|__)(.*?)\1/g, '$2')                      // bold
+  text = text.replace(/(\*|_)(.*?)\1/g, '$2')                         // italic
+
+  text = normalizeWhitespace(text)
+  return [text, title]
 }
 
 /**
@@ -184,7 +167,7 @@ function extractHtml(
 
     let text: string
     if (extractMode === 'text') {
-      text = normalizeWhitespace(stripTags(article.content))
+      ;[text] = htmlToText(article.content)
     } else {
       ;[text] = htmlToMarkdown(article.content)
     }
@@ -200,8 +183,11 @@ function extractHtml(
 }
 
 function fallbackHtml(body: string, extractMode: ExtractMode): ExtractedContent {
-  const [mdText, title] = htmlToMarkdown(body)
-  const text = extractMode === 'text' ? markdownToText(mdText) : mdText
+  if (extractMode === 'text') {
+    const [text, title] = htmlToText(body)
+    return { title, text, extractor: 'html_fallback' }
+  }
+  const [text, title] = htmlToMarkdown(body)
   return { title, text, extractor: 'html_fallback' }
 }
 
