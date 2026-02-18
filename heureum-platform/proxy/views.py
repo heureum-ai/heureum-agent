@@ -124,7 +124,7 @@ def proxy_to_agent(request: Request) -> Response:
 
         for msg in input_messages:
             item_type = msg.get("type", "message")
-            if item_type in ("function_call", "function_call_output"):
+            if item_type == "function_call_output":
                 Message.objects.create(
                     session_id=session_id,
                     response=response_obj,
@@ -361,6 +361,25 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
 
     # Persist todo state captured from response.todo.updated SSE events
     if todo_state:
+        # If no text messages consumed per-item usage, attribute response-level
+        # cost to the todo_state so it remains visible in the UI.
+        todo_tokens = {}
+        if text_idx == 0:
+            usage = response_data.get("usage", {})
+            todo_input = usage.get("input_tokens", 0)
+            todo_output = usage.get("output_tokens", 0)
+            todo_total = usage.get("total_tokens", 0)
+            todo_input_cost, todo_output_cost = _calculate_cost(
+                todo_input, todo_output, pricing
+            )
+            todo_tokens = dict(
+                input_tokens=todo_input,
+                output_tokens=todo_output,
+                total_tokens=todo_total,
+                input_cost=todo_input_cost,
+                output_cost=todo_output_cost,
+                total_cost=todo_input_cost + todo_output_cost,
+            )
         Message.objects.create(
             session_id=session_id,
             response=response_obj,
@@ -368,6 +387,7 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
             role="assistant",
             content=todo_state,
             status="completed",
+            **todo_tokens,
         )
 
     # Response-level usage and pricing

@@ -13,7 +13,7 @@ import {
   fetchSessions,
   deleteSession,
   fetchSessionMessagesPage,
-  storeToolResults,
+
   checkPermission,
   setPermission,
   logPermissionDecision,
@@ -792,9 +792,6 @@ export default function ChatPage() {
             }
             return;
           }
-
-          // Store tool results directly in DB (ensures they persist for session reload)
-          storeToolResults(newSessionId, toolResults).catch(() => {});
 
           // Build follow-up input with tool results and recurse
           const followUpMessages: Message[] = [...allMessages];

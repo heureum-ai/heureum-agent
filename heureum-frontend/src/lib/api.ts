@@ -483,24 +483,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await apiClient.delete(`/api/v1/sessions/${sessionId}/`);
 }
 
-export async function storeToolResults(
-  sessionId: string,
-  results: FunctionToolResult[],
-): Promise<void> {
-  for (const result of results) {
-    try {
-      await apiClient.post('/api/v1/messages/', {
-        type: 'function_call_output',
-        role: 'tool',
-        status: 'completed',
-        content: result,
-        session_id: sessionId,
-      });
-    } catch {
-      // Best-effort storage, don't fail the main flow
-    }
-  }
-}
 
 export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
   // Fetch all pages of messages
