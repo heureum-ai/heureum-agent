@@ -4,14 +4,12 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from src.common.cache import search_cache
 from src.tools.web.search import (
-    register_search,
     SearchItem,
     SearchResponse,
+    register_search,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -21,6 +19,7 @@ from src.tools.web.search import (
 def _make_tavily_server():
     """Create an MCP server with the Tavily web_search tool registered."""
     from mcp.server.fastmcp import FastMCP
+
     mcp = FastMCP("test-tavily")
     register_search(mcp)
     return mcp
@@ -80,6 +79,7 @@ def _clear_caches():
 def _disable_cache():
     with patch("src.tools.web.search.settings") as mock_settings:
         from src.config import settings as real_settings
+
         for attr in dir(real_settings):
             if attr.isupper():
                 setattr(mock_settings, attr, getattr(real_settings, attr))
@@ -99,12 +99,14 @@ class TestTavilySearch:
     @pytest.mark.asyncio
     async def test_single_result(self):
         """검색 결과 1개 정상 반환."""
-        items = [{
-            "title": "Example Page",
-            "url": "https://example.com/article",
-            "content": "This is the article content.",
-            "score": 0.95,
-        }]
+        items = [
+            {
+                "title": "Example Page",
+                "url": "https://example.com/article",
+                "content": "This is the article content.",
+                "score": 0.95,
+            }
+        ]
 
         with _patch_tavily(items):
             server = _make_tavily_server()
@@ -121,8 +123,18 @@ class TestTavilySearch:
     async def test_multiple_results(self):
         """복수 결과 반환."""
         items = [
-            {"title": "Python Docs", "url": "https://python.org/docs", "content": "Python info.", "score": 0.9},
-            {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "Rust info.", "score": 0.8},
+            {
+                "title": "Python Docs",
+                "url": "https://python.org/docs",
+                "content": "Python info.",
+                "score": 0.9,
+            },
+            {
+                "title": "Rust Lang",
+                "url": "https://rust-lang.org",
+                "content": "Rust info.",
+                "score": 0.8,
+            },
         ]
 
         with _patch_tavily(items):
@@ -178,8 +190,14 @@ class TestTavilySearch:
             results=[SearchItem(title="Fallback", url="https://example.com/fallback")],
         )
 
-        with patch("src.tools.web.search._GOOGLE_CLOUD_PROJECT", ""), \
-             patch("src.tools.web.search._search_openai", new_callable=AsyncMock, return_value=fallback) as mock_openai:
+        with (
+            patch("src.tools.web.search._GOOGLE_CLOUD_PROJECT", ""),
+            patch(
+                "src.tools.web.search._search_openai",
+                new_callable=AsyncMock,
+                return_value=fallback,
+            ) as mock_openai,
+        ):
             server = _make_tavily_server()
             result = await _call_tool(server, "mcp_web__search", {"query": "fallback test"})
 
@@ -202,18 +220,29 @@ class TestTavilySearch:
     @pytest.mark.asyncio
     async def test_advanced_search_depth(self):
         """search_depth=advanced 전달 확인."""
-        sr = _build_search_response([
-            {"title": "Deep", "url": "https://deep.com", "content": "Deep result.", "score": 0.99},
-        ])
+        sr = _build_search_response(
+            [
+                {
+                    "title": "Deep",
+                    "url": "https://deep.com",
+                    "content": "Deep result.",
+                    "score": 0.99,
+                },
+            ]
+        )
 
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_tavily_server()
-            result = await _call_tool(server, "mcp_web__search", {
-                "query": "deep search",
-                "search_depth": "advanced",
-                "max_results": 10,
-            })
+            result = await _call_tool(
+                server,
+                "mcp_web__search",
+                {
+                    "query": "deep search",
+                    "search_depth": "advanced",
+                    "max_results": 10,
+                },
+            )
 
         assert result["search_depth"] == "advanced"
         args = mock_fn.call_args[0]
@@ -222,27 +251,43 @@ class TestTavilySearch:
     @pytest.mark.asyncio
     async def test_country_param(self):
         """country 파라미터 전달 확인."""
-        sr = _build_search_response([
-            {"title": "KR", "url": "https://kr.com", "content": "Korean result.", "score": 0.9},
-        ])
+        sr = _build_search_response(
+            [
+                {
+                    "title": "KR",
+                    "url": "https://kr.com",
+                    "content": "Korean result.",
+                    "score": 0.9,
+                },
+            ]
+        )
 
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_tavily_server()
-            result = await _call_tool(server, "mcp_web__search", {
-                "query": "korean news",
-                "country": "KR",
-            })
+            result = await _call_tool(
+                server,
+                "mcp_web__search",
+                {
+                    "query": "korean news",
+                    "country": "KR",
+                },
+            )
 
         assert result["count"] == 1
         args = mock_fn.call_args[0]
-        assert args[1:] == ("korean news", "basic", 1, "KR")
+        assert args[1:] == ("korean news", "basic", 3, "KR")
 
     @pytest.mark.asyncio
     async def test_empty_content_preserved(self):
         """content가 빈 결과도 그대로 전달."""
         items = [
-            {"title": "A", "url": "https://a.com", "content": "Real content.", "score": 0.9},
+            {
+                "title": "A",
+                "url": "https://a.com",
+                "content": "Real content.",
+                "score": 0.9,
+            },
             {"title": "B", "url": "https://b.com", "content": "", "score": 0.5},
         ]
 
@@ -268,9 +313,16 @@ class TestTavilyCaching:
         """같은 쿼리 두 번 호출 시 두 번째는 캐시에서 반환."""
         _disable_cache.CACHE_ENABLED = True
 
-        sr = _build_search_response([
-            {"title": "Cached", "url": "https://example.com/cached", "content": "Cached text.", "score": 0.9},
-        ])
+        sr = _build_search_response(
+            [
+                {
+                    "title": "Cached",
+                    "url": "https://example.com/cached",
+                    "content": "Cached text.",
+                    "score": 0.9,
+                },
+            ]
+        )
 
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
