@@ -17,12 +17,12 @@ Usage::
 
 Limitations:
     - bash_exec: Not supported (requires subprocess execution)
-    - grep_search: Not supported (requires ripgrep on local filesystem)
     - Image detection is based on file extension only (no magic-byte check)
 """
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import logging
 import mimetypes
@@ -67,6 +67,7 @@ class PlatformFileClient:
         self._cwd = cwd.rstrip("/")
         self._http = http_client or httpx.AsyncClient(timeout=30.0)
         self._owns_http = http_client is None
+        self._write_lock = asyncio.Lock()
 
     @property
     def _base_url(self) -> str:
@@ -114,16 +115,22 @@ class PlatformFileClient:
         Raises:
             RuntimeError: On API failure.
         """
-        resp = await self._http.post(
-            f"{self._base_url}/write/",
-            json={
-                "path": session_path,
-                "content": content,
-                "created_by": "agent",
-            },
-        )
+        async with self._write_lock:
+            resp = await self._http.post(
+                f"{self._base_url}/write/",
+                json={
+                    "path": session_path,
+                    "content": content,
+                    "created_by": "agent",
+                },
+            )
         if resp.status_code not in (200, 201):
-            detail = resp.json().get("error", resp.text) if resp.text else str(resp.status_code)
+            detail = str(resp.status_code)
+            if resp.text:
+                try:
+                    detail = resp.json().get("error", resp.text)
+                except Exception:
+                    detail = resp.text[:200]
             raise RuntimeError(f"Error writing file {session_path}: {detail}")
 
     async def delete_file(self, session_path: str) -> None:
@@ -407,7 +414,9 @@ class PlatformFindOperations:
                 # Check ignore patterns
                 skip = any(self._matches_pattern(file_path, ign) for ign in ignore)
                 if not skip:
-                    results.append(file_path)
+                    # Return absolute paths so FindTool can relativize correctly
+                    abs_path = f"{cwd}/{file_path}" if not file_path.startswith(cwd) else file_path
+                    results.append(abs_path)
                     if len(results) >= limit:
                         break
 
@@ -432,3 +441,166 @@ class PlatformDeleteOperations:
     async def delete_file(self, absolute_path: str) -> None:
         session_path = self._client.to_session_path(absolute_path)
         await self._client.delete_file(session_path)
+
+
+# ---------------------------------------------------------------------------
+# GrepOperations  (grep.py)
+# ---------------------------------------------------------------------------
+
+from .truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH
+
+
+async def _generate_grep_keywords(query: str) -> list[str] | None:
+    """Call Gemini to convert a search query into grep keywords."""
+    from src.config import settings
+    import json as _json
+
+    if not settings.GEMINI_API_KEY:
+        return None
+
+    try:
+        url = (
+            f"{settings.GEMINI_API_BASE_URL}/models/"
+            f"{settings.GEMINI_GREP_MODEL}:generateContent"
+        )
+        prompt = (
+            "Given the following search query, output a JSON array of grep "
+            "keywords to find relevant content in a saved web page. "
+            "Output ONLY the JSON array.\n\n"
+            f'Query: "{query}"'
+        )
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                url,
+                params={"key": settings.GEMINI_API_KEY},
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {"temperature": 0, "maxOutputTokens": 200},
+                },
+            )
+        if resp.status_code != 200:
+            logger.warning("Gemini grep keyword API error: %d", resp.status_code)
+            return None
+
+        text = resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
+        keywords = _json.loads(text)
+        if isinstance(keywords, list) and all(isinstance(k, str) for k in keywords):
+            return keywords
+    except Exception:
+        logger.warning("Failed to generate grep keywords via Gemini", exc_info=True)
+    return None
+
+
+class PlatformGrepOperations:
+    """Platform API implementation of grep search.
+
+    Unlike other Platform*Operations that implement a Protocol for
+    existing tool classes, this class performs the full search because
+    GrepTool.execute() depends on the ripgrep binary.
+    """
+
+    def __init__(self, client: PlatformFileClient) -> None:
+        self._client = client
+
+    # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _truncate_line(line: str, max_chars: int = GREP_MAX_LINE_LENGTH) -> str:
+        if len(line) <= max_chars:
+            return line
+        return line[:max_chars] + "... [truncated]"
+
+    @staticmethod
+    def _truncate_output(text: str, max_bytes: int = DEFAULT_MAX_BYTES) -> str:
+        encoded = text.encode("utf-8")
+        if len(encoded) <= max_bytes:
+            return text
+        # Truncate at byte boundary without splitting a line
+        truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
+        last_nl = truncated.rfind("\n")
+        if last_nl > 0:
+            truncated = truncated[:last_nl]
+        return truncated + "\n... [output truncated]"
+
+    # -- main search --------------------------------------------------------
+
+    async def search(
+        self,
+        pattern: str,
+        path: Optional[str] = None,
+        glob_pattern: Optional[str] = None,
+        context: int = 0,
+        limit: int = 100,
+    ) -> str:
+        """Search session files for *pattern* using Python ``re``.
+
+        Returns grep-style output: ``path:line_number: text``.
+        """
+        # Determine search prefix
+        prefix = ""
+        if path:
+            prefix = self._client.to_session_path(path)
+
+        # List files from Platform API
+        all_files = await self._client.list_files(prefix)
+
+        # Filter by glob pattern
+        if glob_pattern:
+            all_files = [
+                f for f in all_files
+                if fnmatch.fnmatch(f.get("path", ""), glob_pattern)
+                or fnmatch.fnmatch(os.path.basename(f.get("path", "")), glob_pattern)
+            ]
+
+        output_lines: List[str] = []
+        match_count = 0
+
+        for file_info in all_files:
+            if match_count >= limit:
+                break
+
+            file_path: str = file_info.get("path", "")
+            try:
+                content = await self._client.read_file(file_path)
+            except (FileNotFoundError, RuntimeError):
+                continue
+
+            lines = content.splitlines()
+            for line_idx, line_text in enumerate(lines):
+                if match_count >= limit:
+                    break
+
+                if pattern in line_text:
+                    match_count += 1
+                    line_num = line_idx + 1  # 1-indexed
+
+                    if context > 0:
+                        start = max(0, line_idx - context)
+                        end = min(len(lines), line_idx + context + 1)
+                        for ctx_idx in range(start, end):
+                            ctx_text = self._truncate_line(lines[ctx_idx])
+                            ctx_num = ctx_idx + 1
+                            if ctx_idx == line_idx:
+                                output_lines.append(
+                                    f"{file_path}:{ctx_num}: {ctx_text}"
+                                )
+                            else:
+                                output_lines.append(
+                                    f"{file_path}-{ctx_num}- {ctx_text}"
+                                )
+                    else:
+                        truncated = self._truncate_line(line_text)
+                        output_lines.append(
+                            f"{file_path}:{line_num}: {truncated}"
+                        )
+
+        if not output_lines:
+            return "No matches found."
+
+        result = "\n".join(output_lines)
+        return self._truncate_output(result)

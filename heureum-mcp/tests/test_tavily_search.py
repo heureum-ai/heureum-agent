@@ -107,7 +107,7 @@ class TestTavilySearch:
         assert result["results"][0]["url"] == "https://example.com/article"
         assert result["results"][0]["title"] == "Example Page"
         assert result["results"][0]["score"] == 0.95
-        assert "article content" in result["text"].lower()
+        assert result["results"][0]["content"] == "This is the article content."
 
     @pytest.mark.asyncio
     async def test_multiple_results(self):
@@ -137,7 +137,6 @@ class TestTavilySearch:
 
         assert result["count"] == 0
         assert result["results"] == []
-        assert result["text"] == "(no search results)"
 
     @pytest.mark.asyncio
     async def test_api_error_returns_json(self):
@@ -217,11 +216,11 @@ class TestTavilySearch:
 
         assert result["count"] == 1
         args = mock_fn.call_args[0]
-        assert args[1:] == ("korean news", "basic", 5, "KR")
+        assert args[1:] == ("korean news", "basic", 1, "KR")
 
     @pytest.mark.asyncio
-    async def test_empty_content_skipped(self):
-        """content가 빈 결과는 text 합침에서 제외."""
+    async def test_empty_content_preserved(self):
+        """content가 빈 결과도 그대로 전달."""
         tavily_resp = _build_tavily_response([
             {"title": "A", "url": "https://a.com", "content": "Real content.", "score": 0.9},
             {"title": "B", "url": "https://b.com", "content": "", "score": 0.5},
@@ -232,7 +231,8 @@ class TestTavilySearch:
             result = await _call_tool(server, "web_search", {"query": "test"})
 
         assert result["count"] == 2
-        assert "Real content" in result["text"]
+        assert result["results"][0]["content"] == "Real content."
+        assert result["results"][1]["content"] == ""
 
 
 # ===========================================================================

@@ -15,7 +15,6 @@ import httpx
 from mcp.server.fastmcp import FastMCP
 from src.common.cache import make_cache_key, search_cache
 from src.config import settings
-from src.common.content_safety import wrap_content
 
 logger = logging.getLogger(__name__)
 
@@ -95,22 +94,24 @@ def register_tavily_search(mcp: FastMCP) -> None:
     @mcp.tool(
         meta={
             "requires_approval": True,
+            "display_name": "Web Search",
         }
     )
     async def web_search(
         query: str,
         search_depth: str = "basic",
-        max_results: int = 5,
+        max_results: int = 1,
         country: Optional[str] = None,
     ) -> str:
         """Search the web for current information using Tavily.
 
-        Returns brief snippets and URLs. To get full page content, use
-        web_fetch on the most relevant URLs from the results.
+        Returns brief snippets and URLs. To get full page content, call
+        ``web_fetch`` on the most relevant URLs from the results. Choose
+        URLs selectively based on title and snippet — do not fetch all.
 
-        When researching a topic, call this tool multiple times in parallel with
-        diverse query keywords to cover different angles. Up to 3 parallel calls
-        are recommended for thorough results.
+        When researching a topic, call this tool multiple times in parallel
+        with diverse query keywords to cover different angles. Up to 3
+        parallel calls are recommended for thorough results.
 
         Args:
             query: The search query string. MUST include the 4-digit current
@@ -121,9 +122,9 @@ def register_tavily_search(mcp: FastMCP) -> None:
             country: Optional country for geo-relevant results. Accepts ISO code ("KR") or name ("south korea").
 
         Returns:
-            str: JSON string containing search result snippets, URLs with titles,
-                query metadata, and timing details. On error, returns a JSON
-                string with an error message.
+            str: JSON string containing search result snippets and URLs with
+                titles. Call ``web_fetch`` on relevant URLs to retrieve full
+                content. On error, returns a JSON string with an error message.
         """
         start = time.monotonic()
 
@@ -165,35 +166,22 @@ def register_tavily_search(mcp: FastMCP) -> None:
             }, ensure_ascii=False)
 
         tavily_results = tavily_data.get("results", [])
-        snippets = [r.get("content", "") for r in tavily_results if r.get("content")]
-        combined_text = "\n\n".join(snippets)
-
-        wrapped_text = wrap_content(
-            combined_text,
-            source="web_search",
-            source_url="tavily-search",
-        ) if combined_text else "(no search results)"
-
-        results = [
-            {
-                "title": r.get("title", ""),
-                "url": _strip_tracking_params(r.get("url", "")),
-                "score": r.get("score"),
-            }
-            for r in tavily_results
-        ]
+        for r in tavily_results:
+            if "url" in r:
+                r["url"] = _strip_tracking_params(r["url"])
 
         took_ms = int((time.monotonic() - start) * 1000)
 
         result = {
+            "instruction": "Call web_fetch on the most relevant URLs to retrieve full content. "
+                           "Then use read or grep on the returned session_file paths.",
             "query": query,
             "provider": "tavily",
             "search_depth": search_depth,
-            "count": len(results),
+            "count": len(tavily_results),
             "took_ms": took_ms,
             "cached": False,
-            "text": wrapped_text,
-            "results": results,
+            "results": tavily_results,
         }
 
         if settings.CACHE_ENABLED:

@@ -377,4 +377,6 @@ class TestPlatformFindOperations:
         results = await ops.glob("*", "/session", ["**/node_modules/**"], 100)
 
         assert len(results) == 1
-        assert results[0] == "src/main.py"
+        assert results[0] == "/session/src/main.py"
+
+

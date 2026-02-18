@@ -5,19 +5,27 @@
 Fetches a URL and extracts readable content using httpx + readability-lxml.
 Uses DNS-pinned transport with manual redirect handling for SSRF protection.
 Falls back to Firecrawl when primary extraction fails.
+
+When called with session context (via ``_meta``), the fetched content is
+automatically saved to the Platform DB so that filesystem tools (``read``,
+``find``, ``ls``) can access it within the same session.
 """
+import hashlib
 import json
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from src.common.cache import fetch_cache, make_cache_key
 from src.common.content_safety import wrap_and_truncate
 from src.common.security import SSRFError, fetch_with_ssrf_guard
+from src.common.session_context import extract_session_context, get_platform_client, SessionContext
 from src.config import settings
 from src.tools.web.fetch_utils import ExtractMode, extract_content, fetch_firecrawl
 
@@ -32,13 +40,14 @@ def register_web_fetch(mcp: FastMCP) -> None:
             tool with.
     """
 
-    @mcp.tool(meta={"requires_approval": True})
+    @mcp.tool(meta={"requires_approval": True, "display_name": "Web Fetch"})
     async def web_fetch(
         url: str,
         max_length: int = settings.WEB_FETCH_MAX_LENGTH,
         start_index: int = 0,
         extract_mode: str = "markdown",
         headers: Optional[dict] = None,
+        ctx: Context = None,
     ) -> str:
         """Fetch a web page and return its readable content. Always call this after web_search to retrieve full details from the returned URLs.
 
@@ -54,7 +63,10 @@ def register_web_fetch(mcp: FastMCP) -> None:
             str: JSON string containing the fetched content, metadata
                 (URL, status, content type, title), pagination info,
                 and timing details. On error, returns a JSON string
-                with an error message.
+                with an error message. When session context is present,
+                content is saved to platform and the ``text`` field is
+                replaced with a ``session_file`` path — use ``read``
+                or ``grep`` to view or search the saved content.
         """
         start = time.monotonic()
         mode: ExtractMode = "text" if extract_mode == "text" else "markdown"
@@ -76,6 +88,9 @@ def register_web_fetch(mcp: FastMCP) -> None:
         if headers:
             request_headers.update(headers)
 
+        # Resolve session context once for potential post-fetch save
+        session_ctx = extract_session_context(ctx) if ctx else None
+
         response: httpx.Response | None = None
         try:
             response = await fetch_with_ssrf_guard(
@@ -93,7 +108,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
             # Fallback 1: network / HTTP error → try Firecrawl
             fc_result = await fetch_firecrawl(url)
             if fc_result is not None:
-                return _build_result(
+                result_json = _build_result(
                     url=url,
                     final_url=url,
                     status_code=0,
@@ -108,6 +123,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
                     cache_key=cache_key if not has_custom_headers else None,
                     source_url=url,
                 )
+                return await _maybe_save_to_session(result_json, url, session_ctx)
 
             if isinstance(e, httpx.TimeoutException):
                 error_msg = f"Request timed out after {settings.WEB_FETCH_TIMEOUT}s"
@@ -125,7 +141,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
         if not response.is_success:
             fc_result = await fetch_firecrawl(url)
             if fc_result is not None:
-                return _build_result(
+                result_json = _build_result(
                     url=url,
                     final_url=url,
                     status_code=response.status_code,
@@ -140,6 +156,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
                     cache_key=cache_key if not has_custom_headers else None,
                     source_url=url,
                 )
+                return await _maybe_save_to_session(result_json, url, session_ctx)
 
             return json.dumps({
                 "error": f"HTTP {response.status_code}: {response.reason_phrase}",
@@ -164,7 +181,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
             if fc_result is not None:
                 extracted = fc_result
 
-        return _build_result(
+        result_json = _build_result(
             url=url,
             final_url=final_url,
             status_code=status_code,
@@ -179,6 +196,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
             cache_key=cache_key if not has_custom_headers else None,
             source_url=url,
         )
+        return await _maybe_save_to_session(result_json, url, session_ctx)
 
 
 def _build_result(
@@ -236,3 +254,59 @@ def _build_result(
         fetch_cache.set(cache_key, result)
 
     return json.dumps(result, ensure_ascii=False)
+
+
+def _make_session_path(url: str) -> str:
+    """Derive a session-file path from a URL.
+
+    Format: ``web_fetch/{domain}/{slug}-{hash4}.md``
+    """
+    parsed = urlparse(url)
+    domain = parsed.netloc or "unknown"
+    # Build a short slug from the path
+    path_part = parsed.path.strip("/").replace("/", "_") or "index"
+    # Truncate slug to keep paths reasonable
+    if len(path_part) > 60:
+        path_part = path_part[:60]
+    short_hash = hashlib.md5(url.encode()).hexdigest()[:4]
+    return f"web_fetch/{domain}/{path_part}-{short_hash}.md"
+
+
+async def _maybe_save_to_session(
+    result_json: str,
+    url: str,
+    session_ctx: Optional[SessionContext],
+) -> str:
+    """Save fetched content to storage and strip text from the result.
+
+    In session mode, content is saved to Platform DB.  Otherwise it is
+    written to a local file under ``FILESYSTEM_CWD``.  Either way, the
+    ``text`` field is replaced with a ``session_file`` path so the LLM
+    must use ``read`` to view the content.
+
+    On failure, logs a warning and returns the original result unchanged.
+    """
+    try:
+        data = json.loads(result_json)
+        if "error" in data or not data.get("text"):
+            return result_json
+
+        rel_path = _make_session_path(url)
+
+        if session_ctx:
+            client = get_platform_client(session_ctx)
+            await client.write_file(rel_path, data["text"])
+            data["session_file"] = f"/session/{rel_path}"
+        else:
+            local_path = os.path.join(settings.FILESYSTEM_CWD, rel_path)
+            os.makedirs(os.path.dirname(local_path), exist_ok=True)
+            with open(local_path, "w", encoding="utf-8") as f:
+                f.write(data["text"])
+            data["session_file"] = local_path
+
+        data.pop("text", None)
+        data["instruction"] = "Use read or grep on the session_file path to view or search the content."
+        return json.dumps(data, ensure_ascii=False)
+    except Exception:
+        logger.warning("Failed to save web_fetch content to storage", exc_info=True)
+        return result_json

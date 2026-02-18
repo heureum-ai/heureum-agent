@@ -138,8 +138,9 @@ class TestSearchThenFetch:
     """web_search 결과의 URL을 web_fetch로 가져오는 E2E 파이프라인."""
 
     @pytest.mark.asyncio
-    async def test_single_result_pipeline(self):
+    async def test_single_result_pipeline(self, tmp_path):
         """검색 결과 1개 → fetch 성공."""
+        tmp_path_str = str(tmp_path)
         tavily_resp = _build_tavily_response([
             {
                 "title": "Example Page",
@@ -162,12 +163,18 @@ class TestSearchThenFetch:
         url = search["results"][0]["url"]
         assert url == "https://example.com/article"
 
-        with _patch_fetch(httpx_resp):
+        with _patch_fetch(httpx_resp), patch("src.tools.web.fetch.settings") as mock_s:
+            mock_s.FILESYSTEM_CWD = tmp_path_str
+            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_TIMEOUT = 30
+            mock_s.WEB_FETCH_USER_AGENT = "test"
+            mock_s.CACHE_ENABLED = False
             fetch = await _call_tool(server, "web_fetch", {"url": url})
 
         assert fetch["status"] == 200
         assert fetch["title"] == "Example Page"
-        assert "full article content" in fetch["text"].lower()
+        assert "session_file" in fetch
+        assert "text" not in fetch
 
     @pytest.mark.asyncio
     async def test_multiple_results(self):
@@ -205,7 +212,6 @@ class TestWebSearch:
 
         assert result["count"] == 0
         assert result["results"] == []
-        assert result["text"] == "(no search results)"
 
     @pytest.mark.asyncio
     async def test_api_error_returns_json(self):
@@ -257,7 +263,7 @@ class TestWebSearch:
             result = await _call_tool(server, "web_search", {"query": "empty content test"})
 
         assert result["count"] == 1
-        assert result["text"] == "(no search results)"
+        assert result["results"][0]["content"] == ""
 
 
 # ===========================================================================
@@ -358,7 +364,7 @@ class TestWebFetch:
         assert result["length"] == 100
 
     @pytest.mark.asyncio
-    async def test_json_content_type(self):
+    async def test_json_content_type(self, tmp_path):
         """JSON content-type 응답 처리."""
         json_body = json.dumps({"key": "value", "nested": {"a": 1}})
         resp = _build_httpx_response(
@@ -368,11 +374,19 @@ class TestWebFetch:
         )
         server = _make_server()
 
-        with _patch_fetch(resp):
+        with _patch_fetch(resp), patch("src.tools.web.fetch.settings") as mock_s:
+            mock_s.FILESYSTEM_CWD = str(tmp_path)
+            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_TIMEOUT = 30
+            mock_s.WEB_FETCH_USER_AGENT = "test"
+            mock_s.CACHE_ENABLED = False
             result = await _call_tool(server, "web_fetch", {"url": "https://api.example.com/data"})
 
         assert result["content_type"] == "application/json"
-        assert "key" in result["text"]
+        assert "session_file" in result
+        # Verify content was saved to local file
+        with open(result["session_file"], encoding="utf-8") as f:
+            assert "key" in f.read()
 
     @pytest.mark.asyncio
     async def test_generic_exception(self):
@@ -476,21 +490,23 @@ class TestFirecrawlFallback:
         )
 
     @pytest.mark.asyncio
-    async def test_fallback_on_network_error(self):
+    async def test_fallback_on_network_error(self, tmp_path):
         """네트워크 에러 시 Firecrawl fallback 동작."""
         server = _make_server()
 
-        with _patch_fetch_error(httpx.ConnectError("Connection refused")):
-            with patch(
-                "src.tools.web.fetch.fetch_firecrawl",
-                new_callable=AsyncMock,
-                return_value=self._firecrawl_result(),
-            ):
-                result = await _call_tool(server, "web_fetch", {"url": "https://blocked.com"})
+        with _patch_fetch_error(httpx.ConnectError("Connection refused")), \
+             patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
+             patch("src.tools.web.fetch.settings") as mock_s:
+            mock_s.FILESYSTEM_CWD = str(tmp_path)
+            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_TIMEOUT = 30
+            mock_s.WEB_FETCH_USER_AGENT = "test"
+            mock_s.CACHE_ENABLED = False
+            result = await _call_tool(server, "web_fetch", {"url": "https://blocked.com"})
 
         assert result["extractor"] == "firecrawl"
         assert result["title"] == "Firecrawl Title"
-        assert "Firecrawl" in result["text"]
+        assert "session_file" in result
 
     @pytest.mark.asyncio
     async def test_fallback_on_http_500(self):
@@ -514,7 +530,7 @@ class TestFirecrawlFallback:
         assert result["extractor"] == "firecrawl"
 
     @pytest.mark.asyncio
-    async def test_fallback_on_empty_extraction(self):
+    async def test_fallback_on_empty_extraction(self, tmp_path):
         """Readability 추출이 비어있을 때 Firecrawl fallback 동작."""
         resp = _build_httpx_response(
             url="https://spa.com",
@@ -522,16 +538,18 @@ class TestFirecrawlFallback:
         )
         server = _make_server()
 
-        with _patch_fetch(resp):
-            with patch(
-                "src.tools.web.fetch.fetch_firecrawl",
-                new_callable=AsyncMock,
-                return_value=self._firecrawl_result(),
-            ):
-                result = await _call_tool(server, "web_fetch", {"url": "https://spa.com"})
+        with _patch_fetch(resp), \
+             patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
+             patch("src.tools.web.fetch.settings") as mock_s:
+            mock_s.FILESYSTEM_CWD = str(tmp_path)
+            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_TIMEOUT = 30
+            mock_s.WEB_FETCH_USER_AGENT = "test"
+            mock_s.CACHE_ENABLED = False
+            result = await _call_tool(server, "web_fetch", {"url": "https://spa.com"})
 
         assert result["extractor"] == "firecrawl"
-        assert "Firecrawl" in result["text"]
+        assert "session_file" in result
 
     @pytest.mark.asyncio
     async def test_no_fallback_when_firecrawl_disabled(self):
@@ -554,3 +572,19 @@ class TestFirecrawlFallback:
 
         assert "403" in result["error"]
         assert result["status"] == 403
+
+
+# ===========================================================================
+# 6. Chain metadata 검증
+# ===========================================================================
+
+class TestChainMetadata:
+    """web_search tool의 chain 메타데이터 구조 검증."""
+
+    def test_no_chain(self):
+        """web_search에 chain이 없어야 한다."""
+        server = _make_server()
+        tools = server._tool_manager._tools
+        meta = tools["web_search"].meta or {}
+        chain = meta.get("chain", [])
+        assert len(chain) == 0
