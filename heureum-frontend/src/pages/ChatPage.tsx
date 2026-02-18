@@ -50,6 +50,7 @@ import TodoProgress from '../components/TodoProgress';
 import FilePanel from '../components/FilePanel';
 import { useFileStore } from '../store/fileStore';
 import { fetchSessionFiles } from '../lib/api';
+import { getToolDisplay, FILE_MUTATION_TOOLS } from '../lib/tools';
 import './ChatPage.css';
 
 /* ── Helpers ── */
@@ -133,71 +134,7 @@ function ClockIcon() {
 
 /* ── Tool call block ── */
 
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  bash: 'Bash',
-  read_file: 'Read',
-  write_file: 'Write',
-  delete_file: 'Delete',
-  list_files: 'List Files',
-  browser_navigate: 'Navigate',
-  browser_new_tab: 'New Tab',
-  browser_click: 'Click',
-  browser_type: 'Type',
-  browser_get_content: 'Get Content',
-  ask_question: 'Question',
-  select_cwd: 'Select Directory',
-  manage_todo: 'Todo',
-  manage_periodic_task: 'Periodic Task',
-  notify_user: 'Notify',
-  get_device_info: 'Device Info',
-  get_sensor_data: 'Sensor Data',
-  get_contacts: 'Contacts',
-  get_location: 'Location',
-  take_photo: 'Photo',
-  send_notification: 'Notification',
-  get_clipboard: 'Clipboard',
-  set_clipboard: 'Clipboard',
-  send_sms: 'SMS',
-  share_content: 'Share',
-  trigger_haptic: 'Haptic',
-  open_url: 'Open URL',
-};
-
-function getToolDisplay(tc: ToolCallInfo): { action: string; detail?: string } {
-  const name = tc.toolName || '';
-  const args = tc.toolArgs || {};
-  const action = TOOL_DISPLAY_NAMES[name] || name || tc.command;
-
-  switch (name) {
-    case 'bash':
-      return { action, detail: tc.command };
-    case 'read_file':
-    case 'write_file':
-    case 'delete_file':
-      return { action, detail: args.path ? String(args.path) : undefined };
-    case 'list_files':
-      return { action, detail: args.path ? String(args.path) : 'all files' };
-    case 'browser_navigate':
-    case 'browser_new_tab':
-    case 'open_url':
-      return { action, detail: args.url ? String(args.url) : undefined };
-    case 'browser_click':
-    case 'browser_type':
-      return { action, detail: args.selector ? String(args.selector) : undefined };
-    case 'manage_periodic_task': {
-      const ptAction = args.action ? String(args.action) : '';
-      const ptTitle = args.title ? String(args.title) : '';
-      const detail = ptTitle ? `${ptAction}: ${ptTitle}` : ptAction;
-      return { action, detail: detail || undefined };
-    }
-    case 'notify_user':
-      return { action, detail: args.title ? String(args.title) : undefined };
-    default:
-      // Fallback: show command if no toolName
-      if (!name) return { action: tc.command };
-      return { action };
-  }
-}
+// TOOL_DISPLAY_NAMES, getToolDisplay, FILE_MUTATION_TOOLS → imported from lib/tools
 
 interface ParsedTaskData {
   type: 'single';
@@ -661,7 +598,7 @@ export default function ChatPage() {
               ? String(parsedArgs.command)
               : tc.name;
             const tcCost = event.usage?.total_cost;
-            const toolCallInfo: ToolCallInfo = { callId: tc.call_id, command: displayCmd, toolName: tc.name, toolArgs: parsedArgs, status: 'running', cost: tcCost };
+            const toolCallInfo: ToolCallInfo = { callId: tc.call_id, command: displayCmd, toolName: tc.name, toolArgs: parsedArgs, displayName: tc.display_name, status: 'running', cost: tcCost };
             collectedToolCalls.push(toolCallInfo);
             setActiveToolCalls([...collectedToolCalls]);
             break;
@@ -669,13 +606,26 @@ export default function ChatPage() {
           case 'response.tool_result.done': {
             // Match by call_id to update the correct tool call
             const match = collectedToolCalls.find((tc) => tc.callId === event.call_id);
+            const resultStatus = event.status === 'completed' ? 'completed' as const : 'failed' as const;
+            const resultOutput = event.output ? String(event.output) : undefined;
             if (match) {
-              match.status = event.status === 'completed' ? 'completed' : 'failed';
-              if (event.output) match.output = String(event.output);
+              match.status = resultStatus;
+              if (resultOutput) match.output = resultOutput;
               // Auto-refresh file panel when file tools complete
-              if (event.status === 'completed' && match.toolName && ['write_file', 'delete_file'].includes(match.toolName)) {
+              if (event.status === 'completed' && match.toolName && FILE_MUTATION_TOOLS.has(match.toolName)) {
                 const sid = req.session_id;
                 if (sid) fetchSessionFiles(sid).then((files) => useFileStore.getState().setFiles(files)).catch(() => {});
+              }
+            } else {
+              // Approval resume: tool was already persisted in messages — update it
+              useChatStore.getState().updateToolCallStatus(event.call_id, resultStatus, resultOutput);
+              if (event.status === 'completed') {
+                const msgs = useChatStore.getState().messages;
+                const tcMsg = msgs.find(m => m.toolCall?.callId === event.call_id);
+                if (tcMsg?.toolCall?.toolName && FILE_MUTATION_TOOLS.has(tcMsg.toolCall.toolName)) {
+                  const sid = req.session_id;
+                  if (sid) fetchSessionFiles(sid).then((files) => useFileStore.getState().setFiles(files)).catch(() => {});
+                }
               }
             }
             setActiveToolCalls([...collectedToolCalls]);
@@ -723,8 +673,8 @@ export default function ChatPage() {
             setSessionId(newSessionId);
             setCwd(getSessionCwd());
             setLoading(false);
+            loadSessions();
             if (isNewSession) {
-              loadSessions();
               generateSessionTitle(newSessionId)
                 .then((title) => {
                   setSessions(prev => prev.map(s =>
@@ -751,8 +701,8 @@ export default function ChatPage() {
 
           // Recurse for follow-up streaming request, including tool calls + results
           await handleStreamingSend(followUpMessages, newSessionId, [...toolCalls, ...toolResults]);
+          loadSessions();
           if (isNewSession) {
-            loadSessions();
             generateSessionTitle(newSessionId)
               .then((title) => {
                 setSessions(prev => prev.map(s =>
@@ -794,8 +744,8 @@ export default function ChatPage() {
       setSessionId(newSessionId);
       setLoading(false);
 
+      loadSessions();
       if (isNewSession) {
-        loadSessions();
         generateSessionTitle(newSessionId)
           .then((title) => {
             setSessions(prev => prev.map(s =>
@@ -824,6 +774,26 @@ export default function ChatPage() {
     const results: FunctionToolResult[] = [];
 
     for (const tc of toolCalls) {
+      // tool_approval — reuse existing PermissionPrompt + checkAndLogPermission
+      if (tc.name === 'tool_approval') {
+        const approvalArgs = JSON.parse(tc.arguments);
+        const toolName = approvalArgs.tool_name || 'tool';
+        const decision = await checkAndLogPermission(clientId, toolName, toolName, toolName, tc.call_id, currentSessionId);
+        if (decision === 'deny') {
+          const denyMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+          if (denyMatch) { denyMatch.status = 'failed'; denyMatch.output = 'Permission denied'; }
+          setActiveToolCalls([...collectedToolCalls]);
+          results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'User chose: Deny' });
+          continue;
+        }
+        const label = decision === 'always_allow' || decision === 'auto_approved' ? 'Always Allow' : 'Allow Once';
+        results.push({ type: 'function_call_output', call_id: tc.call_id, output: `User chose: ${label}` });
+        const aMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+        if (aMatch) { aMatch.status = 'completed'; }
+        setActiveToolCalls([...collectedToolCalls]);
+        continue;
+      }
+
       // ask_question — no permission needed
       if (tc.name === 'ask_question') {
         const qArgs = JSON.parse(tc.arguments);

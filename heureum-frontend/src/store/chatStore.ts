@@ -23,6 +23,7 @@ interface ChatState {
   clearMessages: () => void;
   loadSession: (sessionId: string, messages: Message[], cwd: string | null, hasOlderMessages?: boolean) => void;
   updateOrAddTodo: (todo: TodoState) => void;
+  updateToolCallStatus: (callId: string, status: 'completed' | 'failed', output?: string) => void;
   setHasOlderMessages: (v: boolean) => void;
   setLoadingOlder: (v: boolean) => void;
   setOldestLoadedPage: (p: number) => void;
@@ -58,6 +59,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       clearSessionCwd();
     }
     set({ messages, sessionId, cwd, streamingText: '', hasOlderMessages, oldestLoadedPage: 1 });
+  },
+  updateToolCallStatus: (callId, status, output) => {
+    const msgs = get().messages;
+    const idx = msgs.findIndex(m => m.toolCall?.callId === callId);
+    if (idx >= 0) {
+      const updated = [...msgs];
+      const tc = { ...msgs[idx].toolCall!, status, ...(output != null ? { output } : {}) };
+      updated[idx] = { ...msgs[idx], toolCall: tc };
+      set({ messages: updated });
+    }
   },
   updateOrAddTodo: (todo) => {
     const msgs = get().messages;

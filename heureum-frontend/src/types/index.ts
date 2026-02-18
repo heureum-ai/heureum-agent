@@ -36,6 +36,7 @@ export interface FunctionToolCall {
   name: string;
   arguments: string;
   status?: ItemStatus;
+  display_name?: string;
 }
 
 export interface FunctionToolResult {
@@ -50,6 +51,8 @@ export interface ToolDefinition {
   name: string;
   description?: string;
   parameters?: Record<string, any>;
+  guide?: string;
+  display_name?: string;
 }
 
 export type OutputItem = MessageItem | FunctionToolCall;
@@ -113,6 +116,7 @@ export interface ToolCallInfo {
   command: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
+  displayName?: string;
   output?: string;
   status: 'running' | 'completed' | 'failed';
   exitCode?: number;
