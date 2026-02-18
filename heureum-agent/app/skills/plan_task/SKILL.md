@@ -25,6 +25,8 @@ Step 2: For EACH step, you must call `update_step` TWICE — once before and onc
 ```
 a. manage_todo(action="update_step", step_index=N, status="in_progress")
 b. Execute the step (call the relevant tool).
+   - If the step requires user input or a decision, use the ask_question tool.
+   - Always use ask_question for user interaction instead of plain text.
 c. manage_todo(action="update_step", step_index=N, status="completed", result="brief result")
    Or if the step failed: status="failed", result="error description"
 ```
