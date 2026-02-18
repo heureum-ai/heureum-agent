@@ -601,6 +601,11 @@ export default function ChatPage() {
             const tc = event.item;
             // Skip manage_todo — shown via TodoProgress instead
             if (tc.name === 'manage_todo') break;
+            // Skip if this tool call already exists in messages (approval resume
+            // re-emits function_call.done for tools that were already persisted
+            // before the user approved them).
+            const existingMsgs = useChatStore.getState().messages;
+            if (existingMsgs.some(m => m.toolCall?.callId === tc.call_id)) break;
             let parsedArgs: Record<string, unknown> = {};
             try { parsedArgs = JSON.parse(tc.arguments); } catch { /* ignore */ }
             const displayCmd = tc.name === 'bash' && parsedArgs.command
