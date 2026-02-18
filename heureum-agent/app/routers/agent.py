@@ -36,7 +36,7 @@ from app.schemas.open_responses import (
     ResponseStatus,
     Usage,
 )
-from app.services.agent_service import AgentService
+from app.services.agent_service import AgentService, JudgeResult, build_tool_context, judge_response
 from app.services.providers.mcp import MCPClient
 from app.services.providers.skill import SkillProvider
 from app.services.providers.tool import ToolChainRegistry
@@ -675,7 +675,129 @@ class _LoopContext:
     total_usage: Usage = field(default_factory=Usage.zero)
     tool_call_count: int = 0
     output_items: list = field(default_factory=list)
+    eval_retry_count: int = 0
     cwd: str = ""
+
+
+@dataclass
+class _ToolCallRecord:
+    """A single tool call with its success/failure status."""
+    name: str
+    succeeded: bool
+
+
+class _LoopStateBuilder:
+    """Builds a <loop_progress> XML block for LLM loop-state awareness."""
+
+    @staticmethod
+    def _extract_recent_tools(output_items: list, limit: int = 5) -> list[_ToolCallRecord]:
+        """Extract recent tool call records from output items.
+
+        Walks backwards through output_items pairing FunctionToolCall with
+        its FunctionToolResult to determine success/failure.
+        """
+        records: list[_ToolCallRecord] = []
+        # Build call_id -> name mapping and result mapping
+        call_names: dict[str, str] = {}
+        result_status: dict[str, bool] = {}
+
+        for item in output_items:
+            if isinstance(item, FunctionToolCall) and item.call_id:
+                call_names[item.call_id] = item.name
+            elif isinstance(item, FunctionToolResult) and item.call_id:
+                output = item.output or ""
+                failed = (
+                    "Error executing tool '" in output
+                    or "[EMPTY_RESULT]" in output
+                    or output.startswith("Error:")
+                )
+                result_status[item.call_id] = not failed
+
+        # Collect in order, take last N
+        for item in output_items:
+            if isinstance(item, FunctionToolCall) and item.call_id:
+                succeeded = result_status.get(item.call_id, True)
+                records.append(_ToolCallRecord(name=item.name, succeeded=succeeded))
+
+        return records[-limit:]
+
+    @staticmethod
+    def build(
+        iteration: int,
+        max_iterations: int,
+        tool_call_count: int,
+        output_items: list,
+        total_usage: "Usage",
+    ) -> str:
+        """Build the <loop_progress> XML string for system prompt injection."""
+        recent = _LoopStateBuilder._extract_recent_tools(output_items)
+
+        lines = ["<loop_progress>"]
+        lines.append(f"  iteration: {iteration}/{max_iterations}")
+        lines.append(f"  tools_called: {tool_call_count}")
+
+        if recent:
+            lines.append("  recent_tools:")
+            for rec in recent:
+                status = "ok" if rec.succeeded else "FAILED"
+                lines.append(f"    - {rec.name}: {status}")
+
+        lines.append(
+            f"  tokens_used: in={total_usage.input_tokens} out={total_usage.output_tokens}"
+        )
+
+        remaining = max_iterations - iteration
+        if remaining <= 5:
+            lines.append(
+                f"  warning: only {remaining} iteration(s) remaining, prioritize completing the task"
+            )
+        if tool_call_count > 20:
+            lines.append(
+                "  note: high tool call count, consider whether you are making efficient progress"
+            )
+
+        lines.append("</loop_progress>")
+        return "\n".join(lines)
+
+
+# Prefixes used by skill retry guidance — not real user queries.
+_GUIDANCE_PREFIXES = (
+    "You tried to respond without finishing the plan",
+    "Continue the plan.",
+    "The previous response was inadequate",
+    "The user's original request:",
+)
+
+
+def _extract_last_user_query(session_id: str) -> str:
+    """Extract the most recent *real* user message from session history.
+
+    Skips injected retry guidance messages (skill or judge) so the judge
+    evaluates against the original user intent.
+    """
+    history = agent_service.get_history(session_id)
+    for msg in reversed(history):
+        if msg.role == MessageRole.USER and msg.content:
+            if any(msg.content.startswith(p) for p in _GUIDANCE_PREFIXES):
+                continue
+            return msg.content
+    return ""
+
+
+async def _judge_current_response(
+    llm,
+    session_id: str,
+    response_text: str,
+    output_items: list,
+) -> JudgeResult:
+    """Run LLM-as-judge on the current response.
+
+    Extracts user query from session history and builds tool context
+    from output_items, then delegates to the evaluation module.
+    """
+    user_query = _extract_last_user_query(session_id)
+    tool_ctx = build_tool_context(output_items)
+    return await judge_response(llm, user_query, response_text, tool_ctx)
 
 
 class _AgentLoopRunner:
@@ -732,9 +854,18 @@ class _AgentLoopRunner:
         """Return user-provided instructions (without runtime state)."""
         return self._original_instructions or None
 
-    def _get_state_prompts(self) -> list[str] | None:
-        """Return per-turn runtime state prompts from active skills."""
+    def _get_state_prompts(self, iteration: int = 1) -> list[str] | None:
+        """Return per-turn runtime state prompts from active skills + loop state."""
         prompts = skill_provider.get_state_prompts(self.ctx.session_id)
+        if prompts is None:
+            prompts = []
+        prompts.append(_LoopStateBuilder.build(
+            iteration=iteration,
+            max_iterations=settings.MAX_AGENT_ITERATIONS,
+            tool_call_count=self.ctx.tool_call_count,
+            output_items=self.ctx.output_items,
+            total_usage=self.ctx.total_usage,
+        ))
         return prompts or None
 
     async def _run_tool_iterations(self) -> ResponseObject:
@@ -745,7 +876,7 @@ class _AgentLoopRunner:
                 instructions=self._get_instructions(),
                 client_tool_schemas=self.ctx.client_tool_schemas,
                 client_tool_prompts=self.ctx.client_tool_prompts,
-                state_prompts=self._get_state_prompts(),
+                state_prompts=self._get_state_prompts(iteration=iteration),
             )
             self.ctx.session_id = result.session_id
             if result.usage:
@@ -766,6 +897,39 @@ class _AgentLoopRunner:
                         Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
                     ]
                     continue
+
+                # Priority 2: LLM-as-judge quality gate
+                if (
+                    settings.ENABLE_SELF_EVALUATION
+                    and self.ctx.tool_call_count > 0
+                    and self.ctx.eval_retry_count < settings.MAX_EVAL_RETRIES
+                ):
+                    judge_result = await _judge_current_response(
+                        llm=agent_service.llm,
+                        session_id=self.ctx.session_id,
+                        response_text=result.text or "",
+                        output_items=self.ctx.output_items,
+                    )
+                    if not judge_result.passed:
+                        self.ctx.eval_retry_count += 1
+                        failed_text = result.text or ""
+                        agent_service._append_to_history(
+                            self.ctx.session_id, self.ctx.messages, failed_text,
+                            usage=result.usage.model_dump() if result.usage else {},
+                        )
+                        user_query = _extract_last_user_query(self.ctx.session_id)
+                        guidance = judge_result.guidance or "The previous response was inadequate."
+                        retry_msg = (
+                            f"The user's original request: {user_query}\n\n"
+                            f"Your previous response was rejected: {failed_text[:500]}\n\n"
+                            f"Feedback: {guidance}\n\n"
+                            "Please try again with alternative approaches."
+                        )
+                        self.ctx.messages = [
+                            Message(role=MessageRole.USER, content=retry_msg),
+                        ]
+                        continue
+
                 return _build_response(
                     [_text_output(result.text)],
                     ResponseStatus.COMPLETED,
@@ -992,7 +1156,7 @@ class _AgentLoopRunner:
 
         yield _sse_done()
 
-    async def _stream_llm_and_accumulate(self, use_tools: bool = True):
+    async def _stream_llm_and_accumulate(self, use_tools: bool = True, iteration: int = 1):
         """Stream LLM chunks, yielding text deltas and returning accumulated result."""
         accumulated = None
 
@@ -1002,7 +1166,7 @@ class _AgentLoopRunner:
             instructions=self.ctx.request.instructions,
             client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
             client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
-            state_prompts=self._get_state_prompts(),
+            state_prompts=self._get_state_prompts(iteration=iteration),
         ):
             delta = agent_service._extract_text(chunk.content) if chunk.content else ""
             if delta:
@@ -1051,7 +1215,7 @@ class _AgentLoopRunner:
 
             accumulated = None
 
-            async for tag, value in self._stream_llm_and_accumulate(use_tools=True):
+            async for tag, value in self._stream_llm_and_accumulate(use_tools=True, iteration=iteration):
                 if tag == "delta":
                     yield _sse_event({"type": "response.output_text.delta", "delta": value})
                 elif tag == "done":
@@ -1077,9 +1241,42 @@ class _AgentLoopRunner:
                     self.ctx.messages = [
                         Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
                     ]
+                    yield _sse_event({"type": "response.output_text.abandoned", "reason": "unfinished_skill"})
                     continue
 
+                # Priority 2: LLM-as-judge quality gate
                 full_text = agent_service._extract_text(accumulated.content)
+                if (
+                    settings.ENABLE_SELF_EVALUATION
+                    and self.ctx.tool_call_count > 0
+                    and self.ctx.eval_retry_count < settings.MAX_EVAL_RETRIES
+                ):
+                    judge_result = await _judge_current_response(
+                        llm=agent_service.llm,
+                        session_id=self.ctx.session_id,
+                        response_text=full_text,
+                        output_items=self.ctx.output_items,
+                    )
+                    if not judge_result.passed:
+                        self.ctx.eval_retry_count += 1
+                        agent_service._append_to_history(
+                            self.ctx.session_id, self.ctx.messages, full_text,
+                            usage=usage.model_dump(), assistant_lc_message=accumulated,
+                        )
+                        user_query = _extract_last_user_query(self.ctx.session_id)
+                        guidance = judge_result.guidance or "The previous response was inadequate."
+                        retry_msg = (
+                            f"The user's original request: {user_query}\n\n"
+                            f"Your previous response was rejected: {full_text[:500]}\n\n"
+                            f"Feedback: {guidance}\n\n"
+                            "Please try again with alternative approaches."
+                        )
+                        self.ctx.messages = [
+                            Message(role=MessageRole.USER, content=retry_msg),
+                        ]
+                        yield _sse_event({"type": "response.output_text.abandoned", "reason": "judge_failed"})
+                        continue
+
                 agent_service._append_to_history(
                     self.ctx.session_id, self.ctx.messages, full_text,
                     usage=usage.model_dump(), assistant_lc_message=accumulated,

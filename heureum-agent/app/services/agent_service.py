@@ -13,13 +13,14 @@ This service provides single-call LLM invocation with:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
 import time
 import uuid
 from collections.abc import MutableMapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
@@ -40,6 +41,7 @@ from app.services.compaction.tokens import estimate_messages_tokens
 from app.services.error import LLMErrorClassifier
 from app.services.prompts.base import build_system_prompt
 from app.services.prompts.compaction import COMPACTION_PREFIX
+from app.services.prompts.evaluation import JUDGE_SYSTEM_PROMPT, JUDGE_USER_TEMPLATE
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
@@ -1450,3 +1452,101 @@ class AgentService:
                     if recovered:
                         continue
                 raise
+
+
+# ---------------------------------------------------------------------------
+# LLM-as-judge response quality evaluation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class JudgeResult:
+    """Result of the LLM-as-judge evaluation."""
+
+    passed: bool
+    guidance: Optional[str] = None
+
+
+def build_tool_context(output_items: list, limit: int = 10) -> str:
+    """Build a tool execution summary string from output_items.
+
+    Pairs FunctionToolCall with FunctionToolResult to show tool name,
+    arguments summary, and success/failure status.
+    """
+    from app.schemas.open_responses import FunctionToolCall, FunctionToolResult
+
+    call_info: dict[str, tuple[str, str]] = {}
+    result_info: dict[str, str] = {}
+
+    for item in output_items:
+        if isinstance(item, FunctionToolCall) and item.call_id:
+            args_str = item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments)
+            if len(args_str) > 80:
+                args_str = args_str[:77] + "..."
+            call_info[item.call_id] = (item.name, args_str)
+        elif isinstance(item, FunctionToolResult) and item.call_id:
+            result_info[item.call_id] = item.output or ""
+
+    if not call_info:
+        return "(no tools used)"
+
+    lines = ["Tools used:"]
+    entries = list(call_info.items())[-limit:]
+    for i, (call_id, (name, args_summary)) in enumerate(entries, 1):
+        output = result_info.get(call_id, "")
+        failed = (
+            "Error executing tool '" in output
+            or "[EMPTY_RESULT]" in output
+            or output.startswith("Error:")
+        )
+        status = "FAILED: " + output[:100] if failed else "ok"
+        lines.append(f"{i}. {name}({args_summary}) -> {status}")
+
+    return "\n".join(lines)
+
+
+async def judge_response(
+    llm,
+    user_query: str,
+    response_text: str,
+    tool_context: str,
+) -> JudgeResult:
+    """Evaluate response quality using LLM-as-judge."""
+    prompt_text = JUDGE_USER_TEMPLATE.format(
+        user_query=user_query,
+        tool_context=tool_context,
+        response_text=response_text,
+    )
+
+    messages = [
+        SystemMessage(content=JUDGE_SYSTEM_PROMPT),
+        HumanMessage(content=prompt_text),
+    ]
+
+    try:
+        response = await llm.ainvoke(messages)
+        return _parse_judge_response(response)
+    except Exception:
+        logger.warning("Judge LLM call failed, passing by default", exc_info=True)
+        return JudgeResult(passed=True)
+
+
+def _parse_judge_response(response) -> JudgeResult:
+    """Parse the judge LLM response into a JudgeResult.
+
+    Falls back to passed=True on any parse error (safe default).
+    """
+    content = response.content if hasattr(response, "content") else str(response)
+    if not content or not content.strip():
+        return JudgeResult(passed=True)
+
+    try:
+        data = json.loads(content.strip())
+        passed = bool(data.get("pass", True))
+        guidance = data.get("guidance")
+        if guidance and isinstance(guidance, str) and guidance.lower() == "null":
+            guidance = None
+        return JudgeResult(passed=passed, guidance=guidance)
+    except (json.JSONDecodeError, AttributeError, TypeError):
+        logger.warning("Judge response parse failed, passing by default: %s", content[:200])
+        return JudgeResult(passed=True)

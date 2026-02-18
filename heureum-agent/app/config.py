@@ -103,6 +103,10 @@ class Settings(BaseSettings):
     MAX_LLM_RETRIES: int = 2
     LLM_RETRY_BASE_DELAY: float = 1.0  # seconds, doubles each retry
 
+    # Self-evaluation (LLM-as-judge)
+    ENABLE_SELF_EVALUATION: bool = True
+    MAX_EVAL_RETRIES: int = 2  # max judge retry attempts per response
+
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
 
