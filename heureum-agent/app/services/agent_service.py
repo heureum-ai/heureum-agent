@@ -140,12 +140,14 @@ def create_llm():
     """
     model = settings.AGENT_MODEL
     if model.startswith("gemini"):
+        thinking_budget = settings.AGENT_THINKING_BUDGET or None
         if settings.GOOGLE_API_KEY:
             return ChatGoogleGenerativeAI(
                 model=model,
                 google_api_key=settings.GOOGLE_API_KEY,
                 temperature=settings.AGENT_TEMPERATURE,
                 max_output_tokens=settings.AGENT_MAX_TOKENS,
+                thinking_budget=thinking_budget,
             )
         # Vertex AI: ensure GOOGLE_APPLICATION_CREDENTIALS is visible to
         # google.auth.default() (pydantic-settings reads .env into its own
@@ -162,6 +164,7 @@ def create_llm():
             location=settings.GOOGLE_CLOUD_LOCATION,
             temperature=settings.AGENT_TEMPERATURE,
             max_output_tokens=settings.AGENT_MAX_TOKENS,
+            thinking_budget=thinking_budget,
         )
     else:
         return ChatOpenAI(

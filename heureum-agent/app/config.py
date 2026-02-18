@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     AGENT_MODEL: str = "gemini-3-flash-preview"
     AGENT_TEMPERATURE: float = 0.7
     AGENT_MAX_TOKENS: int = 32768
+    AGENT_THINKING_BUDGET: int = 1024  # Gemini 2.5: thinking token budget (0 = disabled)
 
     # Agent loop
     MAX_AGENT_ITERATIONS: int = 50
