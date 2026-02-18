@@ -156,6 +156,23 @@ export type QuestionAnswer = {
   type: 'cancelled';
 };
 
+// Sub-agent progress types
+export interface SubagentProgressStep {
+  toolName: string;
+  detail: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface SubagentProgress {
+  childSessionId: string;
+  task: string;
+  status: 'running' | 'completed' | 'failed' | 'timeout';
+  elapsedSeconds: number;
+  currentIteration?: number;
+  resultSummary?: string | null;
+  steps: SubagentProgressStep[];
+}
+
 // Legacy interfaces for backward compatibility
 export interface PeriodicRunInfo {
   taskId: string;
@@ -168,6 +185,7 @@ export interface Message {
   content: string;
   toolCall?: ToolCallInfo;
   todo?: TodoState;
+  subagentProgress?: SubagentProgress;
   question?: QuestionRequest;
   questionAnswer?: QuestionAnswer;
   cancelled?: 'permission' | 'question';

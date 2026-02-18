@@ -745,6 +745,35 @@ export async function checkSessionUpdates(
   return response.data;
 }
 
+export interface SubagentProgressStep {
+  tool_name: string;
+  detail: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface SubagentStatusItem {
+  child_session_id: string;
+  task: string;
+  status: string;
+  elapsed_seconds: number;
+  result_summary?: string | null;
+  current_iteration?: number;
+  progress?: SubagentProgressStep[];
+}
+
+export interface SubagentStatusResponse {
+  children: SubagentStatusItem[];
+}
+
+export async function fetchSubagentStatus(
+  sessionId: string,
+): Promise<SubagentStatusResponse> {
+  const response = await apiClient.get<SubagentStatusResponse>(
+    `/api/v1/subagent/status/${sessionId}/`,
+  );
+  return response.data;
+}
+
 export const chatAPI = {
   sendMessage: async (
     request: ChatRequest,

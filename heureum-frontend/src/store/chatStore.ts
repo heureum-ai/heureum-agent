@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import { create } from 'zustand';
-import type { Message, TodoState } from '../types';
+import type { Message, TodoState, SubagentProgress } from '../types';
 import { clearSessionCwd, setSessionCwd } from '../lib/api';
 
 interface ChatState {
@@ -23,6 +23,7 @@ interface ChatState {
   clearMessages: () => void;
   loadSession: (sessionId: string, messages: Message[], cwd: string | null, hasOlderMessages?: boolean) => void;
   updateOrAddTodo: (todo: TodoState) => void;
+  updateOrAddSubagentProgress: (progress: SubagentProgress) => void;
   updateToolCallStatus: (callId: string, status: 'completed' | 'failed', output?: string) => void;
   setHasOlderMessages: (v: boolean) => void;
   setLoadingOlder: (v: boolean) => void;
@@ -76,6 +77,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     // appears near the latest activity (like Claude Code's in-place update).
     const filtered = msgs.filter(m => m.todo == null);
     set({ messages: [...filtered, { role: 'assistant', content: '', todo }] });
+  },
+  updateOrAddSubagentProgress: (progress) => {
+    const msgs = get().messages;
+    const idx = msgs.findIndex(m => m.subagentProgress?.childSessionId === progress.childSessionId);
+    if (idx >= 0) {
+      const updated = [...msgs];
+      updated[idx] = { ...msgs[idx], subagentProgress: progress };
+      set({ messages: updated });
+    } else {
+      set({ messages: [...msgs, { role: 'assistant', content: '', subagentProgress: progress }] });
+    }
   },
   setHasOlderMessages: (v) => set({ hasOlderMessages: v }),
   setLoadingOlder: (v) => set({ isLoadingOlder: v }),
