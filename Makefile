@@ -20,7 +20,7 @@ help:
 	@echo "  make install-mcp          - Install heureum-mcp (MCP server)"
 	@echo "  make install-platform     - Install heureum-platform (Django)"
 	@echo "  make install-frontend     - Install heureum-frontend (React)"
-	@echo "  make install-client-tools  - Install & build heureum-client-tools/word"
+	@echo "  make install-client-tools  - Install & build heureum-client-tools (coding)"
 	@echo "  make install-client       - Install heureum-client (Electron)"
 	@echo "  make install-mobile       - Install heureum-mobile (Expo)"
 	@echo ""
@@ -100,11 +100,12 @@ install-frontend:
 install-client-tools:
 	@echo "Installing and building heureum-client-tools..."
 	cd heureum-client-tools/coding && pnpm install && pnpm build
-	cd heureum-client-tools/word && pnpm install && pnpm build
-	cd heureum-client-tools/pdf && pnpm install && pnpm build
-	cd heureum-client-tools/ppt && pnpm install && pnpm build
-	cd heureum-client-tools/xlsx && pnpm install && pnpm build
-	cd heureum-client-tools/web && pnpm install && pnpm build
+	# TODO: document tools temporarily excluded
+	# cd heureum-client-tools/word && pnpm install && pnpm build
+	# cd heureum-client-tools/pdf && pnpm install && pnpm build
+	# cd heureum-client-tools/ppt && pnpm install && pnpm build
+	# cd heureum-client-tools/xlsx && pnpm install && pnpm build
+	# cd heureum-client-tools/web && pnpm install && pnpm build
 
 install-client: install-client-tools
 	@echo "Installing heureum-client dependencies..."
@@ -122,7 +123,7 @@ dev-mcp:
 	cd heureum-mcp && poetry run python -m src.main
 
 dev-platform:
-	cd heureum-platform && poetry run python manage.py runserver
+	cd heureum-platform && poetry run python manage.py runserver 8001
 
 dev-frontend:
 	cd heureum-frontend && pnpm dev
@@ -169,11 +170,12 @@ build-frontend:
 
 build-client-tools:
 	cd heureum-client-tools/coding && pnpm build
-	cd heureum-client-tools/word && pnpm build
-	cd heureum-client-tools/pdf && pnpm build
-	cd heureum-client-tools/ppt && pnpm build
-	cd heureum-client-tools/xlsx && pnpm build
-	cd heureum-client-tools/web && pnpm build
+	# TODO: document tools temporarily excluded
+	# cd heureum-client-tools/word && pnpm build
+	# cd heureum-client-tools/pdf && pnpm build
+	# cd heureum-client-tools/ppt && pnpm build
+	# cd heureum-client-tools/xlsx && pnpm build
+	# cd heureum-client-tools/web && pnpm build
 
 build-client: build-client-tools
 	cd heureum-client && pnpm build
@@ -245,18 +247,21 @@ clean:
 	rm -rf heureum-mcp/dist heureum-mcp/.pytest_cache heureum-mcp/__pycache__
 	rm -rf heureum-platform/dist heureum-platform/.pytest_cache heureum-platform/__pycache__
 	rm -rf heureum-frontend/dist heureum-frontend/node_modules/.vite
-	rm -rf heureum-client-tools/coding/dist heureum-client-tools/word/dist heureum-client-tools/pdf/dist heureum-client-tools/ppt/dist heureum-client-tools/xlsx/dist heureum-client-tools/web/dist
+	rm -rf heureum-client-tools/coding/dist
+	# TODO: document tools temporarily excluded
+	# rm -rf heureum-client-tools/word/dist heureum-client-tools/pdf/dist heureum-client-tools/ppt/dist heureum-client-tools/xlsx/dist heureum-client-tools/web/dist
 	rm -rf heureum-client/dist heureum-client/out heureum-client/release heureum-client/node_modules/.vite
 	@echo "✓ Clean complete"
 
 clean-node-modules:
 	@echo "Removing node_modules..."
 	rm -rf heureum-client-tools/coding/node_modules
-	rm -rf heureum-client-tools/word/node_modules
-	rm -rf heureum-client-tools/pdf/node_modules
-	rm -rf heureum-client-tools/ppt/node_modules
-	rm -rf heureum-client-tools/xlsx/node_modules
-	rm -rf heureum-client-tools/web/node_modules
+	# TODO: document tools temporarily excluded
+	# rm -rf heureum-client-tools/word/node_modules
+	# rm -rf heureum-client-tools/pdf/node_modules
+	# rm -rf heureum-client-tools/ppt/node_modules
+	# rm -rf heureum-client-tools/xlsx/node_modules
+	# rm -rf heureum-client-tools/web/node_modules
 	rm -rf heureum-frontend/node_modules
 	rm -rf heureum-client/node_modules
 	@echo "✓ node_modules removed — run 'make install' to reinstall"
