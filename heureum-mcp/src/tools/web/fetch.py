@@ -284,7 +284,7 @@ def register_web_fetch(mcp: FastMCP) -> None:
             tool with.
     """
 
-    @mcp.tool(name="fetch", meta={"requires_approval": True, "display_name": "Web Fetch"})
+    @mcp.tool(name="mcp_web__fetch", meta={"requires_approval": True, "display_name": "Web Fetch"})
     async def web_fetch(
         url: str,
         max_length: int = settings.WEB_FETCH_MAX_LENGTH,

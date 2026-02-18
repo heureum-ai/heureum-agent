@@ -65,7 +65,7 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
     delete_tool = DeleteTool(cwd)
 
     # ── bash ────────────────────────────────────────────────
-    @mcp.tool(name="bash", meta={"requires_approval": True, "display_name": "Bash"})
+    @mcp.tool(name="mcp_filesystem__bash", meta={"requires_approval": True, "display_name": "Bash"})
     async def _bash(
         command: str,
         timeout: Optional[int] = None,
@@ -93,7 +93,7 @@ prefer 'bash' instead.
         return result.content[0]["text"]
 
     # ── read ────────────────────────────────────────────────
-    @mcp.tool(name="read", meta={"display_name": "Read"})
+    @mcp.tool(name="mcp_filesystem__read", meta={"display_name": "Read"})
     async def _read(
         path: str,
         offset: Optional[int] = None,
@@ -126,7 +126,7 @@ truncated to 2000 lines or 50 KB; use offset/limit for large files.
         return "\n".join(texts)
 
     # ── write ───────────────────────────────────────────────
-    @mcp.tool(name="write", meta={"requires_approval": True, "display_name": "Write"})
+    @mcp.tool(name="mcp_filesystem__write", meta={"requires_approval": True, "display_name": "Write"})
     async def _write(
         path: str,
         content: str,
@@ -155,7 +155,7 @@ the user's local filesystem, prefer 'write' instead.
         return result.content[0]["text"]
 
     # ── edit ────────────────────────────────────────────────
-    @mcp.tool(name="edit", meta={"requires_approval": True, "display_name": "Edit"})
+    @mcp.tool(name="mcp_filesystem__edit", meta={"requires_approval": True, "display_name": "Edit"})
     async def _edit(
         path: str,
         old_text: str,
@@ -186,7 +186,7 @@ prefer 'edit' instead.
         return result.content[0]["text"]
 
     # ── grep ────────────────────────────────────────────────
-    @mcp.tool(name="grep", meta={"display_name": "Grep"})
+    @mcp.tool(name="mcp_filesystem__grep", meta={"display_name": "Grep"})
     async def _grep(
         pattern: str,
         path: Optional[str] = None,
@@ -263,7 +263,7 @@ For the user's local files, prefer 'grep' instead.
         return result.content[0]["text"]
 
     # ── find ────────────────────────────────────────────────
-    @mcp.tool(name="find", meta={"display_name": "Find"})
+    @mcp.tool(name="mcp_filesystem__find", meta={"display_name": "Find"})
     async def _find(
         pattern: str,
         path: Optional[str] = None,
@@ -294,7 +294,7 @@ For the user's local filesystem, prefer 'find' instead.
         return result.content[0]["text"]
 
     # ── ls ──────────────────────────────────────────────────
-    @mcp.tool(name="ls", meta={"display_name": "List Files"})
+    @mcp.tool(name="mcp_filesystem__ls", meta={"display_name": "List Files"})
     async def _ls(
         path: Optional[str] = None,
         limit: Optional[int] = None,
@@ -323,7 +323,7 @@ directories, prefer 'ls' instead.
         return result.content[0]["text"]
 
     # ── delete ───────────────────────────────────────────────
-    @mcp.tool(name="delete", meta={"requires_approval": True, "display_name": "Delete"})
+    @mcp.tool(name="mcp_filesystem__delete", meta={"requires_approval": True, "display_name": "Delete"})
     async def _delete(
         path: str,
         ctx: Context = None,

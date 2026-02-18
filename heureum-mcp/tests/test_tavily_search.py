@@ -108,7 +108,7 @@ class TestTavilySearch:
 
         with _patch_tavily(items):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "example 2026"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "example 2026"})
 
         assert result["provider"] == "tavily"
         assert result["count"] == 1
@@ -127,7 +127,7 @@ class TestTavilySearch:
 
         with _patch_tavily(items):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "python rust 2026"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "python rust 2026"})
 
         assert result["count"] == 2
         urls = [r["url"] for r in result["results"]]
@@ -139,7 +139,7 @@ class TestTavilySearch:
         """검색 결과 없는 경우."""
         with _patch_tavily([]):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "nothing"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "nothing"})
 
         assert result["count"] == 0
         assert result["results"] == []
@@ -149,7 +149,7 @@ class TestTavilySearch:
         """Tavily API 에러 시 에러 JSON 반환."""
         with _patch_tavily_error(RuntimeError("API rate limit")):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "test"})
 
         assert result["error"] == "RuntimeError"
         assert "rate limit" in result["message"].lower()
@@ -162,7 +162,7 @@ class TestTavilySearch:
 
         with patch("src.tools.web.search._GOOGLE_CLOUD_PROJECT", ""):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "test"})
 
         assert result["error"] == "missing_api_key"
 
@@ -181,7 +181,7 @@ class TestTavilySearch:
         with patch("src.tools.web.search._GOOGLE_CLOUD_PROJECT", ""), \
              patch("src.tools.web.search._search_openai", new_callable=AsyncMock, return_value=fallback) as mock_openai:
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "fallback test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "fallback test"})
 
         assert result["provider"] == "openai"
         assert result["count"] == 1
@@ -209,7 +209,7 @@ class TestTavilySearch:
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {
+            result = await _call_tool(server, "mcp_web__search", {
                 "query": "deep search",
                 "search_depth": "advanced",
                 "max_results": 10,
@@ -229,7 +229,7 @@ class TestTavilySearch:
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {
+            result = await _call_tool(server, "mcp_web__search", {
                 "query": "korean news",
                 "country": "KR",
             })
@@ -248,7 +248,7 @@ class TestTavilySearch:
 
         with _patch_tavily(items):
             server = _make_tavily_server()
-            result = await _call_tool(server, "search", {"query": "test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "test"})
 
         assert result["count"] == 2
         assert result["results"][0]["content"] == "Real content."
@@ -276,8 +276,8 @@ class TestTavilyCaching:
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_tavily_server()
 
-            first = await _call_tool(server, "search", {"query": "cache test"})
-            second = await _call_tool(server, "search", {"query": "cache test"})
+            first = await _call_tool(server, "mcp_web__search", {"query": "cache test"})
+            second = await _call_tool(server, "mcp_web__search", {"query": "cache test"})
 
         assert first["cached"] is False
         assert second["cached"] is True

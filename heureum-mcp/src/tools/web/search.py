@@ -270,7 +270,7 @@ def register_search(mcp: FastMCP) -> None:
     http = httpx.AsyncClient()
 
     @mcp.tool(
-        name="search",
+        name="mcp_web__search",
         meta={
             "requires_approval": True,
             "display_name": "Web Search",

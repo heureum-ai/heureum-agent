@@ -163,7 +163,7 @@ class TestSearchThenFetch:
             "score": 0.95,
         }]):
             server = _make_server()
-            search = await _call_tool(server, "search", {"query": "example 2026"})
+            search = await _call_tool(server, "mcp_web__search", {"query": "example 2026"})
 
         assert search["count"] == 1
         url = search["results"][0]["url"]
@@ -175,7 +175,7 @@ class TestSearchThenFetch:
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            fetch = await _call_tool(server, "fetch", {"url": url})
+            fetch = await _call_tool(server, "mcp_web__fetch", {"url": url})
 
         assert fetch["status"] == 200
         assert fetch["title"] == "Example Page"
@@ -190,7 +190,7 @@ class TestSearchThenFetch:
             {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "Rust info.", "score": 0.8},
         ]):
             server = _make_server()
-            result = await _call_tool(server, "search", {"query": "python rust 2026"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "python rust 2026"})
 
         assert result["count"] == 2
         urls = [r["url"] for r in result["results"]]
@@ -210,7 +210,7 @@ class TestWebSearch:
         """검색 결과가 없는 경우."""
         with _patch_tavily([]):
             server = _make_server()
-            result = await _call_tool(server, "search", {"query": "nothing"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "nothing"})
 
         assert result["count"] == 0
         assert result["results"] == []
@@ -220,7 +220,7 @@ class TestWebSearch:
         """Tavily API 에러 시 에러 JSON 반환."""
         with _patch_tavily_error(RuntimeError("API rate limit")):
             server = _make_server()
-            result = await _call_tool(server, "search", {"query": "test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "test"})
 
         assert result["error"] == "RuntimeError"
         assert "rate limit" in result["message"].lower()
@@ -233,7 +233,7 @@ class TestWebSearch:
         mock_search_settings.OPENAI_API_KEY = ""
 
         server = _make_server()
-        result = await _call_tool(server, "search", {"query": "test"})
+        result = await _call_tool(server, "mcp_web__search", {"query": "test"})
 
         assert result["error"] == "missing_api_key"
 
@@ -255,7 +255,7 @@ class TestWebSearch:
             {"title": "Empty", "url": "https://example.com", "content": "", "score": 0.5},
         ]):
             server = _make_server()
-            result = await _call_tool(server, "search", {"query": "empty content test"})
+            result = await _call_tool(server, "mcp_web__search", {"query": "empty content test"})
 
         assert result["count"] == 1
         assert result["results"][0]["content"] == ""
@@ -278,7 +278,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "fetch", {"url": "https://example.com/success"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/success"})
 
         assert result["status"] == 200
         assert result["title"] == "Hello"
@@ -290,7 +290,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(SSRFError("Blocked: private IP")):
-            result = await _call_tool(server, "fetch", {"url": "http://169.254.169.254/metadata"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "http://169.254.169.254/metadata"})
 
         assert result["blocked"] is True
         assert "private" in result["error"].lower()
@@ -307,7 +307,7 @@ class TestWebFetch:
         with _patch_fetch_error(
             httpx.HTTPStatusError("Forbidden", request=MagicMock(), response=mock_response)
         ):
-            result = await _call_tool(server, "fetch", {"url": "https://example.com/secret"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/secret"})
 
         assert "403" in result["error"]
 
@@ -317,7 +317,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(httpx.TimeoutException("timed out")):
-            result = await _call_tool(server, "fetch", {"url": "https://slow.com"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://slow.com"})
 
         assert "timed out" in result["error"].lower()
 
@@ -333,7 +333,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "fetch", {"url": "https://example.com/500"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/500"})
 
         assert "500" in result["error"]
         assert result["status"] == 500
@@ -349,7 +349,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "fetch", {
+            result = await _call_tool(server, "mcp_web__fetch", {
                 "url": "https://example.com/long",
                 "start_index": 0,
                 "max_length": 5000,
@@ -412,7 +412,7 @@ class TestWebFetch:
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "fetch", {"url": "https://api.example.com/data"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://api.example.com/data"})
 
         assert result["content_type"] == "application/json"
         assert "session_file" in result
@@ -426,7 +426,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(ConnectionError("DNS resolution failed")):
-            result = await _call_tool(server, "fetch", {"url": "https://nonexistent.invalid"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://nonexistent.invalid"})
 
         assert "dns" in result["error"].lower()
 
@@ -452,8 +452,8 @@ class TestCaching:
         with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_server()
 
-            first = await _call_tool(server, "search", {"query": "cache test"})
-            second = await _call_tool(server, "search", {"query": "cache test"})
+            first = await _call_tool(server, "mcp_web__search", {"query": "cache test"})
+            second = await _call_tool(server, "mcp_web__search", {"query": "cache test"})
 
         assert first["cached"] is False
         assert second["cached"] is True
@@ -471,8 +471,8 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "fetch", {"url": "https://example.com/cache-test"})
-            second = await _call_tool(server, "fetch", {"url": "https://example.com/cache-test"})
+            first = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/cache-test"})
+            second = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/cache-test"})
 
         assert first["cached"] is False
         assert second["cached"] is True
@@ -494,7 +494,7 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            page1 = await _call_tool(server, "fetch", {
+            page1 = await _call_tool(server, "mcp_web__fetch", {
                 "url": "https://example.com/paginated",
                 "max_length": 5000,
                 "start_index": 0,
@@ -505,7 +505,7 @@ class TestCaching:
             assert page1["remaining"] == 0
 
             # 같은 URL 두 번째 호출: raw cache에서 가져옴
-            page2 = await _call_tool(server, "fetch", {
+            page2 = await _call_tool(server, "mcp_web__fetch", {
                 "url": "https://example.com/paginated",
                 "max_length": 5000,
                 "start_index": 0,
@@ -527,11 +527,11 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "fetch", {
+            first = await _call_tool(server, "mcp_web__fetch", {
                 "url": "https://example.com/auth",
                 "headers": {"Authorization": "Bearer tok"},
             })
-            second = await _call_tool(server, "fetch", {
+            second = await _call_tool(server, "mcp_web__fetch", {
                 "url": "https://example.com/auth",
                 "headers": {"Authorization": "Bearer tok"},
             })
@@ -571,7 +571,7 @@ class TestFirecrawlFallback:
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "fetch", {"url": "https://blocked.com"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://blocked.com"})
 
         assert result["extractor"] == "firecrawl"
         assert result["title"] == "Firecrawl Title"
@@ -594,7 +594,7 @@ class TestFirecrawlFallback:
                 new_callable=AsyncMock,
                 return_value=self._firecrawl_result(),
             ):
-                result = await _call_tool(server, "fetch", {"url": "https://error.com"})
+                result = await _call_tool(server, "mcp_web__fetch", {"url": "https://error.com"})
 
         assert result["extractor"] == "firecrawl"
 
@@ -615,7 +615,7 @@ class TestFirecrawlFallback:
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "fetch", {"url": "https://spa.com"})
+            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://spa.com"})
 
         assert result["extractor"] == "firecrawl"
         assert "session_file" in result
@@ -637,7 +637,7 @@ class TestFirecrawlFallback:
                 new_callable=AsyncMock,
                 return_value=None,
             ):
-                result = await _call_tool(server, "fetch", {"url": "https://error.com"})
+                result = await _call_tool(server, "mcp_web__fetch", {"url": "https://error.com"})
 
         assert "403" in result["error"]
         assert result["status"] == 403
@@ -654,6 +654,6 @@ class TestChainMetadata:
         """web_search에 chain이 없어야 한다."""
         server = _make_server()
         tools = server._tool_manager._tools
-        meta = tools["search"].meta or {}
+        meta = tools["mcp_web__search"].meta or {}
         chain = meta.get("chain", [])
         assert len(chain) == 0
