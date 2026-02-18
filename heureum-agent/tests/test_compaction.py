@@ -17,7 +17,7 @@ from app.services.compaction.pruning import (
 )
 from app.services.compaction.repair import repair_tool_use_result_pairing
 from app.services.compaction.settings import CompactionSettings, HardClearConfig, ToolPruningConfig
-from app.services.compaction.tokens import estimate_context_chars, estimate_message_chars
+from app.services.compaction.tokens import estimate_context_chars, estimate_message_chars, estimate_message_tokens
 from app.services.compaction.summarizer import (
     _chunk_messages_by_max_tokens,
     _compute_adaptive_chunk_ratio,
@@ -1188,3 +1188,38 @@ class TestCharsIncludeToolCalls:
         total = estimate_context_chars(msgs)
         content_only = sum(len(m.content) for m in msgs)
         assert total > content_only
+
+
+class TestEstimateMessageTokens:
+    """Tests for estimate_message_tokens including tool_calls."""
+
+    def test_plain_message(self):
+        """Plain message tokens should match content-only estimation."""
+        msg = Message(role=MessageRole.USER, content="hello world")
+        tokens = estimate_message_tokens(msg)
+        assert tokens > 0
+
+    def test_tool_calls_increase_tokens(self):
+        """Message with tool_calls should have more tokens than content alone."""
+        content = "thinking"
+        plain = Message(role=MessageRole.ASSISTANT, content=content)
+        with_tc = Message(
+            role=MessageRole.ASSISTANT,
+            content=content,
+            tool_calls=[{"id": "call_1", "name": "bash", "args": {"command": "ls -la"}}],
+        )
+        assert estimate_message_tokens(with_tc) > estimate_message_tokens(plain)
+
+    def test_tool_calls_tokens_proportional_to_size(self):
+        """Larger tool_calls should produce more tokens."""
+        small_tc = Message(
+            role=MessageRole.ASSISTANT,
+            content="ok",
+            tool_calls=[{"id": "c1", "name": "bash", "args": {"cmd": "ls"}}],
+        )
+        large_tc = Message(
+            role=MessageRole.ASSISTANT,
+            content="ok",
+            tool_calls=[{"id": "c1", "name": "bash", "args": {"cmd": "x" * 400}}],
+        )
+        assert estimate_message_tokens(large_tc) > estimate_message_tokens(small_tc)
