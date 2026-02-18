@@ -19,6 +19,11 @@
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.0",
+    "//": "TODO: re-enable when document tools are ready",
+    "// @heureum/pdf": "file:../heureum-client-tools/pdf",
+    "// @heureum/ppt": "file:../heureum-client-tools/ppt",
+    "// @heureum/word": "file:../heureum-client-tools/word",
+    "// @heureum/xlsx": "file:../heureum-client-tools/xlsx",
     "electron-updater": "^6.7.0",
     "ws": "^8.19.0"
   },

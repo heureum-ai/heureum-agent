@@ -22,6 +22,7 @@ import {
   fetchSuggestedQuestions,
   setExtensionConnected as setApiExtensionConnected,
   checkSessionUpdates,
+  fetchSubagentStatus,
 } from '../lib/api';
 import type { SuggestedQuestion } from '../lib/api';
 import type {
@@ -47,6 +48,7 @@ import QuestionPrompt from '../components/QuestionPrompt';
 import CwdPrompt from '../components/CwdPrompt';
 import MarkdownMessage from '../components/MarkdownMessage';
 import TodoProgress from '../components/TodoProgress';
+import SubagentProgressCard from '../components/SubagentProgressCard';
 import FilePanel from '../components/FilePanel';
 import { useFileStore } from '../store/fileStore';
 import { fetchSessionFiles } from '../lib/api';
@@ -245,7 +247,7 @@ function PeriodicRunCard({ run }: { run: PeriodicRunInfo }) {
 export default function ChatPage() {
   const navigate = useNavigate();
   const { user, logout } = useAuthStore();
-  const { messages, sessionId, isLoading, cwd, streamingText, addMessage, setSessionId, setLoading, setCwd, appendStreamDelta, clearStreamingText, clearMessages, loadSession, hasOlderMessages, isLoadingOlder, oldestLoadedPage, prependMessages, setHasOlderMessages, setLoadingOlder, setOldestLoadedPage } =
+  const { messages, sessionId, isLoading, cwd, streamingText, addMessage, setSessionId, setLoading, setCwd, appendStreamDelta, clearStreamingText, clearMessages, loadSession, hasOlderMessages, isLoadingOlder, oldestLoadedPage, prependMessages, setHasOlderMessages, setLoadingOlder, setOldestLoadedPage, updateOrAddSubagentProgress } =
     useChatStore();
   const { isFilePanelOpen, toggleFilePanel } = useFileStore();
 
@@ -272,11 +274,14 @@ export default function ChatPage() {
 
   const [suggestions, setSuggestions] = useState<SuggestedQuestion[]>([]);
   const [randomSuggestions, setRandomSuggestions] = useState<SuggestedQuestion[]>([]);
+  const [subagentPollingSessionId, setSubagentPollingSessionId] = useState<string | null>(null);
 
   const endRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
+  // Stable ref to handleStreamingSend for use in polling useEffect
+  const handleStreamingSendRef = useRef<(allMessages: Message[], currentSessionId: string | null, extraInput?: InputItem[]) => Promise<void>>(async () => {});
 
   const hasPrompt = !!(pendingPermission || pendingQuestion || pendingCwdSelect);
 
@@ -436,6 +441,58 @@ export default function ChatPage() {
     prevLoadingRef.current = isLoading;
   }, [isLoading, sessionId]);
 
+  /* ── Poll sub-agent progress (fire-and-forget tasks) ── */
+  useEffect(() => {
+    if (!subagentPollingSessionId) return;
+    let cancelled = false;
+    let failCount = 0;
+    const MAX_CONSECUTIVE_FAILURES = 5;
+    const sid = subagentPollingSessionId;
+
+    const poll = async () => {
+      try {
+        const data = await fetchSubagentStatus(sid);
+        if (cancelled) return;
+        failCount = 0; // reset on success
+
+        let hasRunning = false;
+        for (const child of data.children || []) {
+          if (child.status === 'running') hasRunning = true;
+          updateOrAddSubagentProgress({
+            childSessionId: child.child_session_id,
+            task: child.task,
+            status: (child.status as 'running' | 'completed' | 'failed' | 'timeout') || 'running',
+            elapsedSeconds: child.elapsed_seconds,
+            currentIteration: child.current_iteration,
+            resultSummary: child.result_summary,
+            steps: (child.progress || []).map((s) => ({
+              toolName: s.tool_name,
+              detail: s.detail,
+              status: s.status,
+            })),
+          });
+        }
+
+        if (!hasRunning) {
+          setSubagentPollingSessionId((prev) => (prev === sid ? null : prev));
+          // Synthesis is handled server-side (agent.py:1304-1319)
+        }
+      } catch {
+        failCount++;
+        if (failCount >= MAX_CONSECUTIVE_FAILURES) {
+          setSubagentPollingSessionId((prev) => (prev === sid ? null : prev));
+        }
+      }
+    };
+
+    void poll();
+    const interval = setInterval(() => { void poll(); }, 3000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [subagentPollingSessionId, updateOrAddSubagentProgress, addMessage]);
+
   /* ── Re-randomize suggestions on new chat ── */
   useEffect(() => {
     if (messages.length === 0 && suggestions.length > 0) {
@@ -574,10 +631,15 @@ export default function ChatPage() {
     const req: ChatRequest = { messages: allMessages, session_id: currentSessionId || undefined, extraInput };
     // Local array to track tool calls synchronously (React state updates are batched)
     const collectedToolCalls: ToolCallInfo[] = [];
+    const spawnCallIds = new Set<string>();
+    let streamSessionId = currentSessionId || '';
 
     try {
       const finalResponse = await chatAPI.sendMessageStream(req, (event: StreamEvent) => {
         switch (event.type) {
+          case 'response.created':
+            streamSessionId = event.response.metadata?.session_id || streamSessionId;
+            break;
           case 'response.output_text.delta':
             appendStreamDelta(event.delta);
             break;
@@ -601,6 +663,13 @@ export default function ChatPage() {
             const tc = event.item;
             // Skip manage_todo — shown via TodoProgress instead
             if (tc.name === 'manage_todo') break;
+            // Skip ask_question — shown via QuestionPrompt instead
+            if (tc.name === 'ask_question') break;
+            // Skip sessions_spawn — shown via SubagentProgressCard instead
+            if (tc.name === 'sessions_spawn') {
+              spawnCallIds.add(tc.call_id);
+              break;
+            }
             // Skip if this tool call already exists in messages (approval resume
             // re-emits function_call.done for tools that were already persisted
             // before the user approved them).
@@ -642,18 +711,36 @@ export default function ChatPage() {
                 }
               }
             }
+
+            if (spawnCallIds.has(event.call_id) && resultOutput) {
+              try {
+                const parsed = JSON.parse(resultOutput);
+                const pollingSid = streamSessionId || req.session_id || useChatStore.getState().sessionId || '';
+                if (parsed?.status === 'accepted' && pollingSid) {
+                  setSubagentPollingSessionId((prev) => (prev === pollingSid ? prev : pollingSid));
+                }
+              } catch {
+                // ignore non-JSON outputs
+              }
+            }
+
             setActiveToolCalls([...collectedToolCalls]);
             break;
           }
           case 'response.todo.updated':
             useChatStore.getState().updateOrAddTodo(event.todo);
             break;
-          case 'response.output_text.abandoned':
+          case 'response.output_text.abandoned': {
             // Server is retrying (skill unfinished / judge failed).
-            // Discard the streamed text — tool calls, questions, and TODO
-            // progress are already committed via their own event handlers.
+            // Only show the abandoned text to the user for unfinished skills;
+            // judge-rejected text is low quality and should be silently discarded.
+            const abandonedText = useChatStore.getState().streamingText;
+            if (abandonedText && event.reason === 'unfinished_skill') {
+              addMessage({ role: 'assistant', content: abandonedText });
+            }
             clearStreamingText();
             break;
+          }
         }
       });
 
@@ -781,6 +868,7 @@ export default function ChatPage() {
       setActiveToolCalls([]);
     }
   }, [addMessage, appendStreamDelta, clearStreamingText, setLoading, setSessionId, setCwd, sessionId, loadSessions]);
+  handleStreamingSendRef.current = handleStreamingSend;
 
 
   /** Execute client-side tool calls, returning FunctionToolResult[] or null if aborted. */
@@ -991,6 +1079,135 @@ export default function ChatPage() {
         continue;
       }
 
+      // TODO: re-enable when document tools are ready
+      // // docx tools
+      // if (tc.name.startsWith('docx_')) {
+      //   if (!canExecuteTools()) {
+      //     const dMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (dMatch) { dMatch.status = 'failed'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: DOCX tools require the desktop app.' });
+      //     continue;
+      //   }
+      //
+      //   const docxArgs = JSON.parse(tc.arguments);
+      //   const decision = await checkAndLogPermission(clientId, tc.name, tc.name, tc.name, tc.call_id, currentSessionId);
+      //   if (decision === 'deny') {
+      //     const dMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (dMatch) { dMatch.status = 'failed'; dMatch.output = 'Permission denied'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Permission denied: user rejected DOCX tool execution.' });
+      //     continue;
+      //   }
+      //
+      //   const docxResult = await window.api!.docxTool(tc.name, docxArgs);
+      //   const docxOutput = docxResult.success
+      //     ? docxResult.output
+      //     : `Error: ${docxResult.error || 'DOCX tool failed'}`;
+      //   const dMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //   if (dMatch) {
+      //     dMatch.status = docxResult.success ? 'completed' : 'failed';
+      //     dMatch.output = docxOutput || '(no output)';
+      //     dMatch.exitCode = docxResult.success ? 0 : 1;
+      //   }
+      //   setActiveToolCalls([...collectedToolCalls]);
+      //   results.push({ type: 'function_call_output', call_id: tc.call_id, output: docxOutput || '(no output)' });
+      //   continue;
+      // }
+      //
+      // // pdf tools
+      // if (tc.name.startsWith('pdf_')) {
+      //   if (!canExecuteTools()) {
+      //     const pMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (pMatch) { pMatch.status = 'failed'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: PDF tools require the desktop app.' });
+      //     continue;
+      //   }
+      //   const pdfArgs = JSON.parse(tc.arguments);
+      //   const decision = await checkAndLogPermission(clientId, tc.name, tc.name, tc.name, tc.call_id, currentSessionId);
+      //   if (decision === 'deny') {
+      //     const pMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (pMatch) { pMatch.status = 'failed'; pMatch.output = 'Permission denied'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Permission denied: user rejected PDF tool execution.' });
+      //     continue;
+      //   }
+      //   const pdfResult = await window.api!.pdfTool(tc.name, pdfArgs);
+      //   const pdfOutput = pdfResult.success ? pdfResult.output : `Error: ${pdfResult.error || 'PDF tool failed'}`;
+      //   const pMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //   if (pMatch) {
+      //     pMatch.status = pdfResult.success ? 'completed' : 'failed';
+      //     pMatch.output = pdfOutput || '(no output)';
+      //     pMatch.exitCode = pdfResult.success ? 0 : 1;
+      //   }
+      //   setActiveToolCalls([...collectedToolCalls]);
+      //   results.push({ type: 'function_call_output', call_id: tc.call_id, output: pdfOutput || '(no output)' });
+      //   continue;
+      // }
+      //
+      // // ppt tools
+      // if (tc.name.startsWith('ppt_')) {
+      //   if (!canExecuteTools()) {
+      //     const ppMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (ppMatch) { ppMatch.status = 'failed'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: PPT tools require the desktop app.' });
+      //     continue;
+      //   }
+      //   const pptArgs = JSON.parse(tc.arguments);
+      //   const decision = await checkAndLogPermission(clientId, tc.name, tc.name, tc.name, tc.call_id, currentSessionId);
+      //   if (decision === 'deny') {
+      //     const ppMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (ppMatch) { ppMatch.status = 'failed'; ppMatch.output = 'Permission denied'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Permission denied: user rejected PPT tool execution.' });
+      //     continue;
+      //   }
+      //   const pptResult = await window.api!.pptTool(tc.name, pptArgs);
+      //   const pptOutput = pptResult.success ? pptResult.output : `Error: ${pptResult.error || 'PPT tool failed'}`;
+      //   const ppMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //   if (ppMatch) {
+      //     ppMatch.status = pptResult.success ? 'completed' : 'failed';
+      //     ppMatch.output = pptOutput || '(no output)';
+      //     ppMatch.exitCode = pptResult.success ? 0 : 1;
+      //   }
+      //   setActiveToolCalls([...collectedToolCalls]);
+      //   results.push({ type: 'function_call_output', call_id: tc.call_id, output: pptOutput || '(no output)' });
+      //   continue;
+      // }
+      //
+      // // xlsx tools
+      // if (tc.name.startsWith('xlsx_')) {
+      //   if (!canExecuteTools()) {
+      //     const xMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (xMatch) { xMatch.status = 'failed'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: XLSX tools require the desktop app.' });
+      //     continue;
+      //   }
+      //   const xlsxArgs = JSON.parse(tc.arguments);
+      //   const decision = await checkAndLogPermission(clientId, tc.name, tc.name, tc.name, tc.call_id, currentSessionId);
+      //   if (decision === 'deny') {
+      //     const xMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //     if (xMatch) { xMatch.status = 'failed'; xMatch.output = 'Permission denied'; }
+      //     setActiveToolCalls([...collectedToolCalls]);
+      //     results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Permission denied: user rejected XLSX tool execution.' });
+      //     continue;
+      //   }
+      //   const xlsxResult = await window.api!.xlsxTool(tc.name, xlsxArgs);
+      //   const xlsxOutput = xlsxResult.success ? xlsxResult.output : `Error: ${xlsxResult.error || 'XLSX tool failed'}`;
+      //   const xMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
+      //   if (xMatch) {
+      //     xMatch.status = xlsxResult.success ? 'completed' : 'failed';
+      //     xMatch.output = xlsxOutput || '(no output)';
+      //     xMatch.exitCode = xlsxResult.success ? 0 : 1;
+      //   }
+      //   setActiveToolCalls([...collectedToolCalls]);
+      //   results.push({ type: 'function_call_output', call_id: tc.call_id, output: xlsxOutput || '(no output)' });
+      //   continue;
+      // }
+
       // Fallback for unknown tools
       const fallbackMatch = collectedToolCalls.find(t => t.callId === tc.call_id);
       if (fallbackMatch) { fallbackMatch.status = 'failed'; }
@@ -1027,6 +1244,7 @@ export default function ChatPage() {
 
   const handleNewChat = () => {
     clearMessages();
+    setSubagentPollingSessionId(null);
     setActiveToolCalls([]);
     setLoading(false);
     clearStreamingText();
@@ -1036,6 +1254,7 @@ export default function ChatPage() {
   const handleSelectSession = async (session: SessionListItem) => {
     if (session.session_id === sessionId || isLoading) return;
     try {
+      setSubagentPollingSessionId(null);
       const { messages: msgs, hasMore } = await fetchSessionMessagesPage(session.session_id, 1);
       loadSession(session.session_id, msgs, session.cwd, hasMore);
       // Scroll to bottom after loading
@@ -1058,7 +1277,10 @@ export default function ChatPage() {
     try {
       await deleteSession(sid);
       setSessions((prev) => prev.filter((s) => s.session_id !== sid));
-      if (sid === sessionId) clearMessages();
+      if (sid === sessionId) {
+        clearMessages();
+        setSubagentPollingSessionId(null);
+      }
     } catch { /* silently fail */ }
     finally { setDeletingId(null); }
   };
@@ -1083,6 +1305,13 @@ export default function ChatPage() {
       return (
         <div key={i} className="ac-msg-row ac-msg-todo">
           <TodoProgress todo={msg.todo} />
+        </div>
+      );
+    }
+    if (msg.subagentProgress) {
+      return (
+        <div key={i} className="ac-msg-row ac-msg-tool">
+          <SubagentProgressCard progress={msg.subagentProgress} />
         </div>
       );
     }

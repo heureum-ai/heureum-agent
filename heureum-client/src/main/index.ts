@@ -9,6 +9,11 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { autoUpdater } from 'electron-updater'
 import http from 'http'
 import https from 'https'
+// TODO: re-enable when document tools are ready
+// import { handleDocxTool } from '@heureum/word'
+// import { handlePdfTool } from '@heureum/pdf'
+// import { handlePptTool } from '@heureum/ppt'
+// import { handleXlsxTool } from '@heureum/xlsx'
 
 // --- Deep link protocol registration ---
 const PROTOCOL = 'heureum'
@@ -397,6 +402,77 @@ ipcMain.handle(
 ipcMain.handle('browser-extension-status', async () => {
   return extensionSocket !== null && extensionSocket.readyState === WebSocket.OPEN
 })
+
+// TODO: re-enable when document tools are ready
+// --- DOCX tool execution ---
+//
+// function snakeToCamel(s: string): string {
+//   return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
+// }
+//
+// function camelizeKeys(obj: Record<string, unknown>): Record<string, unknown> {
+//   const result: Record<string, unknown> = {}
+//   for (const [key, value] of Object.entries(obj)) {
+//     result[snakeToCamel(key)] = value
+//   }
+//   return result
+// }
+//
+// ipcMain.handle(
+//   'docx-tool',
+//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+//     try {
+//       const camelName = snakeToCamel(toolName)
+//       const camelParams = camelizeKeys(params)
+//       const result = await handleDocxTool(camelName, camelParams)
+//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+//     } catch (err: any) {
+//       return { success: false, output: '', error: err.message || 'DOCX tool execution failed' }
+//     }
+//   }
+// )
+//
+// --- PDF tool execution ---
+//
+// ipcMain.handle(
+//   'pdf-tool',
+//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+//     try {
+//       const result = await handlePdfTool(toolName, params)
+//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+//     } catch (err: any) {
+//       return { success: false, output: '', error: err.message || 'PDF tool execution failed' }
+//     }
+//   }
+// )
+//
+// --- PPT tool execution ---
+//
+// ipcMain.handle(
+//   'ppt-tool',
+//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+//     try {
+//       const result = await handlePptTool(toolName, params)
+//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+//     } catch (err: any) {
+//       return { success: false, output: '', error: err.message || 'PPT tool execution failed' }
+//     }
+//   }
+// )
+//
+// --- XLSX tool execution ---
+//
+// ipcMain.handle(
+//   'xlsx-tool',
+//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+//     try {
+//       const result = await handleXlsxTool(toolName, params)
+//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+//     } catch (err: any) {
+//       return { success: false, output: '', error: err.message || 'XLSX tool execution failed' }
+//     }
+//   }
+// )
 
 // SSE notification stream control
 ipcMain.handle('start-notification-stream', async (_event, platformUrl: string) => {
