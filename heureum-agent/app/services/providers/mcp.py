@@ -9,7 +9,6 @@ Uses streamable-http transport for FastMCP 2025-03-26 servers.
 
 import json
 import logging
-import re
 import time
 import uuid
 from contextlib import AsyncExitStack
@@ -53,7 +52,7 @@ class _ServerConnection:
         session = await self._exit_stack.enter_async_context(ClientSession(read, write))
         init_result = await session.initialize()
         self.session = session
-        # Capture server name from MCP protocol for tool namespacing.
+        # Capture server name from MCP protocol for diagnostics.
         server_info = getattr(init_result, "serverInfo", None) or getattr(
             init_result, "server_info", None
         )
@@ -97,8 +96,7 @@ class MCPClient:
         self._server_urls = server_urls or settings.get_mcp_server_urls()
         self._connections: Dict[str, _ServerConnection] = {}
         self._server_tool_names: Set[str] = set()
-        self._tool_to_server: Dict[str, str] = {}  # namespaced_name -> server_url
-        self._original_names: Dict[str, str] = {}  # namespaced_name -> original_name
+        self._tool_to_server: Dict[str, str] = {}  # tool_name -> server_url
         self._available_tools: List[Dict[str, Any]] = []
         self._cache_timestamp: float = 0
         self._chain_registry = chain_registry
@@ -142,45 +140,12 @@ class MCPClient:
             except Exception:
                 pass
 
-    @staticmethod
-    def _sanitize_server_name(name: str) -> str:
-        """Sanitize an MCP server name for use as a tool namespace.
-
-        Replaces non-alphanumeric characters with underscores and strips
-        leading/trailing underscores.
-
-        Args:
-            name (str): Raw server name from MCP ``initialize()``.
-
-        Returns:
-            str: Sanitized name safe for ``[a-zA-Z0-9_]`` tool name patterns.
-        """
-        return re.sub(r"[^a-zA-Z0-9]", "_", name).strip("_") or "unknown"
-
-    def _namespace_tool(self, server_url: str, tool_name: str) -> str:
-        """Generate a namespaced tool name: ``mcp_{server}_{tool}``.
-
-        Uses the server name captured from MCP ``initialize()`` during
-        connection setup.
-
-        Args:
-            server_url (str): The MCP server base URL.
-            tool_name (str): The original tool name from the MCP server.
-
-        Returns:
-            str: Namespaced tool name, e.g. ``mcp_filesystem_read``.
-        """
-        conn = self._connections.get(server_url)
-        raw = conn.server_name if conn else ""
-        ns = self._sanitize_server_name(raw) if raw else "unknown"
-        return f"mcp_{ns}__{tool_name}"
-
     async def discover_tools(self) -> List[Dict[str, Any]]:
         """Discover tools from all configured MCP servers.
 
-        Tool names are namespaced as ``mcp_{server}_{tool}`` to prevent
-        collisions with client-provided tools that share the same name
-        (e.g. both client and MCP server providing ``read``).
+        Tool names are used as-is from MCP servers.  Servers are expected to
+        register tools with fully-qualified names (e.g. ``mcp_web__search``)
+        to prevent collisions.
 
         Returns cached results if available and not expired.
 
@@ -196,14 +161,11 @@ class MCPClient:
         self._available_tools.clear()
         self._server_tool_names.clear()
         self._tool_to_server.clear()
-        self._original_names.clear()
         if self._chain_registry:
             self._chain_registry.clear()
         self._approval_required_tools.clear()
         self._display_names.clear()
 
-        # Collect chain metadata for post-discovery registration so that
-        # cross-server chain targets can be resolved to namespaced names.
         _pending_chains: List[Tuple[str, list]] = []
 
         for url in self._server_urls:
@@ -212,32 +174,31 @@ class MCPClient:
                 response = await session.list_tools()
 
                 for tool in response.tools:
-                    namespaced = self._namespace_tool(url, tool.name)
+                    tool_name = tool.name
 
                     self._available_tools.append(
                         {
                             "type": "function",
                             "function": {
-                                "name": namespaced,
+                                "name": tool_name,
                                 "description": tool.description or "",
                                 "parameters": tool.inputSchema,
                             },
                         }
                     )
-                    self._server_tool_names.add(namespaced)
-                    self._tool_to_server[namespaced] = url
-                    self._original_names[namespaced] = tool.name
+                    self._server_tool_names.add(tool_name)
+                    self._tool_to_server[tool_name] = url
 
                     # Collect metadata
                     meta = getattr(tool, "meta", None) or {}
                     chain = meta.get("chain")
                     if isinstance(chain, list) and chain and self._chain_registry:
-                        _pending_chains.append((namespaced, chain))
+                        _pending_chains.append((tool_name, chain))
                     if meta.get("requires_approval"):
-                        self._approval_required_tools.add(namespaced)
+                        self._approval_required_tools.add(tool_name)
                     display_name = meta.get("display_name")
                     if display_name:
-                        self._display_names[namespaced] = display_name
+                        self._display_names[tool_name] = display_name
 
                 logger.info(
                     "Discovered %d tools from MCP server %s: %s",
@@ -250,19 +211,18 @@ class MCPClient:
                 logger.warning("MCP server unavailable at %s: %s", url, e)
                 await self._disconnect_server(url)
 
-        # Register chain rules with namespaced target names.
+        # Register chain rules — target names are already fully-qualified.
         if self._chain_registry and _pending_chains:
-            orig_to_ns = {v: k for k, v in self._original_names.items()}
-            for source_ns, raw_steps in _pending_chains:
+            for source, raw_steps in _pending_chains:
                 steps = [
                     ChainStep(
-                        target=orig_to_ns.get(entry["target"], entry["target"]),
+                        target=entry["target"],
                         extract=entry["extract"],
                         arg_mapping=entry.get("arg_mapping", {}),
                     )
                     for entry in raw_steps
                 ]
-                self._chain_registry.register(ChainRule(source=source_ns, steps=steps))
+                self._chain_registry.register(ChainRule(source=source, steps=steps))
             logger.info("Chain rules registered: %s", list(self._chain_registry.rules.keys()))
 
         if self._approval_required_tools:
@@ -274,12 +234,8 @@ class MCPClient:
     async def call_tool(self, name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = "") -> str:
         """Call a tool on its MCP server and return the result as text.
 
-        ``name`` is the **namespaced** tool name (e.g. ``mcp_filesystem_read``).
-        The original MCP tool name is resolved internally before dispatching
-        to the server.
-
         Args:
-            name: Namespaced tool name.
+            name: Tool name (as registered by the MCP server).
             arguments: Tool arguments.
             session_id: Optional session ID. When provided, it is forwarded
                 to the MCP server via ``_meta`` so server-side tools can
@@ -292,8 +248,6 @@ class MCPClient:
         if not server_url:
             return f"Error: tool '{name}' not found on any MCP server"
 
-        original_name = self._original_names.get(name, name)
-
         meta = None
         if session_id:
             meta = {"session_id": session_id, "platform_api_url": settings.PLATFORM_API_URL}
@@ -302,7 +256,7 @@ class MCPClient:
 
         try:
             session = await self._get_session(server_url)
-            result = await session.call_tool(original_name, arguments, meta=meta)
+            result = await session.call_tool(name, arguments, meta=meta)
             return self._extract_text(result)
         except Exception as e:
             logger.warning("Tool call failed (%s on %s): %s", name, server_url, e)

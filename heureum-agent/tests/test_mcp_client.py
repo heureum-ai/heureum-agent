@@ -42,7 +42,7 @@ def _make_session(tools=None, call_result=None):
 
 
 def _setup_connection(client, url, server_name="test"):
-    """Set up a mock connection with server_name for tool namespacing."""
+    """Set up a mock connection with server_name for diagnostics."""
     conn = MagicMock()
     conn.server_name = server_name
     conn.session = _make_session()
@@ -103,8 +103,8 @@ class TestDiscoverTools:
     async def test_returns_tool_list(self):
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("alpha", "First", {"type": "object"}),
-            _mock_tool("beta", "Second", {"type": "string"}),
+            _mock_tool("mcp_test__alpha", "First", {"type": "object"}),
+            _mock_tool("mcp_test__beta", "Second", {"type": "string"}),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "test")
@@ -161,32 +161,30 @@ class TestDiscoverTools:
 
     async def test_populates_server_tool_names(self):
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[_mock_tool("web_fetch"), _mock_tool("web_search")])
+        session = _make_session(tools=[_mock_tool("mcp_web__fetch"), _mock_tool("mcp_web__search")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
 
         await client.discover_tools()
 
-        assert client._server_tool_names == {"mcp_web__web_fetch", "mcp_web__web_search"}
-        assert client._tool_to_server["mcp_web__web_fetch"] == "http://srv"
-        assert client._tool_to_server["mcp_web__web_search"] == "http://srv"
-        assert client._original_names["mcp_web__web_fetch"] == "web_fetch"
-        assert client._original_names["mcp_web__web_search"] == "web_search"
+        assert client._server_tool_names == {"mcp_web__fetch", "mcp_web__search"}
+        assert client._tool_to_server["mcp_web__fetch"] == "http://srv"
+        assert client._tool_to_server["mcp_web__search"] == "http://srv"
 
     async def test_collects_requires_approval_from_meta(self):
         """Tools with meta.requires_approval are added to _approval_required_tools."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("web_search", meta={"requires_approval": True}),
-            _mock_tool("web_fetch", meta={"requires_approval": True}),
-            _mock_tool("calculator"),  # no meta
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__fetch", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__calculator"),  # no meta
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
 
         await client.discover_tools()
 
-        assert client._approval_required_tools == {"mcp_web__web_search", "mcp_web__web_fetch"}
+        assert client._approval_required_tools == {"mcp_web__search", "mcp_web__fetch"}
 
     async def test_no_approval_without_meta(self):
         """Tools without meta or with requires_approval=False are not approval-required."""
@@ -204,8 +202,8 @@ class TestDiscoverTools:
         assert client._approval_required_tools == set()
 
     async def test_multiple_servers(self):
-        session_a = _make_session(tools=[_mock_tool("tool_a")])
-        session_b = _make_session(tools=[_mock_tool("tool_b")])
+        session_a = _make_session(tools=[_mock_tool("mcp_srv_a__tool_a")])
+        session_b = _make_session(tools=[_mock_tool("mcp_srv_b__tool_b")])
 
         client = MCPClient(server_urls=["http://a", "http://b"])
 
@@ -290,18 +288,16 @@ class TestGetSession:
 
 class TestCallTool:
     async def test_normal_call(self):
-        """call_tool dispatches with the original (un-namespaced) name."""
+        """call_tool dispatches with the tool name as-is."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(call_result=_mock_call_result("hello world"))
         client._get_session = AsyncMock(return_value=session)
         client._tool_to_server["mcp_filesystem__read"] = "http://srv"
-        client._original_names["mcp_filesystem__read"] = "read"
 
         result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp"})
 
         assert result == "hello world"
-        # MCP server receives the ORIGINAL name, not the namespaced one
-        session.call_tool.assert_awaited_once_with("read", {"path": "/tmp"}, meta=None)
+        session.call_tool.assert_awaited_once_with("mcp_filesystem__read", {"path": "/tmp"}, meta=None)
 
     async def test_tool_not_found(self):
         client = MCPClient(server_urls=["http://srv"])
@@ -354,18 +350,17 @@ class TestCallTool:
 class TestIsServerTool:
     async def test_known_tool(self):
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[_mock_tool("web_fetch")])
+        session = _make_session(tools=[_mock_tool("mcp_web__fetch")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
-        assert client.is_server_tool("mcp_web__web_fetch") is True
-        # Original name is NOT a server tool (only namespaced names are)
-        assert client.is_server_tool("web_fetch") is False
+        assert client.is_server_tool("mcp_web__fetch") is True
+        assert client.is_server_tool("fetch") is False
 
     async def test_unknown_tool(self):
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[_mock_tool("web_fetch")])
+        session = _make_session(tools=[_mock_tool("mcp_web__fetch")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -375,7 +370,7 @@ class TestIsServerTool:
     async def test_before_discovery(self):
         client = MCPClient(server_urls=["http://srv"])
 
-        assert client.is_server_tool("mcp_web__web_fetch") is False
+        assert client.is_server_tool("mcp_web__fetch") is False
 
 
 # ---------------------------------------------------------------------------
@@ -471,7 +466,7 @@ class TestAsyncContextManager:
 class TestServerToolNamesProperty:
     async def test_returns_set(self):
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[_mock_tool("a"), _mock_tool("b")])
+        session = _make_session(tools=[_mock_tool("mcp_test__a"), _mock_tool("mcp_test__b")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "test")
         await client.discover_tools()
@@ -658,14 +653,14 @@ class TestApprovalLifecycle:
         """Allow Once executes the tool but does NOT auto-approve future calls."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("web_search", meta={"requires_approval": True}),
-            _mock_tool("calculator"),
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__calculator"),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
-        ws = "mcp_web__web_search"
+        ws = "mcp_web__search"
 
         # 1) First call: web_search classified as approval-required
         tc = [ToolCallInfo(name=ws, args={"query": "q"}, id="c1")]
@@ -685,14 +680,14 @@ class TestApprovalLifecycle:
         """Always Allow auto-approves the tool for all future calls in the session."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("web_search", meta={"requires_approval": True}),
-            _mock_tool("calculator"),
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__calculator"),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
-        ws = "mcp_web__web_search"
+        ws = "mcp_web__search"
 
         # 1) First call: web_search classified as approval-required
         tc = [ToolCallInfo(name=ws, args={"query": "q"}, id="c1")]
@@ -713,13 +708,13 @@ class TestApprovalLifecycle:
         """Deny does not add tool to auto-approved; next call still requires approval."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("web_search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
-        ws = "mcp_web__web_search"
+        ws = "mcp_web__search"
         tc = [ToolCallInfo(name=ws, args={"query": "q"}, id="c1")]
         _, server_calls = client.classify_tool_calls(tc, "s1")
         info = client.request_approval(server_calls, "s1", None, [])
@@ -735,14 +730,14 @@ class TestApprovalLifecycle:
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
             _mock_tool("calculator"),
-            _mock_tool("web_search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
         calc = "mcp_web__calculator"
-        ws = "mcp_web__web_search"
+        ws = "mcp_web__search"
         tc = [
             ToolCallInfo(name=calc, args={}, id="c1"),
             ToolCallInfo(name=ws, args={"query": "q"}, id="c2"),
@@ -757,13 +752,13 @@ class TestApprovalLifecycle:
         """Auto-approval for session s1 does not affect session s2."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(tools=[
-            _mock_tool("web_search", meta={"requires_approval": True}),
+            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
         ])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
 
-        ws = "mcp_web__web_search"
+        ws = "mcp_web__search"
 
         # Auto-approve in s1
         client._auto_approved_tools["s1"] = {ws}
@@ -801,33 +796,14 @@ class TestClearSessionState:
 # 16. TestToolNamespacing
 # ---------------------------------------------------------------------------
 
-class TestToolNamespacing:
-    """Tests for mcp_{server}_{tool} namespacing logic."""
+class TestToolPassthrough:
+    """Tests for source-side tool naming — names pass through unchanged."""
 
-    def test_sanitize_server_name(self):
-        assert MCPClient._sanitize_server_name("filesystem") == "filesystem"
-        assert MCPClient._sanitize_server_name("heureum-web") == "heureum_web"
-        assert MCPClient._sanitize_server_name("my.server.name") == "my_server_name"
-        assert MCPClient._sanitize_server_name("") == "unknown"
-        assert MCPClient._sanitize_server_name("---") == "unknown"
-
-    def test_namespace_tool(self):
-        client = MCPClient(server_urls=["http://srv"])
-        _setup_connection(client, "http://srv", "filesystem")
-
-        assert client._namespace_tool("http://srv", "read") == "mcp_filesystem__read"
-        assert client._namespace_tool("http://srv", "bash") == "mcp_filesystem__bash"
-
-    def test_namespace_tool_unknown_server(self):
-        client = MCPClient(server_urls=["http://srv"])
-
-        assert client._namespace_tool("http://unknown", "read") == "mcp_unknown__read"
-
-    async def test_discover_then_call_uses_original_name(self):
-        """Full flow: discover → call_tool uses namespaced name externally, original internally."""
+    async def test_discover_then_call_passthrough(self):
+        """Full flow: discover → call_tool passes the name through unchanged."""
         client = MCPClient(server_urls=["http://srv"])
         session = _make_session(
-            tools=[_mock_tool("read", "Read a file")],
+            tools=[_mock_tool("mcp_filesystem__read", "Read a file")],
             call_result=_mock_call_result("file content"),
         )
         client._get_session = AsyncMock(return_value=session)
@@ -835,20 +811,17 @@ class TestToolNamespacing:
 
         await client.discover_tools()
 
-        # Tool is discoverable by namespaced name
         assert client.is_server_tool("mcp_filesystem__read")
-        assert not client.is_server_tool("read")
 
-        # Calling with namespaced name dispatches original name to MCP
         result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp/x"})
         assert result == "file content"
-        session.call_tool.assert_awaited_once_with("read", {"path": "/tmp/x"}, meta=None)
+        session.call_tool.assert_awaited_once_with("mcp_filesystem__read", {"path": "/tmp/x"}, meta=None)
 
-    async def test_no_collision_between_servers(self):
-        """Two servers both providing 'read' get distinct namespaced names."""
+    async def test_distinct_names_from_different_servers(self):
+        """Two servers register tools with their own namespaced names."""
         client = MCPClient(server_urls=["http://a", "http://b"])
-        session_a = _make_session(tools=[_mock_tool("read")])
-        session_b = _make_session(tools=[_mock_tool("read")])
+        session_a = _make_session(tools=[_mock_tool("mcp_filesystem__read")])
+        session_b = _make_session(tools=[_mock_tool("mcp_cloud__read")])
 
         async def fake_get_session(url):
             return session_a if url == "http://a" else session_b
@@ -861,5 +834,3 @@ class TestToolNamespacing:
 
         names = {t["function"]["name"] for t in tools}
         assert names == {"mcp_filesystem__read", "mcp_cloud__read"}
-        assert client._original_names["mcp_filesystem__read"] == "read"
-        assert client._original_names["mcp_cloud__read"] == "read"

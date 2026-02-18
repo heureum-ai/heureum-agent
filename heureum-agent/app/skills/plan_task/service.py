@@ -474,7 +474,7 @@ class PlanSkill:
             return
         content = self.render_markdown(todo)
         try:
-            await self._write_tool_fn("write", {"path": todo.filename, "content": content}, session_id=session_id)
+            await self._write_tool_fn("mcp_filesystem__write", {"path": todo.filename, "content": content}, session_id=session_id)
         except Exception as e:
             logger.warning("Failed to write %s: %s", todo.filename, e)
 
