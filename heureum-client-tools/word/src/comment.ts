@@ -12,7 +12,7 @@
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
-import { parseXml, buildXml, getTagName } from "./xml-utils";
+import { buildXml, getTagName, parseXml } from "./xml-utils";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -253,7 +253,6 @@ function ensureCommentRelationships(unpackedDir: string): void {
     "document.xml.rels"
   );
   if (!fs.existsSync(relsPath)) return;
-  if (hasRelationship(relsPath, "comments.xml")) return;
 
   const content = fs.readFileSync(relsPath, "utf-8");
   const nodes = parseXml(content);
@@ -294,7 +293,10 @@ function ensureCommentRelationships(unpackedDir: string): void {
 
   if (!Array.isArray(rootNode[rootTag])) rootNode[rootTag] = [];
 
+  let added = 0;
   for (const [relType, target] of rels) {
+    // Check each target individually — some may already exist
+    if (hasRelationship(relsPath, target)) continue;
     rootNode[rootTag].push({
       Relationship: [],
       ":@": {
@@ -304,16 +306,18 @@ function ensureCommentRelationships(unpackedDir: string): void {
       },
     });
     nextRid++;
+    added++;
   }
 
-  fs.writeFileSync(relsPath, buildXmlString(nodes), "utf-8");
+  if (added > 0) {
+    fs.writeFileSync(relsPath, buildXmlString(nodes), "utf-8");
+  }
 }
 
 /** Ensure comment content types are registered */
 function ensureCommentContentTypes(unpackedDir: string): void {
   const ctPath = path.join(unpackedDir, "[Content_Types].xml");
   if (!fs.existsSync(ctPath)) return;
-  if (hasContentType(ctPath, "/word/comments.xml")) return;
 
   const content = fs.readFileSync(ctPath, "utf-8");
   const nodes = parseXml(content);
@@ -352,7 +356,10 @@ function ensureCommentContentTypes(unpackedDir: string): void {
 
   if (!Array.isArray(rootNode[rootTag])) rootNode[rootTag] = [];
 
+  let added = 0;
   for (const [partName, contentType] of overrides) {
+    // Check each content type individually
+    if (hasContentType(ctPath, partName)) continue;
     rootNode[rootTag].push({
       Override: [],
       ":@": {
@@ -360,9 +367,12 @@ function ensureCommentContentTypes(unpackedDir: string): void {
         "@_ContentType": contentType,
       },
     });
+    added++;
   }
 
-  fs.writeFileSync(ctPath, buildXmlString(nodes), "utf-8");
+  if (added > 0) {
+    fs.writeFileSync(ctPath, buildXmlString(nodes), "utf-8");
+  }
 }
 
 /** Copy a template file if the destination doesn't exist */
@@ -421,12 +431,12 @@ export function addComment(
 
   // comments.xml
   const commentsPath = path.join(word, "comments.xml");
-  const firstComment = !fs.existsSync(commentsPath);
-  if (firstComment) {
+  if (!fs.existsSync(commentsPath)) {
     ensureTemplate("comments.xml", commentsPath);
-    ensureCommentRelationships(unpackedDir);
-    ensureCommentContentTypes(unpackedDir);
   }
+  // Always ensure rels & content types — the functions are idempotent
+  ensureCommentRelationships(unpackedDir);
+  ensureCommentContentTypes(unpackedDir);
 
   const commentXml = COMMENT_XML.replace("{id}", String(commentId))
     .replace("{author}", author)

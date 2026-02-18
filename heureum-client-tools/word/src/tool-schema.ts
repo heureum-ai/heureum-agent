@@ -1,7 +1,7 @@
 /**
  * DOCX ToolDefinitions for LLM tool binding.
- * 12 tools covering read, comment, redline, validate, simplify, accept, convert, create,
- * delete-paragraph, review-changes, insert-image, convert-to-images.
+ * 13 tools covering read, comment, redline, validate, simplify, accept, convert, create,
+ * delete-paragraph, review-changes, insert-image, convert-to-images, analyze-style.
  */
 
 interface ToolDefinition {
@@ -10,11 +10,13 @@ interface ToolDefinition {
   description?: string
   parameters?: Record<string, any>
   guide?: string
+  display_name?: string
 }
 
 const DOCX_READ_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_read',
+  display_name: 'Read DOCX',
   description:
     'Read a DOCX file and extract its content: paragraphs (with indices), tracked changes, and comments. Use paragraph indices for subsequent add_comment or redline operations.',
   parameters: {
@@ -29,6 +31,7 @@ const DOCX_READ_TOOL: ToolDefinition = {
 const DOCX_ADD_COMMENT_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_add_comment',
+  display_name: 'Add Comment',
   description:
     'Add a comment to one or more paragraphs in a DOCX file. Use docx_read first to get paragraph indices.',
   parameters: {
@@ -61,6 +64,7 @@ const DOCX_ADD_COMMENT_TOOL: ToolDefinition = {
 const DOCX_REDLINE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_redline',
+  display_name: 'Redline',
   description:
     'Apply tracked changes (redlines) to a DOCX file. Each change specifies text to find and its replacement. Use docx_read first to see current content.',
   parameters: {
@@ -103,6 +107,7 @@ const DOCX_REDLINE_TOOL: ToolDefinition = {
 const DOCX_VALIDATE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_validate',
+  display_name: 'Validate',
   description:
     'Validate a DOCX file for structural integrity: XML validity, tracked change consistency, comment markers, and more. Optionally auto-repairs issues.',
   parameters: {
@@ -121,6 +126,7 @@ const DOCX_VALIDATE_TOOL: ToolDefinition = {
 const DOCX_SIMPLIFY_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_simplify',
+  display_name: 'Simplify',
   description:
     'Simplify a DOCX file by merging adjacent runs with identical formatting and consolidating tracked changes from the same author.',
   parameters: {
@@ -139,6 +145,7 @@ const DOCX_SIMPLIFY_TOOL: ToolDefinition = {
 const DOCX_ACCEPT_CHANGES_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_accept_changes',
+  display_name: 'Accept Changes',
   description:
     'Accept all tracked changes in a DOCX file using LibreOffice, producing a clean document.',
   parameters: {
@@ -157,6 +164,7 @@ const DOCX_ACCEPT_CHANGES_TOOL: ToolDefinition = {
 const DOCX_CONVERT_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_convert',
+  display_name: 'Convert',
   description: 'Convert a DOCX file to another format (pdf, html, txt, rtf) using LibreOffice.',
   parameters: {
     type: 'object',
@@ -179,6 +187,7 @@ const DOCX_CONVERT_TOOL: ToolDefinition = {
 const DOCX_CREATE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_create',
+  display_name: 'Create DOCX',
   description:
     'Create a new DOCX document from structured content blocks (paragraphs, tables, images, table of contents).',
   parameters: {
@@ -199,11 +208,31 @@ const DOCX_CREATE_TOOL: ToolDefinition = {
                 bold: { type: 'boolean' },
                 italic: { type: 'boolean' },
                 underline: { type: 'boolean' },
+                strikethrough: { type: 'boolean', description: 'Strikethrough text' },
+                color: { type: 'string', description: 'Hex color without # (e.g. "FF0000" for red)' },
+                font_size: { type: 'number', description: 'Font size in half-points (e.g. 24 = 12pt)' },
                 alignment: { type: 'string', enum: ['left', 'center', 'right'] },
                 bullet: { type: 'boolean' },
                 numbered: { type: 'boolean' },
+                level: { type: 'integer', description: 'Nesting level for lists (0, 1, 2)' },
                 page_break: { type: 'boolean' },
                 link: { type: 'string' },
+                spacing: {
+                  type: 'object',
+                  description: 'Paragraph spacing in twips',
+                  properties: {
+                    before: { type: 'number' },
+                    after: { type: 'number' },
+                  },
+                },
+                indent: {
+                  type: 'object',
+                  description: 'Paragraph indentation in twips',
+                  properties: {
+                    left: { type: 'number' },
+                    hanging: { type: 'number' },
+                  },
+                },
               },
             },
             table: {
@@ -248,6 +277,10 @@ const DOCX_CREATE_TOOL: ToolDefinition = {
         description: 'Whether to use landscape orientation. Defaults to false.',
       },
       font: { type: 'string', description: "Font family. Defaults to 'Arial'." },
+      font_size: { type: 'number', description: 'Default font size in half-points (e.g. 24 = 12pt).' },
+      margin: {
+        description: 'Page margins in inches. Single number for all sides, or object with top/right/bottom/left.',
+      },
       header: { type: 'string', description: 'Optional header text for all pages.' },
       footer: { type: 'string', description: 'Optional footer text with auto page number.' },
     },
@@ -258,6 +291,7 @@ const DOCX_CREATE_TOOL: ToolDefinition = {
 const DOCX_DELETE_PARAGRAPH_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_delete_paragraph',
+  display_name: 'Delete Paragraph',
   description:
     'Delete one or more paragraphs from a DOCX file as tracked deletions. Use docx_read first to get paragraph indices.',
   parameters: {
@@ -282,6 +316,7 @@ const DOCX_DELETE_PARAGRAPH_TOOL: ToolDefinition = {
 const DOCX_REVIEW_CHANGES_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_review_changes',
+  display_name: 'Review Changes',
   description:
     'Reject or restore a specific tracked change in a DOCX file. Use docx_read first to see tracked changes with their indices.',
   parameters: {
@@ -310,6 +345,7 @@ const DOCX_REVIEW_CHANGES_TOOL: ToolDefinition = {
 const DOCX_INSERT_IMAGE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_insert_image',
+  display_name: 'Insert Image',
   description:
     'Insert an image into a DOCX file at a specific paragraph position. Use docx_read first to get paragraph indices.',
   parameters: {
@@ -336,6 +372,7 @@ const DOCX_INSERT_IMAGE_TOOL: ToolDefinition = {
 const DOCX_CONVERT_TO_IMAGES_TOOL: ToolDefinition = {
   type: 'function',
   name: 'docx_convert_to_images',
+  display_name: 'Convert to Images',
   description:
     'Convert a DOCX file to a series of page images (JPEG or PNG) using LibreOffice and pdftoppm.',
   parameters: {
@@ -357,6 +394,21 @@ const DOCX_CONVERT_TO_IMAGES_TOOL: ToolDefinition = {
   },
 }
 
+const DOCX_ANALYZE_STYLE_TOOL: ToolDefinition = {
+  type: 'function',
+  name: 'docx_analyze_style',
+  display_name: 'Analyze Style',
+  description:
+    'Analyze the visual style of a DOCX document and return a compact profile: page layout, fonts, colors, heading styles, body text patterns, list/table formatting, and theme details. Use before docx_create to replicate a document\'s look-and-feel.',
+  parameters: {
+    type: 'object',
+    properties: {
+      path: { type: 'string', description: 'Path to the .docx file to analyze' },
+    },
+    required: ['path'],
+  },
+}
+
 export const DOCX_TOOLS: ToolDefinition[] = [
   DOCX_READ_TOOL,
   DOCX_ADD_COMMENT_TOOL,
@@ -370,4 +422,5 @@ export const DOCX_TOOLS: ToolDefinition[] = [
   DOCX_REVIEW_CHANGES_TOOL,
   DOCX_INSERT_IMAGE_TOOL,
   DOCX_CONVERT_TO_IMAGES_TOOL,
+  DOCX_ANALYZE_STYLE_TOOL,
 ]

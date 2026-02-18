@@ -4,27 +4,44 @@
  * Each function handles the full cycle: unpack -> modify -> pack -> cleanup.
  * Returns a ToolResult with success status, human-readable output, and optional output path.
  */
-import * as fs from "fs";
-import * as path from "path";
-import * as os from "os";
 import { spawnSync } from "child_process";
+import {
+  AlignmentType,
+  BorderStyle,
+  Document,
+  ExternalHyperlink,
+  Footer,
+  Header,
+  HeadingLevel,
+  ImageRun,
+  LevelFormat,
+  Packer,
+  PageBreak,
+  PageNumber,
+  PageOrientation,
+  Paragraph,
+  ShadingType,
+  Table,
+  TableCell,
+  TableOfContents,
+  TableRow,
+  TextRun,
+  WidthType,
+} from "docx";
 import { XMLBuilder } from "fast-xml-parser";
-import { parseXml, getTagName, tagMatches, BUILDER_OPTIONS as BASE_BUILDER_OPTIONS } from "./xml-utils";
-import { unpack } from "./unpack";
-import { pack } from "./pack";
-import { addComment, _internal as commentInternal } from "./comment";
+import * as fs from "fs";
+import * as os from "os";
+import * as path from "path";
 import { acceptChanges } from "./accept-changes";
-import { runSoffice } from "./soffice";
+import { addComment, _internal as commentInternal } from "./comment";
 import { mergeRuns } from "./helpers/merge-runs";
 import { simplifyRedlines } from "./helpers/simplify-redlines";
+import { pack } from "./pack";
+import { runSoffice } from "./soffice";
+import { unpack } from "./unpack";
 import { DOCXSchemaValidator } from "./validators/docx";
 import { RedliningValidator } from "./validators/redlining";
-import {
-  Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType,
-  PageOrientation, LevelFormat, PageBreak,
-  Table, TableRow, TableCell, BorderStyle, WidthType, ShadingType,
-  ImageRun, Header, Footer, PageNumber, TableOfContents, ExternalHyperlink,
-} from "docx";
+import { BUILDER_OPTIONS as BASE_BUILDER_OPTIONS, getTagName, parseXml, tagMatches } from "./xml-utils";
 
 // ---------------------------------------------------------------------------
 // Shared types and helpers
@@ -123,7 +140,15 @@ interface CommentInfo {
   text: string;
 }
 
-/** Extract paragraph text and basic formatting from parsed XML nodes. */
+/** Extract an attribute value from a parsed XML node. */
+function extractAttr(node: any, attrName: string): string | null {
+  const attrs = node[":@"];
+  if (!attrs) return null;
+  // Try with w: prefix first, then plain
+  return attrs[`@_w:${attrName}`] ?? attrs[`@_${attrName}`] ?? null;
+}
+
+/** Extract paragraph text and formatting from parsed XML nodes. */
 function extractParagraphs(nodes: any[]): ParagraphInfo[] {
   const paragraphs: ParagraphInfo[] = [];
   let idx = 0;
@@ -143,6 +168,26 @@ function extractParagraphs(nodes: any[]): ParagraphInfo[] {
             if (!childTag) continue;
             const local = getLocalName(childTag);
 
+            // Extract paragraph-level properties
+            if (local === "pPr") {
+              if (Array.isArray(child[childTag])) {
+                for (const prop of child[childTag]) {
+                  const propTag = getTagName(prop);
+                  if (!propTag) continue;
+                  const propLocal = getLocalName(propTag);
+                  if (propLocal === "pStyle") {
+                    const v = extractAttr(prop, "val");
+                    if (v) fmt.add(`style:${v}`);
+                  }
+                  if (propLocal === "jc") {
+                    const v = extractAttr(prop, "val");
+                    if (v && v !== "left") fmt.add(`align:${v}`);
+                  }
+                }
+              }
+              continue;
+            }
+
             if (local === "r") {
               // Check run properties for formatting
               if (Array.isArray(child[childTag])) {
@@ -158,6 +203,18 @@ function extractParagraphs(nodes: any[]): ParagraphInfo[] {
                         if (propLocal === "i") fmt.add("italic");
                         if (propLocal === "u") fmt.add("underline");
                         if (propLocal === "strike") fmt.add("strikethrough");
+                        if (propLocal === "rFonts") {
+                          const f = extractAttr(prop, "ascii") || extractAttr(prop, "hAnsi");
+                          if (f) fmt.add(`font:${f}`);
+                        }
+                        if (propLocal === "sz") {
+                          const v = extractAttr(prop, "val");
+                          if (v) fmt.add(`${parseInt(v) / 2}pt`);
+                        }
+                        if (propLocal === "color") {
+                          const v = extractAttr(prop, "val");
+                          if (v && v !== "auto") fmt.add(`color:#${v}`);
+                        }
                       }
                     }
                   }
@@ -1646,23 +1703,35 @@ export async function docxCreate(params: {
         {
           reference: "bullets",
           levels: [
-            { level: 0, format: LevelFormat.BULLET, text: "\u2022", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 720, hanging: 360 } } } },
-            { level: 1, format: LevelFormat.BULLET, text: "\u25E6", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 1440, hanging: 360 } } } },
-            { level: 2, format: LevelFormat.BULLET, text: "\u25AA", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 2160, hanging: 360 } } } },
+            {
+              level: 0, format: LevelFormat.BULLET, text: "\u2022", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 720, hanging: 360 } } }
+            },
+            {
+              level: 1, format: LevelFormat.BULLET, text: "\u25E6", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 1440, hanging: 360 } } }
+            },
+            {
+              level: 2, format: LevelFormat.BULLET, text: "\u25AA", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 2160, hanging: 360 } } }
+            },
           ],
         },
         {
           reference: "numbers",
           levels: [
-            { level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 720, hanging: 360 } } } },
-            { level: 1, format: LevelFormat.LOWER_LETTER, text: "%2)", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 1440, hanging: 360 } } } },
-            { level: 2, format: LevelFormat.LOWER_ROMAN, text: "%3.", alignment: AlignmentType.LEFT,
-              style: { paragraph: { indent: { left: 2160, hanging: 360 } } } },
+            {
+              level: 0, format: LevelFormat.DECIMAL, text: "%1.", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 720, hanging: 360 } } }
+            },
+            {
+              level: 1, format: LevelFormat.LOWER_LETTER, text: "%2)", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 1440, hanging: 360 } } }
+            },
+            {
+              level: 2, format: LevelFormat.LOWER_ROMAN, text: "%3.", alignment: AlignmentType.LEFT,
+              style: { paragraph: { indent: { left: 2160, hanging: 360 } } }
+            },
           ],
         },
       ],
@@ -2591,6 +2660,795 @@ export async function docxConvertToImages(params: {
 }
 
 // ---------------------------------------------------------------------------
+// 13. docxAnalyzeStyle — comprehensive style profiling
+// ---------------------------------------------------------------------------
+
+interface DetailedRunInfo {
+  text: string;
+  font: string | null;
+  eastAsiaFont: string | null;
+  size: number | null;
+  color: string | null;
+  highlight: string | null;
+  bold: boolean;
+  italic: boolean;
+  underline: string | null;
+  strike: boolean;
+  dstrike: boolean;
+  superScript: boolean;
+  subScript: boolean;
+  smallCaps: boolean;
+  allCaps: boolean;
+}
+
+interface DetailedParagraphInfo {
+  index: number;
+  text: string;
+  runs: DetailedRunInfo[];
+  styleName: string | null;
+  alignment: string | null;
+  spacing: { before: number | null; after: number | null; line: number | null; lineRule: string | null };
+  indentation: { left: number | null; right: number | null; hanging: number | null; firstLine: number | null };
+  numId: number | null;
+  numLevel: number | null;
+  borders: Record<string, { style: string; size: string; color: string }>;
+  shading: { fill: string | null; color: string | null; val: string | null };
+}
+
+interface DocDefaults {
+  defaultFont: string | null;
+  defaultEastAsiaFont: string | null;
+  defaultSize: number | null;
+  defaultSpacing: { before: number | null; after: number | null; line: number | null };
+}
+
+interface StyleDef {
+  styleId: string;
+  name: string;
+  type: string;
+  basedOn: string | null;
+  next: string | null;
+  font: string | null;
+  size: number | null;
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+  color: string | null;
+  alignment: string | null;
+  spacing: { before: number | null; after: number | null; line: number | null };
+}
+
+interface ThemeInfo {
+  name: string | null;
+  colorScheme: Record<string, string>;
+  majorFont: { latin: string | null; eastAsia: string | null };
+  minorFont: { latin: string | null; eastAsia: string | null };
+}
+
+interface NumberingLevel {
+  level: number;
+  numFmt: string | null;
+  lvlText: string | null;
+  start: number | null;
+  font: string | null;
+}
+
+interface PageLayout {
+  width: number | null;
+  height: number | null;
+  orient: string | null;
+  margins: { top: number | null; right: number | null; bottom: number | null; left: number | null; header: number | null; footer: number | null };
+  cols: number | null;
+}
+
+interface TableStyleInfo {
+  tableIndex: number;
+  style: string | null;
+  layout: string | null;
+  rowCount: number;
+  cellCount: number;
+  cellShading: string[];
+  borderStyles: string[];
+}
+
+// --- Extraction helpers ---
+
+function extractRunPropsForProfile(rPrChildren: any[]): DetailedRunInfo {
+  const run: DetailedRunInfo = {
+    text: "", font: null, eastAsiaFont: null, size: null, color: null, highlight: null,
+    bold: false, italic: false, underline: null, strike: false, dstrike: false,
+    superScript: false, subScript: false, smallCaps: false, allCaps: false,
+  };
+  if (!Array.isArray(rPrChildren)) return run;
+  for (const prop of rPrChildren) {
+    const pt = getTagName(prop);
+    if (!pt) continue;
+    const local = getLocalName(pt);
+    if (local === "b") run.bold = true;
+    if (local === "i") run.italic = true;
+    if (local === "u") run.underline = extractAttr(prop, "val") || "single";
+    if (local === "strike") run.strike = true;
+    if (local === "dstrike") run.dstrike = true;
+    if (local === "smallCaps") run.smallCaps = true;
+    if (local === "caps") run.allCaps = true;
+    if (local === "vertAlign") {
+      const val = extractAttr(prop, "val");
+      if (val === "superscript") run.superScript = true;
+      if (val === "subscript") run.subScript = true;
+    }
+    if (local === "rFonts") {
+      run.font = extractAttr(prop, "ascii") || extractAttr(prop, "hAnsi");
+      run.eastAsiaFont = extractAttr(prop, "eastAsia");
+    }
+    if (local === "sz") {
+      const val = extractAttr(prop, "val");
+      if (val) run.size = parseInt(val) / 2;
+    }
+    if (local === "color") {
+      const val = extractAttr(prop, "val");
+      if (val && val !== "auto") run.color = `#${val}`;
+    }
+    if (local === "highlight") run.highlight = extractAttr(prop, "val");
+  }
+  return run;
+}
+
+function extractDetailedParagraphs(nodes: any[]): DetailedParagraphInfo[] {
+  const paragraphs: DetailedParagraphInfo[] = [];
+  let idx = 0;
+
+  function processParagraph(pNode: any, pTag: string): void {
+    const info: DetailedParagraphInfo = {
+      index: idx, text: "", runs: [],
+      styleName: null, alignment: null,
+      spacing: { before: null, after: null, line: null, lineRule: null },
+      indentation: { left: null, right: null, hanging: null, firstLine: null },
+      numId: null, numLevel: null,
+      borders: {}, shading: { fill: null, color: null, val: null },
+    };
+    const children = pNode[pTag];
+    if (!Array.isArray(children)) { idx++; paragraphs.push(info); return; }
+
+    for (const child of children) {
+      const childTag = getTagName(child);
+      if (!childTag) continue;
+      const local = getLocalName(childTag);
+
+      if (local === "pPr") {
+        const pPrChildren = child[childTag];
+        if (!Array.isArray(pPrChildren)) continue;
+        for (const prop of pPrChildren) {
+          const pt = getTagName(prop);
+          if (!pt) continue;
+          const pl = getLocalName(pt);
+          if (pl === "pStyle") info.styleName = extractAttr(prop, "val");
+          if (pl === "jc") info.alignment = extractAttr(prop, "val");
+          if (pl === "spacing") {
+            info.spacing.before = parseInt(extractAttr(prop, "before") || "") || null;
+            info.spacing.after = parseInt(extractAttr(prop, "after") || "") || null;
+            info.spacing.line = parseInt(extractAttr(prop, "line") || "") || null;
+            info.spacing.lineRule = extractAttr(prop, "lineRule");
+          }
+          if (pl === "ind") {
+            info.indentation.left = parseInt(extractAttr(prop, "left") || "") || null;
+            info.indentation.right = parseInt(extractAttr(prop, "right") || "") || null;
+            info.indentation.hanging = parseInt(extractAttr(prop, "hanging") || "") || null;
+            info.indentation.firstLine = parseInt(extractAttr(prop, "firstLine") || "") || null;
+          }
+          if (pl === "numPr") {
+            const numChildren = prop[pt];
+            if (Array.isArray(numChildren)) {
+              for (const nc of numChildren) {
+                const ncTag = getTagName(nc);
+                if (!ncTag) continue;
+                if (getLocalName(ncTag) === "ilvl") { const v = extractAttr(nc, "val"); if (v != null) info.numLevel = parseInt(v); }
+                if (getLocalName(ncTag) === "numId") { const v = extractAttr(nc, "val"); if (v != null) info.numId = parseInt(v); }
+              }
+            }
+          }
+          if (pl === "pBdr") {
+            const bdrChildren = prop[pt];
+            if (Array.isArray(bdrChildren)) {
+              for (const bdr of bdrChildren) {
+                const bdrTag = getTagName(bdr);
+                if (!bdrTag) continue;
+                info.borders[getLocalName(bdrTag)] = {
+                  style: extractAttr(bdr, "val") || "", size: extractAttr(bdr, "sz") || "", color: extractAttr(bdr, "color") || "",
+                };
+              }
+            }
+          }
+          if (pl === "shd") {
+            info.shading.fill = extractAttr(prop, "fill");
+            info.shading.color = extractAttr(prop, "color");
+            info.shading.val = extractAttr(prop, "val");
+          }
+        }
+      }
+
+      if (local === "r") {
+        const runChildren = child[childTag];
+        if (!Array.isArray(runChildren)) continue;
+        let runInfo: DetailedRunInfo = { text: "", font: null, eastAsiaFont: null, size: null, color: null, highlight: null, bold: false, italic: false, underline: null, strike: false, dstrike: false, superScript: false, subScript: false, smallCaps: false, allCaps: false };
+        const textParts: string[] = [];
+        for (const rc of runChildren) {
+          const rcTag = getTagName(rc);
+          if (!rcTag) continue;
+          const rcLocal = getLocalName(rcTag);
+          if (rcLocal === "rPr") runInfo = extractRunPropsForProfile(rc[rcTag]);
+          else if (rcLocal === "t" || rcLocal === "delText") textParts.push(getTextContent(rc));
+        }
+        runInfo.text = textParts.join("");
+        if (runInfo.text.length > 0) info.runs.push(runInfo);
+      }
+    }
+
+    info.text = info.runs.map(r => r.text).join("");
+    idx++;
+    paragraphs.push(info);
+  }
+
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node);
+      if (!tag) continue;
+      if (getLocalName(tag) === "p") processParagraph(node, tag);
+      else if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return paragraphs;
+}
+
+function extractDocDefaults(nodes: any[]): DocDefaults {
+  const defaults: DocDefaults = { defaultFont: null, defaultEastAsiaFont: null, defaultSize: null, defaultSpacing: { before: null, after: null, line: null } };
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node);
+      if (!tag) continue;
+      if (getLocalName(tag) === "docDefaults") {
+        const children = node[tag];
+        if (!Array.isArray(children)) continue;
+        for (const child of children) {
+          const ct = getTagName(child);
+          if (!ct) continue;
+          const cl = getLocalName(ct);
+          if (cl === "rPrDefault") {
+            const rPrDefaultChildren = child[ct];
+            if (!Array.isArray(rPrDefaultChildren)) continue;
+            for (const rpc of rPrDefaultChildren) {
+              const rpct = getTagName(rpc);
+              if (!rpct || getLocalName(rpct) !== "rPr") continue;
+              const rPrChildren = rpc[rpct];
+              if (!Array.isArray(rPrChildren)) continue;
+              for (const prop of rPrChildren) {
+                const pt = getTagName(prop); if (!pt) continue;
+                if (getLocalName(pt) === "rFonts") { defaults.defaultFont = extractAttr(prop, "ascii") || extractAttr(prop, "hAnsi"); defaults.defaultEastAsiaFont = extractAttr(prop, "eastAsia"); }
+                if (getLocalName(pt) === "sz") { const v = extractAttr(prop, "val"); if (v) defaults.defaultSize = parseInt(v) / 2; }
+              }
+            }
+          }
+          if (cl === "pPrDefault") {
+            const pPrDefaultChildren = child[ct];
+            if (!Array.isArray(pPrDefaultChildren)) continue;
+            for (const ppc of pPrDefaultChildren) {
+              const ppct = getTagName(ppc);
+              if (!ppct || getLocalName(ppct) !== "pPr") continue;
+              const pPrChildren = ppc[ppct];
+              if (!Array.isArray(pPrChildren)) continue;
+              for (const prop of pPrChildren) {
+                const pt = getTagName(prop); if (!pt) continue;
+                if (getLocalName(pt) === "spacing") {
+                  const before = extractAttr(prop, "before"); const after = extractAttr(prop, "after"); const line = extractAttr(prop, "line");
+                  if (before) defaults.defaultSpacing.before = parseInt(before);
+                  if (after) defaults.defaultSpacing.after = parseInt(after);
+                  if (line) defaults.defaultSpacing.line = parseInt(line);
+                }
+              }
+            }
+          }
+        }
+      } else if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return defaults;
+}
+
+function extractStyleDefs(nodes: any[]): StyleDef[] {
+  const styles: StyleDef[] = [];
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node);
+      if (!tag) continue;
+      if (getLocalName(tag) === "style") {
+        const def: StyleDef = {
+          styleId: extractAttr(node, "styleId") || "", name: "", type: extractAttr(node, "type") || "",
+          basedOn: null, next: null, font: null, size: null, bold: false, italic: false, underline: false,
+          color: null, alignment: null, spacing: { before: null, after: null, line: null },
+        };
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const child of children) {
+            const ct = getTagName(child); if (!ct) continue;
+            const cl = getLocalName(ct);
+            if (cl === "name") def.name = extractAttr(child, "val") || "";
+            if (cl === "basedOn") def.basedOn = extractAttr(child, "val");
+            if (cl === "next") def.next = extractAttr(child, "val");
+            if (cl === "rPr") {
+              const rPrChildren = child[ct];
+              if (Array.isArray(rPrChildren)) {
+                for (const rp of rPrChildren) {
+                  const rt = getTagName(rp); if (!rt) continue;
+                  const rl = getLocalName(rt);
+                  if (rl === "rFonts") def.font = extractAttr(rp, "ascii") || extractAttr(rp, "hAnsi");
+                  if (rl === "sz") { const v = extractAttr(rp, "val"); if (v) def.size = parseInt(v) / 2; }
+                  if (rl === "b") def.bold = true;
+                  if (rl === "i") def.italic = true;
+                  if (rl === "u") def.underline = true;
+                  if (rl === "color") { const v = extractAttr(rp, "val"); if (v && v !== "auto") def.color = `#${v}`; }
+                }
+              }
+            }
+            if (cl === "pPr") {
+              const pPrChildren = child[ct];
+              if (Array.isArray(pPrChildren)) {
+                for (const pp of pPrChildren) {
+                  const pt = getTagName(pp); if (!pt) continue;
+                  const pl = getLocalName(pt);
+                  if (pl === "jc") def.alignment = extractAttr(pp, "val");
+                  if (pl === "spacing") {
+                    const before = extractAttr(pp, "before"); const after = extractAttr(pp, "after"); const line = extractAttr(pp, "line");
+                    if (before) def.spacing.before = parseInt(before);
+                    if (after) def.spacing.after = parseInt(after);
+                    if (line) def.spacing.line = parseInt(line);
+                  }
+                }
+              }
+            }
+          }
+        }
+        styles.push(def);
+      } else if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return styles;
+}
+
+function extractThemeInfo(themeXml: string): ThemeInfo {
+  const nodes = parseXml(themeXml);
+  const theme: ThemeInfo = { name: null, colorScheme: {}, majorFont: { latin: null, eastAsia: null }, minorFont: { latin: null, eastAsia: null } };
+  function walkAll(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node); if (!tag) continue;
+      const local = getLocalName(tag);
+      if (local === "theme") theme.name = extractAttr(node, "name");
+      if (local === "clrScheme") {
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const cn of children) {
+            const ct = getTagName(cn); if (!ct) continue;
+            const colorName = getLocalName(ct);
+            const cc = cn[ct];
+            if (Array.isArray(cc)) {
+              for (const vc of cc) {
+                const vcTag = getTagName(vc); if (!vcTag) continue;
+                const vcLocal = getLocalName(vcTag);
+                if (vcLocal === "srgbClr") theme.colorScheme[colorName] = `#${extractAttr(vc, "val") || ""}`;
+                else if (vcLocal === "sysClr") theme.colorScheme[colorName] = extractAttr(vc, "lastClr") ? `#${extractAttr(vc, "lastClr")}` : (extractAttr(vc, "val") || "system");
+              }
+            }
+          }
+        }
+      }
+      if (local === "majorFont" || local === "minorFont") {
+        const target = local === "majorFont" ? theme.majorFont : theme.minorFont;
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const fc of children) {
+            const fcTag = getTagName(fc); if (!fcTag) continue;
+            if (getLocalName(fcTag) === "latin") target.latin = extractAttr(fc, "typeface");
+            if (getLocalName(fcTag) === "ea") target.eastAsia = extractAttr(fc, "typeface");
+          }
+        }
+      }
+      if (Array.isArray(node[tag])) walkAll(node[tag]);
+    }
+  }
+  walkAll(nodes);
+  return theme;
+}
+
+function extractNumberingDefs(numXml: string): { abstracts: Record<number, NumberingLevel[]>; mappings: Record<number, number> } {
+  const nodes = parseXml(numXml);
+  const abstracts: Record<number, NumberingLevel[]> = {};
+  const mappings: Record<number, number> = {};
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node); if (!tag) continue;
+      const local = getLocalName(tag);
+      if (local === "abstractNum") {
+        const absId = parseInt(extractAttr(node, "abstractNumId") || "0");
+        const levels: NumberingLevel[] = [];
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const child of children) {
+            const ct = getTagName(child); if (!ct || getLocalName(ct) !== "lvl") continue;
+            const lvl: NumberingLevel = { level: parseInt(extractAttr(child, "ilvl") || "0"), numFmt: null, lvlText: null, start: null, font: null };
+            const lvlChildren = child[ct];
+            if (Array.isArray(lvlChildren)) {
+              for (const lc of lvlChildren) {
+                const lt = getTagName(lc); if (!lt) continue;
+                const ll = getLocalName(lt);
+                if (ll === "numFmt") lvl.numFmt = extractAttr(lc, "val");
+                if (ll === "lvlText") lvl.lvlText = extractAttr(lc, "val");
+                if (ll === "start") lvl.start = parseInt(extractAttr(lc, "val") || "1");
+              }
+            }
+            levels.push(lvl);
+          }
+        }
+        abstracts[absId] = levels;
+      }
+      if (local === "num") {
+        const numId = parseInt(extractAttr(node, "numId") || "0");
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const child of children) {
+            const ct = getTagName(child);
+            if (ct && getLocalName(ct) === "abstractNumId") mappings[numId] = parseInt(extractAttr(child, "val") || "0");
+          }
+        }
+      }
+      if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return { abstracts, mappings };
+}
+
+function extractPageLayout(nodes: any[]): PageLayout {
+  const layout: PageLayout = { width: null, height: null, orient: null, margins: { top: null, right: null, bottom: null, left: null, header: null, footer: null }, cols: null };
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node); if (!tag) continue;
+      if (getLocalName(tag) === "sectPr") {
+        const children = node[tag];
+        if (!Array.isArray(children)) continue;
+        for (const child of children) {
+          const ct = getTagName(child); if (!ct) continue;
+          const cl = getLocalName(ct);
+          if (cl === "pgSz") { layout.width = parseInt(extractAttr(child, "w") || "") || null; layout.height = parseInt(extractAttr(child, "h") || "") || null; layout.orient = extractAttr(child, "orient"); }
+          if (cl === "pgMar") { layout.margins.top = parseInt(extractAttr(child, "top") || "") || null; layout.margins.right = parseInt(extractAttr(child, "right") || "") || null; layout.margins.bottom = parseInt(extractAttr(child, "bottom") || "") || null; layout.margins.left = parseInt(extractAttr(child, "left") || "") || null; }
+          if (cl === "cols") layout.cols = parseInt(extractAttr(child, "num") || "1");
+        }
+      }
+      if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return layout;
+}
+
+function extractTableStyleInfo(nodes: any[]): TableStyleInfo[] {
+  const tables: TableStyleInfo[] = [];
+  let tblIdx = 0;
+  function walk(nodeArr: any[]): void {
+    for (const node of nodeArr) {
+      const tag = getTagName(node); if (!tag) continue;
+      if (getLocalName(tag) === "tbl") {
+        const info: TableStyleInfo = { tableIndex: tblIdx++, style: null, layout: null, rowCount: 0, cellCount: 0, cellShading: [], borderStyles: [] };
+        const shadings = new Set<string>();
+        const borders = new Set<string>();
+        const children = node[tag];
+        if (Array.isArray(children)) {
+          for (const child of children) {
+            const ct = getTagName(child); if (!ct) continue;
+            const cl = getLocalName(ct);
+            if (cl === "tblPr") {
+              const tblPrChildren = child[ct];
+              if (Array.isArray(tblPrChildren)) {
+                for (const tp of tblPrChildren) {
+                  const tpt = getTagName(tp); if (!tpt) continue;
+                  const tpl = getLocalName(tpt);
+                  if (tpl === "tblStyle") info.style = extractAttr(tp, "val");
+                  if (tpl === "tblLayout") info.layout = extractAttr(tp, "type");
+                  if (tpl === "tblBorders") {
+                    const bdrChildren = tp[tpt];
+                    if (Array.isArray(bdrChildren)) {
+                      for (const bdr of bdrChildren) { const bt = getTagName(bdr); if (bt) { const style = extractAttr(bdr, "val"); const color = extractAttr(bdr, "color"); if (style) borders.add(`${getLocalName(bt)}:${style}${color ? `(${color})` : ""}`); } }
+                    }
+                  }
+                }
+              }
+            }
+            if (cl === "tr") {
+              info.rowCount++;
+              const trChildren = child[ct];
+              if (Array.isArray(trChildren)) {
+                for (const tc of trChildren) {
+                  const tct = getTagName(tc);
+                  if (tct && getLocalName(tct) === "tc") {
+                    info.cellCount++;
+                    const tcChildren = tc[tct];
+                    if (Array.isArray(tcChildren)) {
+                      for (const tcChild of tcChildren) {
+                        const tcct = getTagName(tcChild);
+                        if (tcct && getLocalName(tcct) === "tcPr") {
+                          const tcPrChildren = tcChild[tcct];
+                          if (Array.isArray(tcPrChildren)) {
+                            for (const tcp of tcPrChildren) { const tcpt = getTagName(tcp); if (tcpt && getLocalName(tcpt) === "shd") { const fill = extractAttr(tcp, "fill"); if (fill && fill !== "auto") shadings.add(`#${fill}`); } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        info.cellShading = [...shadings];
+        info.borderStyles = [...borders];
+        tables.push(info);
+      }
+      if (Array.isArray(node[tag])) walk(node[tag]);
+    }
+  }
+  walk(nodes);
+  return tables;
+}
+
+function buildStyleProfile(
+  paragraphs: DetailedParagraphInfo[],
+  layout: PageLayout,
+  docDefaults: DocDefaults | null,
+  styleDefs: StyleDef[],
+  themeInfo: ThemeInfo | null,
+  numbering: { abstracts: Record<number, NumberingLevel[]>; mappings: Record<number, number> } | null,
+  tableStyles: TableStyleInfo[],
+): string {
+  const twipsToInch = (t: number) => (t / 1440).toFixed(2);
+  const lines: string[] = [];
+
+  lines.push("=== DOCUMENT STYLE PROFILE ===");
+  lines.push("");
+
+  // Layout
+  lines.push("## Layout");
+  const pageStr = layout.width && layout.height ? `${twipsToInch(layout.width)}″×${twipsToInch(layout.height)}″ ${layout.orient || "portrait"}` : "default";
+  const marginStr = layout.margins.top ? `T=${twipsToInch(layout.margins.top!)}″ R=${twipsToInch(layout.margins.right!)}″ B=${twipsToInch(layout.margins.bottom!)}″ L=${twipsToInch(layout.margins.left!)}″` : "default";
+  lines.push(`  Page: ${pageStr}`);
+  lines.push(`  Margins: ${marginStr}`);
+
+  // Defaults
+  lines.push("");
+  lines.push("## Defaults");
+  if (docDefaults) {
+    lines.push(`  Font: ${docDefaults.defaultFont || "(system)"}${docDefaults.defaultEastAsiaFont ? ` / EA:${docDefaults.defaultEastAsiaFont}` : ""}, Size: ${docDefaults.defaultSize ? `${docDefaults.defaultSize}pt` : "(system)"}`);
+  } else {
+    lines.push("  (no docDefaults)");
+  }
+
+  // Theme
+  if (themeInfo) {
+    lines.push("");
+    lines.push("## Theme");
+    lines.push(`  Major: ${themeInfo.majorFont.latin || "?"}${themeInfo.majorFont.eastAsia ? ` / EA:${themeInfo.majorFont.eastAsia}` : ""}`);
+    lines.push(`  Minor: ${themeInfo.minorFont.latin || "?"}${themeInfo.minorFont.eastAsia ? ` / EA:${themeInfo.minorFont.eastAsia}` : ""}`);
+    const colorParts: string[] = [];
+    for (const [name, color] of Object.entries(themeInfo.colorScheme)) colorParts.push(`${name}=${color}`);
+    if (colorParts.length > 0) lines.push(`  Colors: ${colorParts.join(", ")}`);
+  }
+
+  // Named Styles
+  const usedStyles = new Map<string, number>();
+  for (const p of paragraphs) { if (p.styleName) usedStyles.set(p.styleName, (usedStyles.get(p.styleName) || 0) + 1); }
+  lines.push("");
+  lines.push("## Named Styles (used in document)");
+  const relevantDefs = styleDefs.filter(s => usedStyles.has(s.styleId) || s.styleId.startsWith("Heading") || s.styleId === "Normal" || s.styleId === "Title");
+  for (const s of relevantDefs) {
+    if (s.type !== "paragraph") continue;
+    const props: string[] = [];
+    if (s.font) props.push(s.font);
+    if (s.size) props.push(`${s.size}pt`);
+    if (s.bold) props.push("bold");
+    if (s.italic) props.push("italic");
+    if (s.color) props.push(s.color);
+    if (s.alignment) props.push(`align:${s.alignment}`);
+    if (s.spacing.line) props.push(`line:${s.spacing.line}`);
+    if (s.spacing.after) props.push(`after:${s.spacing.after}`);
+    const count = usedStyles.get(s.styleId) || 0;
+    lines.push(`  ${s.styleId}: ${props.length > 0 ? props.join(", ") : "(inherits base)"}${count > 0 ? ` (×${count})` : ""}`);
+  }
+
+  // Body Text
+  const nonHeadingParas = paragraphs.filter(p => p.text.length > 0 && !p.styleName?.startsWith("Heading") && !p.styleName?.startsWith("Title") && p.numLevel === null);
+  const fontCounter = new Map<string, number>();
+  const sizeCounter = new Map<number, number>();
+  const alignCounter = new Map<string, number>();
+  const lineSpacingCounter = new Map<number, number>();
+  for (const p of nonHeadingParas) {
+    for (const r of p.runs) {
+      if (r.font) fontCounter.set(r.font, (fontCounter.get(r.font) || 0) + 1);
+      if (r.size) sizeCounter.set(r.size, (sizeCounter.get(r.size) || 0) + 1);
+    }
+    alignCounter.set(p.alignment || "left", (alignCounter.get(p.alignment || "left") || 0) + 1);
+    if (p.spacing.line) lineSpacingCounter.set(p.spacing.line, (lineSpacingCounter.get(p.spacing.line) || 0) + 1);
+  }
+  const topFont = [...fontCounter.entries()].sort((a, b) => b[1] - a[1])[0];
+  const topSize = [...sizeCounter.entries()].sort((a, b) => b[1] - a[1])[0];
+  const topAlign = [...alignCounter.entries()].sort((a, b) => b[1] - a[1])[0];
+  const topLine = [...lineSpacingCounter.entries()].sort((a, b) => b[1] - a[1])[0];
+  lines.push("");
+  lines.push("## Body Text (dominant pattern)");
+  lines.push(`  Font: ${topFont ? topFont[0] : "(inherited)"}`);
+  lines.push(`  Size: ${topSize ? topSize[0] + "pt" : "(inherited)"}`);
+  lines.push(`  Alignment: ${topAlign ? topAlign[0] : "left"}`);
+  lines.push(`  Line spacing: ${topLine ? topLine[0] : "(default)"}`);
+
+  // Heading Usage
+  const headingParas = paragraphs.filter(p => p.styleName?.startsWith("Heading"));
+  if (headingParas.length > 0) {
+    lines.push("");
+    lines.push("## Heading Usage");
+    const headingGroups = new Map<string, { count: number; fonts: Set<string>; sizes: Set<number>; colors: Set<string>; bold: boolean }>();
+    for (const p of headingParas) {
+      const key = p.styleName!;
+      if (!headingGroups.has(key)) headingGroups.set(key, { count: 0, fonts: new Set(), sizes: new Set(), colors: new Set(), bold: false });
+      const g = headingGroups.get(key)!;
+      g.count++;
+      for (const r of p.runs) { if (r.font) g.fonts.add(r.font); if (r.size) g.sizes.add(r.size); if (r.color) g.colors.add(r.color); if (r.bold) g.bold = true; }
+    }
+    for (const [name, g] of [...headingGroups.entries()].sort()) {
+      const props: string[] = [];
+      if (g.fonts.size > 0) props.push([...g.fonts].join("/"));
+      if (g.sizes.size > 0) props.push([...g.sizes].map(s => `${s}pt`).join("/"));
+      if (g.bold) props.push("bold");
+      if (g.colors.size > 0) props.push([...g.colors].join("/"));
+      lines.push(`  ${name}: ${props.join(", ")} (×${g.count})`);
+    }
+  }
+
+  // Emphasis
+  const emphasisCounter = new Map<string, number>();
+  for (const p of paragraphs) {
+    for (const r of p.runs) {
+      const fmts: string[] = [];
+      if (r.bold) fmts.push("bold"); if (r.italic) fmts.push("italic"); if (r.underline) fmts.push("underline");
+      if (r.strike) fmts.push("strike"); if (r.color) fmts.push(`color:${r.color}`); if (r.highlight) fmts.push(`highlight:${r.highlight}`);
+      if (r.superScript) fmts.push("super"); if (r.subScript) fmts.push("sub");
+      if (fmts.length >= 2) { const key = fmts.sort().join("+"); emphasisCounter.set(key, (emphasisCounter.get(key) || 0) + 1); }
+    }
+  }
+  if (emphasisCounter.size > 0) {
+    lines.push("");
+    lines.push("## Emphasis Patterns");
+    for (const [pattern, count] of [...emphasisCounter.entries()].sort((a, b) => b[1] - a[1]).slice(0, 5)) lines.push(`  ${pattern} (×${count})`);
+  }
+
+  // Colors
+  const allColors = new Map<string, number>();
+  for (const p of paragraphs) { for (const r of p.runs) { if (r.color) allColors.set(r.color, (allColors.get(r.color) || 0) + 1); } }
+  if (allColors.size > 0) {
+    lines.push("");
+    lines.push("## Colors Used");
+    for (const [color, count] of [...allColors.entries()].sort((a, b) => b[1] - a[1])) lines.push(`  ${color} (×${count})`);
+  }
+
+  // Lists
+  const listParas = paragraphs.filter(p => p.numLevel !== null && p.numId !== null);
+  if (listParas.length > 0 && numbering) {
+    lines.push("");
+    lines.push("## Lists");
+    const listGroups = new Map<string, number>();
+    for (const p of listParas) {
+      const absId = numbering.mappings[p.numId!];
+      const levels = numbering.abstracts[absId];
+      if (levels) { const lvl = levels.find(l => l.level === p.numLevel); if (lvl) { const key = `${lvl.numFmt}:${lvl.lvlText || "?"}`; listGroups.set(key, (listGroups.get(key) || 0) + 1); } }
+    }
+    for (const [key, count] of [...listGroups.entries()].sort((a, b) => b[1] - a[1])) lines.push(`  ${key} (×${count})`);
+  }
+
+  // Tables
+  if (tableStyles.length > 0) {
+    lines.push("");
+    lines.push("## Tables");
+    for (const t of tableStyles) {
+      const cols = t.rowCount > 0 ? Math.round(t.cellCount / t.rowCount) : 0;
+      lines.push(`  Table ${t.tableIndex}: ${t.rowCount}×${cols}, layout=${t.layout || "auto"}`);
+      if (t.cellShading.length > 0) lines.push(`    Header fills: ${t.cellShading.join(", ")}`);
+      if (t.borderStyles.length > 0) lines.push(`    Borders: ${t.borderStyles.slice(0, 3).join(", ")}`);
+    }
+  }
+
+  // Paragraph effects
+  const shadedCount = paragraphs.filter(p => p.shading.fill && p.shading.fill !== "auto").length;
+  const borderedCount = paragraphs.filter(p => Object.keys(p.borders).length > 0).length;
+  if (shadedCount > 0 || borderedCount > 0) {
+    lines.push("");
+    lines.push("## Paragraph Effects");
+    if (shadedCount > 0) lines.push(`  shaded paragraphs: ${shadedCount}`);
+    if (borderedCount > 0) lines.push(`  bordered paragraphs: ${borderedCount}`);
+  }
+
+  lines.push("");
+  lines.push(`## Stats: ${paragraphs.length} paragraphs, ${paragraphs.reduce((a, p) => a + p.runs.length, 0)} runs, ${tableStyles.length} tables`);
+
+  return lines.join("\n");
+}
+
+export async function docxAnalyzeStyle(params: {
+  path: string;
+}): Promise<ToolResult> {
+  const inputPath = params.path;
+  let tmpDir: string | undefined;
+
+  try {
+    if (!fs.existsSync(inputPath)) {
+      return { success: false, output: `Error: File not found: ${inputPath}` };
+    }
+
+    tmpDir = makeTempDir();
+    const unpackDir = path.join(tmpDir, "unpacked");
+    const [, unpackMsg] = await unpack(inputPath, unpackDir, {
+      mergeRuns: false,
+      simplifyRedlines: false,
+    });
+
+    if (unpackMsg.startsWith("Error")) {
+      return { success: false, output: unpackMsg };
+    }
+
+    const docXmlPath = path.join(unpackDir, "word", "document.xml");
+    if (!fs.existsSync(docXmlPath)) {
+      return { success: false, output: "Error: document.xml not found in DOCX" };
+    }
+
+    const docContent = fs.readFileSync(docXmlPath, "utf-8");
+    const docNodes = parseXml(docContent);
+
+    // Extract all components
+    const layout = extractPageLayout(docNodes);
+    const paragraphs = extractDetailedParagraphs(docNodes);
+    const tables = extractTableStyleInfo(docNodes);
+
+    let docDefaults: DocDefaults | null = null;
+    let styleDefs: StyleDef[] = [];
+    const stylesPath = path.join(unpackDir, "word", "styles.xml");
+    if (fs.existsSync(stylesPath)) {
+      const stylesContent = fs.readFileSync(stylesPath, "utf-8");
+      const stylesNodes = parseXml(stylesContent);
+      docDefaults = extractDocDefaults(stylesNodes);
+      styleDefs = extractStyleDefs(stylesNodes);
+    }
+
+    let themeInfo: ThemeInfo | null = null;
+    const themePath = path.join(unpackDir, "word", "theme", "theme1.xml");
+    if (fs.existsSync(themePath)) {
+      themeInfo = extractThemeInfo(fs.readFileSync(themePath, "utf-8"));
+    }
+
+    let numInfo: { abstracts: Record<number, NumberingLevel[]>; mappings: Record<number, number> } | null = null;
+    const numPath = path.join(unpackDir, "word", "numbering.xml");
+    if (fs.existsSync(numPath)) {
+      numInfo = extractNumberingDefs(fs.readFileSync(numPath, "utf-8"));
+    }
+
+    const profile = buildStyleProfile(paragraphs, layout, docDefaults, styleDefs, themeInfo, numInfo, tables);
+
+    return { success: true, output: profile };
+  } catch (e: any) {
+    return { success: false, output: `Error: ${e.message}` };
+  } finally {
+    if (tmpDir && fs.existsSync(tmpDir)) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Dispatcher
 // ---------------------------------------------------------------------------
 
@@ -2683,6 +3541,10 @@ export async function handleDocxTool(
           dpi?: number;
           outputDir?: string;
         }
+      );
+    case "docxAnalyzeStyle":
+      return docxAnalyzeStyle(
+        params as { path: string }
       );
     default:
       return { success: false, output: `Unknown tool: ${toolName}` };
