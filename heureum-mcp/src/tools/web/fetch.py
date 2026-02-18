@@ -305,7 +305,7 @@ async def _maybe_save_to_session(
             data["session_file"] = local_path
 
         data.pop("text", None)
-        data["instruction"] = "Use read or grep on the session_file path to view or search the content."
+        data["instruction"] = "Use read on the session_file path to view the content. For long pages, read returns the first portion with an offset hint to continue reading."
         return json.dumps(data, ensure_ascii=False)
     except Exception:
         logger.warning("Failed to save web_fetch content to storage", exc_info=True)

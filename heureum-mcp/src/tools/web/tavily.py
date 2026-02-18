@@ -11,6 +11,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 import httpx
+from openai import AsyncOpenAI
 
 from mcp.server.fastmcp import FastMCP
 from src.common.cache import make_cache_key, search_cache
@@ -80,6 +81,46 @@ async def _search_tavily(
     return resp.json()
 
 
+async def _search_openai(query: str, max_results: int, country: Optional[str]) -> dict:
+    """Fallback search via OpenAI search-preview."""
+    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+
+    web_search_options: dict = {"search_context_size": "medium"}
+    if country:
+        country_code = country.strip().upper()
+        if len(country_code) == 2:
+            web_search_options["user_location"] = {
+                "type": "approximate",
+                "approximate": {"country": country_code},
+            }
+
+    response = await client.chat.completions.create(
+        model=settings.OPENAI_SEARCH_MODEL,
+        messages=[{"role": "user", "content": query}],
+        web_search_options=web_search_options,
+    )
+    message = response.choices[0].message
+
+    results = []
+    annotations = getattr(message, "annotations", None) or []
+    for ann in annotations:
+        citation = getattr(ann, "url_citation", None)
+        if citation:
+            results.append({
+                "title": citation.title,
+                "url": _strip_tracking_params(citation.url),
+            })
+
+    if max_results > 0:
+        results = results[:max_results]
+
+    return {
+        "provider": "openai",
+        "model": settings.OPENAI_SEARCH_MODEL,
+        "results": results,
+    }
+
+
 def register_tavily_search(mcp: FastMCP) -> None:
     """Register the web_search tool (Tavily-backed) with the MCP server.
 
@@ -114,11 +155,10 @@ def register_tavily_search(mcp: FastMCP) -> None:
         parallel calls are recommended for thorough results.
 
         Args:
-            query: The search query string. MUST include the 4-digit current
-                year (e.g. "2026") in the query for accurate results.
-                Use specific, descriptive keywords rather than single words.
+            query: The search query string. Use specific, descriptive
+                keywords rather than single words.
             search_depth: "basic" (faster, default) or "advanced" (slower, more thorough).
-            max_results: Number of results to return (1-20, default 5).
+            max_results: Number of results to return (1-20, default 1).
             country: Optional country for geo-relevant results. Accepts ISO code ("KR") or name ("south korea").
 
         Returns:
@@ -127,13 +167,6 @@ def register_tavily_search(mcp: FastMCP) -> None:
                 content. On error, returns a JSON string with an error message.
         """
         start = time.monotonic()
-
-        if not settings.TAVILY_API_KEY:
-            return json.dumps({
-                "error": "missing_api_key",
-                "message": "web_search needs a Tavily API key. "
-                           "Set TAVILY_API_KEY in your .env file.",
-            }, ensure_ascii=False)
 
         cache_key = make_cache_key("search", query, search_depth, str(max_results), country or "")
 
@@ -144,8 +177,29 @@ def register_tavily_search(mcp: FastMCP) -> None:
                 cached["took_ms"] = int((time.monotonic() - start) * 1000)
                 return json.dumps(cached, ensure_ascii=False)
 
+        provider = "tavily"
+        model = None
         try:
-            tavily_data = await _search_tavily(http, query, search_depth, max_results, country)
+            if settings.TAVILY_API_KEY:
+                tavily_data = await _search_tavily(http, query, search_depth, max_results, country)
+                results = tavily_data.get("results", [])
+                for r in results:
+                    if "url" in r:
+                        r["url"] = _strip_tracking_params(r["url"])
+            elif settings.OPENAI_API_KEY:
+                fallback = await _search_openai(query, max_results, country)
+                provider = fallback.get("provider", "openai")
+                model = fallback.get("model")
+                results = fallback.get("results", [])
+            else:
+                return json.dumps({
+                    "error": "missing_api_key",
+                    "message": (
+                        "web_search needs a Tavily API key. "
+                        "Set TAVILY_API_KEY in your .env file. "
+                        "Or set OPENAI_API_KEY to use OpenAI fallback."
+                    ),
+                }, ensure_ascii=False)
         except httpx.HTTPStatusError as e:
             error_type = type(e).__name__
             body = e.response.text if e.response else ""
@@ -158,17 +212,12 @@ def register_tavily_search(mcp: FastMCP) -> None:
             }, ensure_ascii=False)
         except Exception as e:
             error_type = type(e).__name__
-            logger.error("Tavily search API error (%s): %s", error_type, e)
+            logger.error("web_search API error (%s): %s", error_type, e)
             return json.dumps({
                 "error": error_type,
                 "message": f"Search API error: {e}",
                 "query": query,
             }, ensure_ascii=False)
-
-        tavily_results = tavily_data.get("results", [])
-        for r in tavily_results:
-            if "url" in r:
-                r["url"] = _strip_tracking_params(r["url"])
 
         took_ms = int((time.monotonic() - start) * 1000)
 
@@ -176,13 +225,15 @@ def register_tavily_search(mcp: FastMCP) -> None:
             "instruction": "Call web_fetch on the most relevant URLs to retrieve full content. "
                            "Then use read or grep on the returned session_file paths.",
             "query": query,
-            "provider": "tavily",
+            "provider": provider,
             "search_depth": search_depth,
-            "count": len(tavily_results),
+            "count": len(results),
             "took_ms": took_ms,
             "cached": False,
-            "results": tavily_results,
+            "results": results,
         }
+        if model:
+            result["model"] = model
 
         if settings.CACHE_ENABLED:
             search_cache.set(cache_key, result)

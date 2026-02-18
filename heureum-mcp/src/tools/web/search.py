@@ -67,9 +67,8 @@ def register_web_search(mcp: FastMCP) -> None:
         are recommended for thorough results.
 
         Args:
-            query: The search query string. MUST include the 4-digit current
-                year (e.g. "2026") in the query for accurate results.
-                Use specific, descriptive keywords rather than single words.
+            query: The search query string. Use specific, descriptive
+                keywords rather than single words.
             search_context_size: Amount of context to retrieve.
                 "low" = minimal context, fastest.
                 "medium" = balanced (default).
