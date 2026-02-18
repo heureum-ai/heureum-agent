@@ -5,20 +5,9 @@ Application configuration using pydantic-settings.
 """
 
 from enum import Enum
-from typing import List, Set
+from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-# ---------------------------------------------------------------------------
-# Server-side tool sets (Client-Owns-Schema architecture)
-#
-# Client tools are defined by the client in each request (request.tools).
-# Only server-side tools need to be known to the server.
-# ---------------------------------------------------------------------------
-
-# Agent-internal tools — executed server-side by the agent itself
-AGENT_TOOLS: Set[str] = {"manage_todo", "manage_periodic_task", "notify_user"}
 
 
 class ApprovalChoice(str, Enum):
@@ -95,7 +84,7 @@ class Settings(BaseSettings):
     MCP_SERVER_URLS: str = "http://localhost:3001,http://localhost:3002"
     AGENT_MODEL: str = "gemini-3-flash-preview"
     AGENT_TEMPERATURE: float = 0.7
-    AGENT_MAX_TOKENS: int = 2000
+    AGENT_MAX_TOKENS: int = 32768
 
     # Agent loop
     MAX_AGENT_ITERATIONS: int = 50

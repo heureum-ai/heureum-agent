@@ -1,12 +1,13 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """
-Periodic task service — manages registration and control of scheduled tasks.
+Periodic task skill — manages registration and control of scheduled tasks.
 
 The agent calls manage_periodic_task to register recurring tasks after
 a successful dry run.  State is persisted via the Platform API.
 """
 
+import json
 import logging
 from typing import Any, Dict
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 MANAGE_PERIODIC_TASK_TOOL_SCHEMA = {
     "type": "function",
+    "display_name": "Periodic Task",
     "function": {
         "name": "manage_periodic_task",
         "description": (
@@ -81,15 +83,16 @@ MANAGE_PERIODIC_TASK_TOOL_SCHEMA = {
 }
 
 
-class PeriodicTaskService:
+class PeriodicTaskSkill:
     """Manages periodic tasks via Platform API."""
+
+    name = "periodic_task"
+    tool_schemas = [MANAGE_PERIODIC_TASK_TOOL_SCHEMA]
 
     async def execute(
         self, name: str, arguments: Dict[str, Any], session_id: str
     ) -> str:
-        """Dispatch manage_periodic_task tool calls by action."""
         action = arguments.get("action", "")
-
         if action == "register":
             return await self._register(session_id, arguments)
         elif action == "list":
@@ -104,15 +107,12 @@ class PeriodicTaskService:
             return f"Unknown action: {action}"
 
     async def _register(self, session_id: str, args: Dict[str, Any]) -> str:
-        """Register a new periodic task via Platform API."""
         title = args.get("title", "")
         if not title:
             return "Error: title is required"
-
         recipe = args.get("recipe")
         if not recipe:
             return "Error: recipe is required"
-
         schedule = args.get("schedule")
         if not schedule:
             return "Error: schedule is required"
@@ -135,7 +135,6 @@ class PeriodicTaskService:
                 )
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    import json
                     return json.dumps({
                         "success": True,
                         "task": {
@@ -155,7 +154,6 @@ class PeriodicTaskService:
             return f"Error registering periodic task: {e}"
 
     async def _list(self, session_id: str) -> str:
-        """List periodic tasks for the current session."""
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
@@ -164,7 +162,6 @@ class PeriodicTaskService:
                 )
                 if resp.status_code == 200:
                     tasks = resp.json()
-                    import json
                     return json.dumps({
                         "success": True,
                         "tasks": [
@@ -187,10 +184,8 @@ class PeriodicTaskService:
             return f"Error listing periodic tasks: {e}"
 
     async def _update_status(self, task_id: str, status: str) -> str:
-        """Update a periodic task's status."""
         if not task_id:
             return "Error: task_id is required"
-
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.patch(
@@ -206,10 +201,8 @@ class PeriodicTaskService:
             return f"Error updating task: {e}"
 
     async def _resume(self, task_id: str) -> str:
-        """Resume a paused periodic task."""
         if not task_id:
             return "Error: task_id is required"
-
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(
@@ -228,28 +221,22 @@ class PeriodicTaskService:
 
 
 def _format_schedule(schedule: dict) -> str:
-    """Format a schedule dict into human-readable text."""
     if not schedule:
         return "N/A"
-
     stype = schedule.get("type", "cron")
     if stype == "cron":
         c = schedule.get("cron", {})
         hour = c.get("hour", "*")
         minute = c.get("minute", 0)
         dow = c.get("day_of_week", "*")
-
         time_str = f"{hour}:{str(minute).zfill(2)}" if hour != "*" else f"every hour at :{str(minute).zfill(2)}"
-
         if dow == "*":
             return f"Every day at {time_str}"
         elif dow == "1-5":
             return f"Weekdays at {time_str}"
         else:
             return f"Day {dow} at {time_str}"
-
     elif stype == "interval":
         i = schedule.get("interval", {})
         return f"Every {i.get('every', 1)} {i.get('unit', 'hours')}"
-
     return str(schedule)

@@ -14,6 +14,7 @@ from app.services.agent_service import (
     AgentService,
     _strip_tool_messages,
 )
+from app.services.providers.skill import SkillProvider
 from app.services.error import LLMErrorClassifier
 from app.services.compaction.settings import CompactionSettings
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -41,6 +42,8 @@ def _mock_tool_call(name="bash", args=None, call_id="call_1"):
 
 def _create_service(**kwargs) -> AgentService:
     """Instantiate an AgentService with a mocked LLM for unit testing."""
+    if "skill_provider" not in kwargs:
+        kwargs["skill_provider"] = SkillProvider()
     mock_llm = AsyncMock()
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
     with patch("app.services.agent_service.create_llm", return_value=mock_llm):
@@ -130,14 +133,26 @@ class TestPreparePromptAndTools:
         prompt, _ = svc._prepare_prompt_and_tools(client_tool_prompts=guides)
         assert '<tool_guide name="bash">' in prompt
 
-    def test_no_client_schemas_returns_server_only(self):
-        """Verify no client schemas returns server-only tools (agent-internal only).
-        Filesystem tools are now discovered dynamically via MCP."""
+    def test_no_client_schemas_returns_always_active_server_tools(self):
+        """Without client schemas, only server tools with empty client_tools are included.
+        periodic_task requires web_search/web_fetch so it is excluded."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
         assert "manage_todo" in names
         assert "notify_user" in names
+        assert "manage_periodic_task" not in names
+
+    def test_periodic_task_included_with_web_search(self):
+        """When client provides web_search, periodic_task tools are included."""
+        svc = _create_service()
+        web_search_schema = {"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {"type": "object"}}}
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[web_search_schema],
+        )
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_periodic_task" in names
+        assert "manage_todo" in names
 
     def test_client_schemas_returned(self):
         """Verify client schemas are passed through."""
@@ -160,13 +175,22 @@ class TestPreparePromptAndTools:
         assert "bash" in names
         assert "mcp_tool" in names
 
+    def test_mcp_tools_activate_skills(self):
+        """Verify MCP tools count as client tools for skill activation."""
+        mcp = [{"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {"type": "object"}}}]
+        svc = _create_service(mcp_tools=mcp)
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_periodic_task" in names
+
     def test_empty_schemas_no_mcp(self):
-        """Verify an empty client schema list still includes server tools."""
+        """Verify an empty client schema list still includes always-active server tools."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
-        # Server tools always present, no MCP
+        # Always-active server tools present (no client_tools dependency)
         assert "manage_todo" in names
+        assert "notify_user" in names
         assert len(tools) > 0
 
 
@@ -223,9 +247,10 @@ class TestPromptReconstruction:
             [Message(role=MessageRole.USER, content="hi")],
         )
         system_content = lc_msgs[0].content
-        assert "CRITICAL RULE" not in system_content
+        # "CRITICAL RULE" may appear via SKILL.md guide (legitimate);
+        # check that legacy *hardcoded* prompts are absent instead.
         assert "NEVER write a question mark" not in system_content
-        # Server-side tool guides (todo, periodic_task) are always present;
+        # Server-side tool guides are filtered by client_tools availability;
         # client-specific guides are only injected when provided via client_tool_prompts.
         # Verify no client-tool-name-based injection happens by default.
         assert '<tool_guide name="bash">' not in system_content

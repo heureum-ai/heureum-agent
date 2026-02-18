@@ -27,8 +27,6 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from app.config import settings
-from app.services.prompts.periodic_task import PERIODIC_TASK_TOOL_PROMPT
-from app.services.prompts.todo import TODO_TOOL_PROMPT
 
 NO_OUTPUT = "(no output)"
 HARD_CLEAR_PLACEHOLDER = "[Previous tool results have been cleared]"
@@ -95,12 +93,15 @@ match that language instead.
 
 
 def build_system_prompt(
+    server_tool_prompts: Optional[List[str]] = None,
     client_tool_prompts: Optional[List[str]] = None,
     instructions: Optional[str] = None,
 ) -> str:
     """Build a system prompt based on available tools.
 
     Args:
+        server_tool_prompts (Optional[List[str]]): Guide texts from
+            the skill registry (XML-wrapped SKILL.md bodies).
         client_tool_prompts (Optional[List[str]]): Guide texts provided by
             clients for inclusion in the system prompt.
         instructions (Optional[str]): Extra instructions to append
@@ -111,9 +112,9 @@ def build_system_prompt(
     """
     parts = [AGENT_IDENTITY_PROMPT]
 
-    # Server-side tool guides — always present
-    parts.append(TODO_TOOL_PROMPT)
-    parts.append(PERIODIC_TASK_TOOL_PROMPT)
+    # Server-side tool guides from skill registry
+    if server_tool_prompts:
+        parts.extend(server_tool_prompts)
 
     if client_tool_prompts:
         for guide in client_tool_prompts:

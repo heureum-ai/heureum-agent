@@ -7,13 +7,26 @@ follow-up tool calls.  Rules are registered from any source (MCP metadata,
 static config, programmatic registration) and the registry builds the
 follow-up ``ToolCallInfo`` list step-by-step after each tool execution.
 
-Example — web_search → web_fetch → summarize:
+Placeholder reference for ``arg_mapping`` values:
+
+* ``$value``              — extracted value from the previous step's output.
+* ``$value.<field>``      — a named field of the extracted value (dict).
+* ``$source_args``        — full input arguments of the chain's source tool.
+* ``$source_args.<field>``— a specific field from the source tool's input.
+
+``$source_args`` is propagated through all steps so that any step can
+reference the original trigger without coupling to intermediate outputs.
+
+Example — web_search → web_fetch → grep:
 
     ChainRule(
         source="web_search",
         steps=[
-            ChainStep(target="web_fetch",  extract="results[*].url", arg_mapping={"url": "$value"}),
-            ChainStep(target="summarize",  extract="content",        arg_mapping={"text": "$value"}),
+            ChainStep(target="web_fetch", extract="results[*].url",
+                      arg_mapping={"url": "$value"}),
+            ChainStep(target="grep",      extract="$root",
+                      arg_mapping={"path": "$value.session_file",
+                                   "pattern": "$source_args.query"}),
         ],
     )
 """
@@ -40,9 +53,10 @@ class ChainStep:
     Attributes:
         target: Name of the target tool to invoke.
         extract: JSONPath expression to extract values from the previous
-            step's result.
-        arg_mapping: Mapping of target parameter names to extracted values.
-            Use ``"$value"`` as a placeholder for the extracted value.
+            step's result.  Use ``"$root"`` to pass the entire result.
+        arg_mapping: Mapping of target parameter names to placeholder
+            expressions.  Supported: ``$value``, ``$value.<field>``,
+            ``$source_args``, ``$source_args.<field>``, or literal strings.
     """
 
     target: str
@@ -73,10 +87,13 @@ class ToolChainRegistry:
     each active chain is on via ``_active_chains``.
     """
 
+    # Type alias for active chain entries: (rule, step_index, source_args, pending_count)
+    _ChainEntry = Tuple["ChainRule", int, Dict[str, Any], int]
+
     def __init__(self) -> None:
         self._rules: Dict[str, List[ChainRule]] = {}  # source_tool -> rules
-        # session_id -> list of (rule, current_step_index)
-        self._active_chains: Dict[str, List[Tuple[ChainRule, int]]] = {}
+        # session_id -> list of (rule, current_step_index, source_args)
+        self._active_chains: Dict[str, List["ToolChainRegistry._ChainEntry"]] = {}
 
     def register(self, rule: ChainRule) -> None:
         """Register a single chain rule."""
@@ -113,15 +130,65 @@ class ToolChainRegistry:
             return None
 
     @staticmethod
+    def _resolve_placeholder(
+        placeholder: str,
+        val: Any,
+        source_args: Optional[Dict[str, Any]] = None,
+    ) -> Any:
+        """Resolve a single placeholder string to a concrete value.
+
+        Supported placeholders:
+
+        * ``"$value"`` — the extracted value as-is.
+        * ``"$value.field"`` — a named field from the extracted value
+          (the value must be a dict; falls back to the raw value).
+        * ``"$source_args"`` — the entire source tool input arguments dict.
+        * ``"$source_args.field"`` — a specific field from the source tool's
+          input arguments. Useful for propagating the original query through
+          a multi-step chain.
+        * Any other string — used as a literal constant.
+        """
+        if placeholder == "$value":
+            return val
+        if placeholder.startswith("$value."):
+            field = placeholder[len("$value."):]
+            return val.get(field) if isinstance(val, dict) else val
+        if placeholder == "$source_args":
+            return source_args or {}
+        if placeholder.startswith("$source_args."):
+            field = placeholder[len("$source_args."):]
+            return (source_args or {}).get(field) or None
+        return placeholder
+
+    @staticmethod
     def _extract_chain_args_from_data(
-        data: Any, step: ChainStep
+        data: Any,
+        step: ChainStep,
+        *,
+        source_args: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
-        """Build argument dicts from already-parsed *data* and a chain step."""
+        """Build argument dicts from already-parsed *data* and a chain step.
+
+        Args:
+            data: Parsed JSON data from the previous step's result.
+            step: Chain step with extract path and arg mapping.
+            source_args: Input arguments of the chain's **source** tool
+                (the tool that originally triggered the chain). Enables
+                ``$source_args`` / ``$source_args.field`` placeholders so
+                later steps can reference the original input without
+                hardcoding intermediate output field names.
+        """
         values = ToolChainRegistry._resolve_jsonpath(data, step.extract)
-        return [
-            {k: (val if v == "$value" else v) for k, v in step.arg_mapping.items()}
-            for val in values
-        ]
+        result_list: List[Dict[str, Any]] = []
+        for val in values:
+            mapped: Dict[str, Any] = {}
+            for k, v in step.arg_mapping.items():
+                resolved = ToolChainRegistry._resolve_placeholder(v, val, source_args)
+                if resolved is not None:
+                    mapped[k] = resolved
+            if mapped:
+                result_list.append(mapped)
+        return result_list
 
     # ------------------------------------------------------------------
     # Per-result builder (Phase 2)
@@ -157,7 +224,7 @@ class ToolChainRegistry:
             _path_cache = {}
 
         chained: List[ToolCallInfo] = []
-        new_active: List[Tuple[ChainRule, int]] = []
+        new_active: List[ToolChainRegistry._ChainEntry] = []
 
         content = result_msg.content
         content_id = id(content)
@@ -169,42 +236,55 @@ class ToolChainRegistry:
 
         # 1) New chains triggered by this tool
         rules = self._rules.get(tc.name, [])
+        source_args = tc.args  # original source tool's input arguments
         for rule in rules:
             if not rule.steps:
                 continue
             step = rule.steps[0]
+            step_follow_ups: List[ToolCallInfo] = []
             if data is not None:
                 path_key = (content_id, step.extract)
                 if path_key not in _path_cache:
                     _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
-                for args in self._extract_chain_args_from_data(data, step):
-                    chained.append(
+                for args in self._extract_chain_args_from_data(
+                    data, step, source_args=source_args,
+                ):
+                    step_follow_ups.append(
                         ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
                     )
-            if len(rule.steps) > 1:
-                new_active.append((rule, 1))
+            chained.extend(step_follow_ups)
+            if len(rule.steps) > 1 and step_follow_ups:
+                new_active.append((rule, 1, source_args, len(step_follow_ups)))
 
         # 2) Active chains continuing from this tool
         if session_id:
-            remaining = []
-            for rule, step_idx in self._active_chains.get(session_id, []):
+            remaining: List[ToolChainRegistry._ChainEntry] = []
+            for rule, step_idx, src_args, pending_count in self._active_chains.get(session_id, []):
                 if step_idx >= len(rule.steps):
                     continue
                 expected_target = rule.steps[step_idx - 1].target if step_idx > 0 else rule.source
                 if tc.name != expected_target:
-                    remaining.append((rule, step_idx))
+                    remaining.append((rule, step_idx, src_args, pending_count))
                     continue
                 step = rule.steps[step_idx]
+                step_follow_ups: List[ToolCallInfo] = []
                 if data is not None:
                     path_key = (content_id, step.extract)
                     if path_key not in _path_cache:
                         _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
-                    for args in self._extract_chain_args_from_data(data, step):
-                        chained.append(
+                    for args in self._extract_chain_args_from_data(
+                        data, step, source_args=src_args,
+                    ):
+                        step_follow_ups.append(
                             ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
                         )
-                if step_idx + 1 < len(rule.steps):
-                    new_active.append((rule, step_idx + 1))
+                chained.extend(step_follow_ups)
+                new_count = pending_count - 1
+                if new_count > 0:
+                    # More completions expected at this step
+                    remaining.append((rule, step_idx, src_args, new_count))
+                elif step_idx + 1 < len(rule.steps) and step_follow_ups:
+                    new_active.append((rule, step_idx + 1, src_args, len(step_follow_ups)))
             remaining.extend(new_active)
             if remaining:
                 self._active_chains[session_id] = remaining
@@ -280,7 +360,14 @@ class ToolChainRegistry:
         Supports dot notation with ``[*]`` wildcard for arrays.
         Example: ``"results[*].url"`` extracts the ``url`` field from each
         element of the ``results`` array.
+
+        Special path ``"$root"`` returns the entire parsed object as a
+        single-element list, useful when subsequent steps need the whole
+        result (e.g. to pick multiple fields via ``$value.field``).
         """
+        if path == "$root":
+            return [data]
+
         parts = path.replace("[*]", ".[*]").split(".")
         current: List[Any] = [data]
         for part in parts:

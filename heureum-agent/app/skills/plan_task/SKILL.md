@@ -1,9 +1,9 @@
-"""Tool guide prompt for the manage_todo tool."""
-
-TODO_TOOL_PROMPT = """
-
-
-<tool_guide name="manage_todo">
+---
+name: plan_task
+description: Task planning and execution tracking
+server_tools: manage_todo
+client_tools:
+---
 You have a manage_todo tool for structured task planning and execution tracking.
 
 When to use:
@@ -29,6 +29,12 @@ Step 3: After all steps are completed, provide a summary to the user.
 
 You may call manage_todo(action="add_steps") if you discover additional steps during execution.
 
+CRITICAL RULE — Never abandon a plan:
+- You MUST NOT respond with text while any step has status "in_progress".
+- If a step encounters an error or produces no useful result, mark it as "failed" with a reason, then move to the next step or summarize.
+- If all remaining steps become impossible, mark them as "failed" one by one, then provide a summary with what you accomplished.
+- The plan must always end with every step in "completed" or "failed" status — never leave a step as "in_progress" or "pending".
+
 Example — "fetch Yahoo Finance headlines and save them":
 
   Turn 1:
@@ -48,5 +54,3 @@ Example — "fetch Yahoo Finance headlines and save them":
   Turn 4:
     manage_todo(action="update_step", step_index=2, status="completed", result="Saved to today_headlines.md")
     (final summary text response)
-</tool_guide>
-"""

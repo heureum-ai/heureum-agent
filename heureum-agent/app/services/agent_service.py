@@ -24,18 +24,6 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
-from app.services.notification_service import NOTIFY_USER_TOOL_SCHEMA
-from app.services.periodic_task_service import MANAGE_PERIODIC_TASK_TOOL_SCHEMA
-from app.services.todo_service import MANAGE_TODO_TOOL_SCHEMA
-
-# Server-only tool schemas — always bound to the LLM.
-# Filesystem tools (read, write, edit, find, ls) are discovered
-# dynamically via MCP and added through ``self.mcp_tools``.
-SERVER_TOOL_SCHEMAS = [
-    MANAGE_TODO_TOOL_SCHEMA,
-    MANAGE_PERIODIC_TASK_TOOL_SCHEMA,
-    NOTIFY_USER_TOOL_SCHEMA,
-]
 from app.schemas.open_responses import (
     InputTokenDetails,
     MessageRole,
@@ -277,6 +265,7 @@ class AgentService:
         self,
         compaction_settings: Optional[CompactionSettings] = None,
         mcp_tools: Optional[List[Dict[str, Any]]] = None,
+        skill_provider: Optional[Any] = None,
     ) -> None:
         """Initialize the AgentService.
 
@@ -285,6 +274,8 @@ class AgentService:
                 for the 3-layer compaction pipeline. Uses defaults if None.
             mcp_tools (Optional[List[Dict[str, Any]]]): Pre-discovered MCP
                 tool schemas. Typically set later via ``mcp_tools`` attribute.
+            skill_provider (Optional[SkillProvider]): Skill registry instance
+                for server-side tool schemas and guide prompts.
         """
         self._lc_sessions: dict[str, List[BaseMessage]] = {}
         self.sessions: MutableMapping[str, List[Message]] = _SessionMessageView(self)
@@ -292,6 +283,7 @@ class AgentService:
         self._session_last_access: dict[str, float] = {}
         self.compaction_settings = compaction_settings or CompactionSettings()
         self.mcp_tools = mcp_tools
+        self.skill_provider = skill_provider
         self.llm = create_llm()
 
     def _evict_session(self, session_id: str) -> None:
@@ -732,14 +724,33 @@ class AgentService:
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
         """
+        # Build the set of client-provided tool names for skill filtering
+        client_tool_names: set[str] = set()
+        for s in client_tool_schemas or []:
+            func = s.get("function")
+            if isinstance(func, dict) and "name" in func:
+                client_tool_names.add(func["name"])
+        if self.mcp_tools:
+            for s in self.mcp_tools:
+                func = s.get("function")
+                if isinstance(func, dict) and "name" in func:
+                    client_tool_names.add(func["name"])
+
+        if self.skill_provider:
+            server_tool_prompts = self.skill_provider.get_active_guide_prompts(client_tool_names)
+            server_tool_schemas = self.skill_provider.get_active_tool_schemas(client_tool_names)
+        else:
+            server_tool_prompts = []
+            server_tool_schemas = []
+
         prompt = build_system_prompt(
+            server_tool_prompts=server_tool_prompts,
             client_tool_prompts=client_tool_prompts,
             instructions=instructions,
         )
 
         tools = list(client_tool_schemas or [])
-        # Server-only tools are always available
-        tools.extend(SERVER_TOOL_SCHEMAS)
+        tools.extend(server_tool_schemas)
         if self.mcp_tools:
             tools.extend(self.mcp_tools)
 

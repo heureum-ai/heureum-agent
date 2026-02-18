@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import ApprovalChoice, settings
 from app.services.prompts.base import NO_OUTPUT
-from app.services.tool_chain import ChainRule, ChainStep, ToolChainRegistry
+from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
 from app.models import Message, ToolCallInfo
 from app.schemas.open_responses import MessageRole
 from mcp import ClientSession
@@ -94,6 +94,7 @@ class MCPClient:
         self._cache_timestamp: float = 0
         self._chain_registry = chain_registry
         self._approval_required_tools: Set[str] = set()  # from MCP meta
+        self._display_names: Dict[str, str] = {}
         self._pending_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._auto_approved_tools: Dict[str, Set[str]] = {}
 
@@ -152,6 +153,7 @@ class MCPClient:
         if self._chain_registry:
             self._chain_registry.clear()
         self._approval_required_tools.clear()
+        self._display_names.clear()
 
         for url in self._server_urls:
             try:
@@ -189,6 +191,9 @@ class MCPClient:
                         )
                     if meta.get("requires_approval"):
                         self._approval_required_tools.add(tool.name)
+                    display_name = meta.get("display_name")
+                    if display_name:
+                        self._display_names[tool.name] = display_name
 
                 logger.info(
                     "Discovered %d tools from MCP server %s: %s",
@@ -208,8 +213,15 @@ class MCPClient:
         self._cache_timestamp = now
         return self._available_tools
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+    async def call_tool(self, name: str, arguments: Dict[str, Any], session_id: str = "") -> str:
         """Call a tool on its MCP server and return the result as text.
+
+        Args:
+            name: Tool name.
+            arguments: Tool arguments.
+            session_id: Optional session ID. When provided, it is forwarded
+                to the MCP server via ``_meta`` so server-side tools can
+                scope operations to the session (e.g. save to platform DB).
 
         On failure, returns an error message that guides the LLM to retry.
         """
@@ -217,9 +229,13 @@ class MCPClient:
         if not server_url:
             return f"Error: tool '{name}' not found on any MCP server"
 
+        meta = None
+        if session_id:
+            meta = {"session_id": session_id, "platform_api_url": settings.PLATFORM_API_URL}
+
         try:
             session = await self._get_session(server_url)
-            result = await session.call_tool(name, arguments)
+            result = await session.call_tool(name, arguments, meta=meta)
             return self._extract_text(result)
         except Exception as e:
             logger.warning("Tool call failed (%s on %s): %s", name, server_url, e)
@@ -272,6 +288,11 @@ class MCPClient:
         """Set of tool names discovered from MCP servers."""
         return self._server_tool_names
 
+    @property
+    def display_names(self) -> Dict[str, str]:
+        """Display names extracted from MCP tool metadata."""
+        return dict(self._display_names)
+
     # ------------------------------------------------------------------
     # Tool approval
     # ------------------------------------------------------------------
@@ -307,10 +328,10 @@ class MCPClient:
         assistant_lc_message: Any = None,
         remaining_chained: Optional[List[ToolCallInfo]] = None,
     ) -> Dict[str, Any]:
-        """Store pending state and return ask_question payload.
+        """Store pending state and return tool_approval payload.
 
         Returns:
-            {"approval_call_id": str, "question": dict}
+            {"approval_call_id": str, "question": dict, "display_name": str}
         """
         approval_call_id = _gen_call_id()
         approval_only = [tc for tc in server_calls if self.needs_approval(tc.name, session_id)]
@@ -322,9 +343,13 @@ class MCPClient:
             "assistant_lc_message": assistant_lc_message,
             "remaining_chained": remaining_chained or [],
         }
+        # Use the first tool's display_name for the approval UI
+        first_tool = approval_only[0] if approval_only else server_calls[0]
+        display_name = self._display_names.get(first_tool.name, first_tool.name)
         return {
             "approval_call_id": approval_call_id,
             "question": self._format_approval_question(approval_only),
+            "display_name": display_name,
         }
 
     def handle_approval_response(
@@ -387,7 +412,7 @@ class MCPClient:
 
     @staticmethod
     def _format_approval_question(tool_calls: List[ToolCallInfo]) -> dict:
-        """Build ask_question arguments describing the tools awaiting approval."""
+        """Build tool_approval arguments describing the tools awaiting approval."""
         if len(tool_calls) == 1:
             tc = tool_calls[0]
             question = f"Allow {tc.name}({json.dumps(tc.args, ensure_ascii=False)})?"
@@ -397,7 +422,8 @@ class MCPClient:
                 for tc in tool_calls
             ]
             question = "Allow the following tool executions?\n" + "\n".join(lines)
-        return {"question": question, "choices": ApprovalChoice.options()}
+        tool_name = tool_calls[0].name if tool_calls else "unknown"
+        return {"question": question, "choices": ApprovalChoice.options(), "tool_name": tool_name}
 
     @staticmethod
     def _extract_approval_answer(

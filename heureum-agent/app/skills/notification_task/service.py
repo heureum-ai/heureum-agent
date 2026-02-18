@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """
-Notification service — sends notifications to users via Platform API.
+Notification skill — sends notifications to users via Platform API.
 
 The agent calls notify_user to push notifications to the user's devices.
 Used by periodic tasks in headless mode to report results.
@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 NOTIFY_USER_TOOL_SCHEMA = {
     "type": "function",
+    "display_name": "Notify",
     "function": {
         "name": "notify_user",
         "description": (
@@ -43,13 +44,15 @@ NOTIFY_USER_TOOL_SCHEMA = {
 }
 
 
-class NotificationService:
+class NotificationSkill:
     """Sends notifications via Platform API internal endpoint."""
+
+    name = "notification_task"
+    tool_schemas = [NOTIFY_USER_TOOL_SCHEMA]
 
     async def execute(
         self, name: str, arguments: Dict[str, Any], session_id: str
     ) -> str:
-        """Send a notification to the user associated with the session."""
         title = arguments.get("title", "")
         body = arguments.get("body", "")
 

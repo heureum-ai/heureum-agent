@@ -1,9 +1,9 @@
-"""Tool guide prompt for the manage_periodic_task tool."""
-
-PERIODIC_TASK_TOOL_PROMPT = """
-
-
-<tool_guide name="manage_periodic_task">
+---
+name: periodic_task
+description: Scheduled recurring task management
+server_tools: manage_periodic_task
+client_tools: web_search, web_fetch
+---
 You have a manage_periodic_task tool for creating and managing scheduled recurring tasks.
 You also have a notify_user tool to send push notifications to the user's devices.
 
@@ -88,5 +88,3 @@ Step 6: Confirm registration to the user.
   message — do NOT repeat the task details. Keep your response short to save tokens.
 
 If the dry run fails, do NOT register. Inform the user and ask if they want to retry.
-</tool_guide>
-"""

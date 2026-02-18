@@ -36,7 +36,7 @@ def _patch_module(monkeypatch):
     monkeypatch.setattr(exp_module, "agent_service", mock_svc)
 
     # Mock chain_registry (no-op: no chain rules registered)
-    from app.services.tool_chain import ToolChainRegistry
+    from app.services.providers.tool import ToolChainRegistry
     mock_chain_registry = ToolChainRegistry()
     monkeypatch.setattr(exp_module, "chain_registry", mock_chain_registry)
 
@@ -46,10 +46,12 @@ def _patch_module(monkeypatch):
     mock_mcp._pending_tool_calls = {}
     mock_mcp._auto_approved_tools = {}
     mock_mcp._approval_required_tools = {"web_search", "web_fetch"}
+    mock_mcp.display_names = {}
     _real = MCPClient.__new__(MCPClient)
     _real._pending_tool_calls = mock_mcp._pending_tool_calls
     _real._auto_approved_tools = mock_mcp._auto_approved_tools
     _real._approval_required_tools = mock_mcp._approval_required_tools
+    _real._display_names = {}
     mock_mcp.classify_tool_calls = _real.classify_tool_calls
     mock_mcp.needs_approval = _real.needs_approval
     mock_mcp.handle_approval_response = _real.handle_approval_response
@@ -371,8 +373,8 @@ class TestToolApproval:
         mock_mcp._pending_tool_calls.clear()
         mock_mcp._auto_approved_tools.clear()
 
-    async def test_approval_tool_returns_ask_question(self, client, mock_svc, mock_mcp):
-        """web_search triggers an ask_question approval instead of executing."""
+    async def test_approval_tool_returns_tool_approval(self, client, mock_svc, mock_mcp):
+        """web_search triggers a tool_approval instead of executing."""
         # web_search is an MCP server tool, not in request.tools
         mock_mcp.server_tool_names = ["web_search"]
         mock_svc.process_messages_with_tools.return_value = LLMResult(
@@ -393,9 +395,10 @@ class TestToolApproval:
         assert data["status"] == "incomplete"
         fc_items = [o for o in data["output"] if o.get("type") == "function_call"]
         assert len(fc_items) == 1
-        assert fc_items[0]["name"] == "ask_question"
+        assert fc_items[0]["name"] == "tool_approval"
         args = json.loads(fc_items[0]["arguments"])
         assert "web_search" in args["question"]
+        assert args["tool_name"] == "web_search"
         choice_labels = [c["label"] for c in args["choices"]]
         assert ApprovalChoice.ALLOW_ONCE.value in choice_labels
         assert ApprovalChoice.ALWAYS_ALLOW.value in choice_labels
@@ -444,7 +447,7 @@ class TestToolApproval:
         data = resp.json()
 
         assert data["status"] == "completed"
-        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"})
+        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"}, session_id="s1")
         # Pending state was cleaned up
         assert "s1" not in mock_mcp._pending_tool_calls
         # NOT auto-approved for future calls

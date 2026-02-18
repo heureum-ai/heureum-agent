@@ -280,7 +280,7 @@ class TestCallTool:
         result = await client.call_tool("my_tool", {"key": "val"})
 
         assert result == "hello world"
-        session.call_tool.assert_awaited_once_with("my_tool", {"key": "val"})
+        session.call_tool.assert_awaited_once_with("my_tool", {"key": "val"}, meta=None)
 
     async def test_tool_not_found(self):
         client = MCPClient(server_urls=["http://srv"])

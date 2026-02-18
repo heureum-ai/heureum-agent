@@ -37,11 +37,9 @@ from app.schemas.open_responses import (
     Usage,
 )
 from app.services.agent_service import AgentService
-from app.services.notification_service import NotificationService
-from app.services.periodic_task_service import PeriodicTaskService
 from app.services.providers.mcp import MCPClient
-from app.services.todo_service import TodoService
-from app.services.tool_chain import ToolChainRegistry
+from app.services.providers.skill import SkillProvider
+from app.services.providers.tool import ToolChainRegistry
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
@@ -50,11 +48,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 chain_registry = ToolChainRegistry()
+skill_provider = SkillProvider()
 mcp_client = MCPClient(chain_registry=chain_registry)
-agent_service = AgentService()
-todo_service = TodoService()
-periodic_task_service = PeriodicTaskService()
-notification_service = NotificationService()
+agent_service = AgentService(skill_provider=skill_provider)
 _initialized = False
 _init_lock = asyncio.Lock()
 _session_loop_locks: Dict[str, asyncio.Lock] = {}
@@ -108,7 +104,14 @@ def _cleanup_stale_locks() -> None:
         _session_loop_locks.pop(sid, None)
         mcp_client.clear_session_state(sid)
         chain_registry.clear_session(sid)
-        todo_service.clear_session(sid)
+        skill_provider.clear_session(sid)
+
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
 
 
 def _sse_event(event: dict) -> str:
@@ -139,8 +142,8 @@ async def _ensure_initialized() -> None:
                     "MCP tools discovered: %s",
                     [t["function"]["name"] for t in mcp_tools],
                 )
-            # Wire TodoService to use the MCP write tool for TODO file persistence
-            todo_service.set_write_tool_fn(mcp_client.call_tool)
+            # Initialise all skills (e.g. wire PlanSkill to MCP write tool)
+            await skill_provider.startup(write_tool_fn=mcp_client.call_tool)
         except BaseException as e:
             logger.warning("MCP initialization failed (continuing without MCP tools): %s", e)
         _initialized = True
@@ -148,22 +151,14 @@ async def _ensure_initialized() -> None:
 
 async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = "") -> str:
     """Dispatch tool execution by name."""
-    from app.config import AGENT_TOOLS
+    # Skill-owned tools
+    if skill_provider.get_skill_for_tool(name) is not None:
+        return await skill_provider.execute_tool(name, arguments, session_id)
 
-    if name == "manage_periodic_task":
-        return await periodic_task_service.execute(name, arguments, session_id)
-
-    if name == "notify_user":
-        return await notification_service.execute(name, arguments, session_id)
-
-    if name in AGENT_TOOLS:
-        return await todo_service.execute(name, arguments, session_id)
-
+    # MCP-discovered tools (filesystem, browser, etc.)
     if mcp_client.is_server_tool(name):
-        return await mcp_client.call_tool(name, arguments)
+        return await mcp_client.call_tool(name, arguments, session_id=session_id)
 
-    # TODO: bash executor
-    # TODO: browser executor
     raise NotImplementedError(f"Tool executor not implemented: {name}")
 
 
@@ -256,7 +251,9 @@ def _text_output(
     )
 
 
-def _tool_call_output(name: str, arguments: dict, call_id: str) -> FunctionToolCall:
+def _tool_call_output(
+    name: str, arguments: dict, call_id: str, display_name: str | None = None,
+) -> FunctionToolCall:
     """Build a function_call output item."""
     return FunctionToolCall(
         id=f"fc_{uuid.uuid4().hex}",
@@ -264,6 +261,7 @@ def _tool_call_output(name: str, arguments: dict, call_id: str) -> FunctionToolC
         name=name,
         arguments=json.dumps(arguments) if isinstance(arguments, dict) else arguments,
         status=ItemStatus.COMPLETED,
+        display_name=display_name,
     )
 
 
@@ -424,23 +422,17 @@ async def _execute_tool_calls_pipelined(
             if result_queue is not None:
                 await result_queue.put((tc_done, result_str))
 
-            # Record tool interaction
-            await agent_service.append_tool_interaction(
-                session_id, [], [tc_done.model_dump()], [msg],
-            )
-
-            # Detect chain follow-ups for this single result
+            # Detect chain follow-ups for this single result.
+            # Chain follow-ups bypass approval — the user already approved
+            # the source tool, implicitly authorizing its chain steps.
             if depth < max_depth:
                 follow_ups = chain_registry.build_per_result(
                     tc_done, msg, session_id=session_id,
                 )
                 for fu in follow_ups:
-                    if mcp_client.needs_approval(fu.name, session_id):
-                        deferred_approval.append(fu)
-                    else:
-                        pending[
-                            asyncio.create_task(_safe_execute_tool(fu, session_id=session_id))
-                        ] = fu
+                    pending[
+                        asyncio.create_task(_safe_execute_tool(fu, session_id=session_id))
+                    ] = fu
 
         depth += 1
         if depth >= max_depth and pending:
@@ -479,31 +471,8 @@ async def _handle_chained_calls(
         if not current:
             break
 
-        # Gate on approval — if any tool needs it, return immediately.
-        if any(mcp_client.needs_approval(tc.name, session_id) for tc in current):
-            unapproved = [tc for tc in current if mcp_client.needs_approval(tc.name, session_id)]
-            first = [unapproved[0]]
-            remaining = unapproved[1:]
-            auto = [tc for tc in current if not mcp_client.needs_approval(tc.name, session_id)]
-            info = mcp_client.request_approval(
-                first + auto,
-                session_id,
-                None,
-                [],
-                remaining_chained=remaining,
-            )
-            return _build_response(
-                [_tool_call_output("ask_question", info["question"], info["approval_call_id"])],
-                ResponseStatus.INCOMPLETE,
-                session_id,
-                created_at,
-                model,
-                usage=total_usage,
-                tool_call_count=tool_call_count,
-                iterations=iteration,
-                tool_history=all_output_items or None,
-            )
-
+        # Chain follow-ups bypass approval — the source tool's approval
+        # implicitly authorizes all steps in the chain.
         chain_results = await _execute_tool_calls(current, all_output_items, session_id=session_id)
         await agent_service.append_tool_interaction(
             session_id,
@@ -639,41 +608,43 @@ def _prepare_messages_for_session(
     return [m for m in messages if (m.role, m.content) not in history_set]
 
 
-def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set[str], List[str]]:
-    """Resolve tool names, schemas, client tool names, and guides from request + MCP.
+def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set[str], List[str], Dict[str, str]]:
+    """Resolve tool names, schemas, client tool names, guides, and display names.
 
     Returns:
-        (tool_names, client_tool_schemas, client_tool_names, client_tool_prompts) where:
-          - tool_names: all tool names (client + MCP + server) for system prompt
-          - client_tool_schemas: OpenAI-format dicts for LLM binding
-          - client_tool_names: names of client-side tools (for classification)
-          - client_tool_prompts: guide texts provided by clients for system prompt
+        (tool_names, client_tool_schemas, client_tool_names, client_tool_prompts, display_names)
     """
-    from app.config import AGENT_TOOLS
-
     client_tool_names: Set[str] = set()
     client_tool_schemas: List[dict] = []
     tool_names: List[str] = []
     client_tool_prompts: List[str] = []
+    display_names: Dict[str, str] = {}
 
     if request.tools:
         for t in request.tools:
             client_tool_names.add(t.function.name)
             tool_names.append(t.function.name)
-            client_tool_schemas.append(t.model_dump(exclude_none=True, exclude={"guide"}))
+            client_tool_schemas.append(t.model_dump(exclude_none=True, exclude={"guide", "display_name"}))
             if t.guide:
                 client_tool_prompts.append(t.guide)
+            if t.display_name:
+                display_names[t.function.name] = t.display_name
 
     # MCP tools (includes filesystem tools discovered dynamically)
     for name in mcp_client.server_tool_names:
         if name not in client_tool_names:
             tool_names.append(name)
-    # Always include agent-internal tools
-    for name in AGENT_TOOLS:
+    # Always include skill-owned tools
+    for name in skill_provider.get_all_tool_names():
         if name not in tool_names:
             tool_names.append(name)
 
-    return tool_names, client_tool_schemas, client_tool_names, client_tool_prompts
+    # MCP display names
+    display_names.update(mcp_client.display_names)
+    # Skill display names
+    display_names.update(skill_provider.display_names)
+
+    return tool_names, client_tool_schemas, client_tool_names, client_tool_prompts, display_names
 
 
 @dataclass
@@ -687,6 +658,7 @@ class _LoopContext:
     client_tool_schemas: List[dict] = field(default_factory=list)
     client_tool_names: Set[str] = field(default_factory=set)
     client_tool_prompts: List[str] = field(default_factory=list)
+    display_names: Dict[str, str] = field(default_factory=dict)
     total_usage: Usage = field(default_factory=Usage.zero)
     tool_call_count: int = 0
     output_items: list = field(default_factory=list)
@@ -697,6 +669,7 @@ class _AgentLoopRunner:
 
     def __init__(self, ctx: _LoopContext) -> None:
         self.ctx = ctx
+        self._original_instructions = ctx.request.instructions
 
     async def run(self) -> ResponseObject:
         if not self.ctx.tool_names:
@@ -741,11 +714,12 @@ class _AgentLoopRunner:
         return resp
 
     def _augmented_instructions(self) -> str | None:
-        """Return instructions augmented with current TODO state."""
-        base = self.ctx.request.instructions or ""
-        todo_prompt = todo_service.get_state_prompt(self.ctx.session_id)
-        if todo_prompt:
-            return f"{base}\n\n{todo_prompt}" if base else todo_prompt
+        """Return instructions augmented with skill state prompts."""
+        base = self._original_instructions or ""
+        state_prompts = skill_provider.get_state_prompts(self.ctx.session_id)
+        if state_prompts:
+            combined = "\n\n".join(state_prompts)
+            return f"{base}\n\n{combined}" if base else combined
         return base or None
 
     async def _run_tool_iterations(self) -> ResponseObject:
@@ -762,6 +736,20 @@ class _AgentLoopRunner:
                 self.ctx.total_usage = self.ctx.total_usage.add(result.usage)
 
             if result.type == LLMResultType.TEXT:
+                if skill_provider.has_unfinished_work(self.ctx.session_id):
+                    # Save partial response + inject guidance and continue
+                    abandoned_text = result.text or ""
+                    agent_service._append_to_history(
+                        self.ctx.session_id, self.ctx.messages, abandoned_text,
+                        usage=result.usage.model_dump() if result.usage else {},
+                    )
+                    guidance = skill_provider.build_retry_guidance(
+                        self.ctx.session_id, abandoned_text,
+                    )
+                    self.ctx.messages = [
+                        Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                    ]
+                    continue
                 return _build_response(
                     [_text_output(result.text)],
                     ResponseStatus.COMPLETED,
@@ -772,6 +760,28 @@ class _AgentLoopRunner:
                     iterations=iteration,
                     tool_call_count=self.ctx.tool_call_count,
                     tool_history=self.ctx.output_items or None,
+                )
+
+            # Skills signal all work done — drop extra tool calls.
+            # Only on iteration > 1 so stale completed plans from prior
+            # requests don't block new tool calls (e.g. approval dialogs).
+            if iteration > 1 and skill_provider.should_force_text_only(self.ctx.session_id):
+                text = ""
+                if result.assistant_lc_message:
+                    text = agent_service._extract_text(result.assistant_lc_message.content)
+                agent_service._append_to_history(
+                    self.ctx.session_id, self.ctx.messages, text or "Task completed.",
+                    usage=result.usage.model_dump() if result.usage else {},
+                )
+                return _build_response(
+                    [_text_output(text or "Task completed.")],
+                    ResponseStatus.COMPLETED,
+                    self.ctx.session_id,
+                    self.ctx.created_at,
+                    self.ctx.model,
+                    usage=self.ctx.total_usage,
+                    iterations=iteration,
+                    tool_call_count=self.ctx.tool_call_count,
                 )
 
             response = await self._handle_tool_call_iteration(result, iteration)
@@ -798,19 +808,18 @@ class _AgentLoopRunner:
         )
 
     async def _handle_tool_call_iteration(self, result: Any, iteration: int) -> ResponseObject | None:
-        from app.config import AGENT_TOOLS
-
         all_tool_calls = result.tool_calls or []
         client_calls, server_calls = mcp_client.classify_tool_calls(
             all_tool_calls, self.ctx.session_id,
             client_tool_names=self.ctx.client_tool_names,
         )
 
+        skill_tool_names = skill_provider.get_all_tool_names()
         unsupported = [
             tc
             for tc in server_calls
             if not mcp_client.is_server_tool(tc.name)
-            and tc.name not in AGENT_TOOLS
+            and tc.name not in skill_tool_names
             and not mcp_client.needs_approval(tc.name, self.ctx.session_id)
         ]
         if unsupported:
@@ -825,7 +834,7 @@ class _AgentLoopRunner:
                 assistant_lc_message=result.assistant_lc_message,
             )
             return _build_response(
-                [_tool_call_output("ask_question", info["question"], info["approval_call_id"])],
+                [_tool_call_output("tool_approval", info["question"], info["approval_call_id"], display_name=info["display_name"])],
                 ResponseStatus.INCOMPLETE,
                 self.ctx.session_id,
                 self.ctx.created_at,
@@ -916,7 +925,32 @@ class _AgentLoopRunner:
                     yield event
             else:
                 async with _get_loop_lock(self.ctx.session_id):
+                    items_before = len(self.ctx.output_items)
                     approval_response = await self._resume_pending_approval()
+
+                    # Emit SSE events for tools executed during approval
+                    for item in self.ctx.output_items[items_before:]:
+                        if isinstance(item, FunctionToolCall) and item.name != "tool_approval":
+                            item_data: Dict[str, Any] = {
+                                "call_id": item.call_id,
+                                "name": item.name,
+                                "arguments": item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments),
+                            }
+                            dn = self.ctx.display_names.get(item.name)
+                            if dn:
+                                item_data["display_name"] = dn
+                            yield _sse_event({
+                                "type": "response.function_call.done",
+                                "item": item_data,
+                            })
+                        elif isinstance(item, FunctionToolResult):
+                            yield _sse_event({
+                                "type": "response.tool_result.done",
+                                "call_id": item.call_id,
+                                "output": item.output,
+                                "status": "completed",
+                            })
+
                     if approval_response:
                         evt = "response.completed" if approval_response.status == ResponseStatus.COMPLETED else "response.incomplete"
                         yield _sse_event({
@@ -1011,7 +1045,22 @@ class _AgentLoopRunner:
             self.ctx.total_usage = self.ctx.total_usage.add(usage)
 
             if not getattr(accumulated, "tool_calls", None):
-                # TEXT result — final response
+                # TEXT result — check if any skill has unfinished work
+                if skill_provider.has_unfinished_work(self.ctx.session_id):
+                    partial_text = agent_service._extract_text(accumulated.content)
+                    agent_service._append_to_history(
+                        self.ctx.session_id, self.ctx.messages, partial_text,
+                        usage=usage.model_dump(), assistant_lc_message=accumulated,
+                    )
+                    yield _sse_event({"type": "response.output_text.delta", "delta": partial_text})
+                    guidance = skill_provider.build_retry_guidance(
+                        self.ctx.session_id, partial_text,
+                    )
+                    self.ctx.messages = [
+                        Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                    ]
+                    continue
+
                 full_text = agent_service._extract_text(accumulated.content)
                 agent_service._append_to_history(
                     self.ctx.session_id, self.ctx.messages, full_text,
@@ -1031,7 +1080,28 @@ class _AgentLoopRunner:
                 })
                 return
 
-            # TOOL_CALL result
+            # TOOL_CALL result — but drop if skills signal completion.
+            # Only on iteration > 1 so stale plans don't block new tool calls.
+            if iteration > 1 and skill_provider.should_force_text_only(self.ctx.session_id):
+                full_text = agent_service._extract_text(accumulated.content) or "Task completed."
+                agent_service._append_to_history(
+                    self.ctx.session_id, self.ctx.messages, full_text,
+                    usage=usage.model_dump(),
+                )
+                yield _sse_event({"type": "response.output_text.done", "text": full_text, "usage": usage.model_dump()})
+                response = _build_response(
+                    [_text_output(full_text)], ResponseStatus.COMPLETED,
+                    self.ctx.session_id, self.ctx.created_at, self.ctx.model,
+                    usage=self.ctx.total_usage, iterations=iteration,
+                    tool_call_count=self.ctx.tool_call_count,
+                    tool_history=self.ctx.output_items or None,
+                )
+                yield _sse_event({
+                    "type": "response.completed",
+                    "response": response.model_dump(mode="json"),
+                })
+                return
+
             tool_calls_info = [
                 ToolCallInfo(name=tc["name"], args=tc["args"], id=tc["id"])
                 for tc in accumulated.tool_calls
@@ -1039,13 +1109,17 @@ class _AgentLoopRunner:
 
             usage_dump = usage.model_dump()
             for tc in tool_calls_info:
+                item_data: Dict[str, Any] = {
+                    "call_id": tc.id,
+                    "name": tc.name,
+                    "arguments": json.dumps(tc.args) if isinstance(tc.args, dict) else str(tc.args),
+                }
+                dn = self.ctx.display_names.get(tc.name)
+                if dn:
+                    item_data["display_name"] = dn
                 yield _sse_event({
                     "type": "response.function_call.done",
-                    "item": {
-                        "call_id": tc.id,
-                        "name": tc.name,
-                        "arguments": json.dumps(tc.args) if isinstance(tc.args, dict) else str(tc.args),
-                    },
+                    "item": item_data,
                     "usage": usage_dump,
                 })
 
@@ -1058,14 +1132,36 @@ class _AgentLoopRunner:
                 session_id=self.ctx.session_id,
             )
 
+            # Track original LLM call IDs to avoid duplicate SSE events
+            # (LLM calls already emitted above).
+            original_call_ids = {tc.id for tc in tool_calls_info}
+
             items_before = len(self.ctx.output_items)
             response = await self._handle_tool_call_iteration(result_obj, iteration)
 
-            # Emit tool_result.done for newly executed server tools
+            # Emit SSE events for newly executed server tools
             # (includes pipelined chain results that were appended during
-            # _execute_tool_calls_pipelined)
+            # _execute_tool_calls_pipelined). Skip original LLM calls
+            # which were already emitted above.
             for item in self.ctx.output_items[items_before:]:
-                if isinstance(item, FunctionToolResult):
+                if isinstance(item, FunctionToolCall) and item.name != "tool_approval":
+                    if item.call_id in original_call_ids:
+                        continue
+                    item_data: Dict[str, Any] = {
+                        "call_id": item.call_id,
+                        "name": item.name,
+                        "arguments": item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments),
+                    }
+                    dn = self.ctx.display_names.get(item.name)
+                    if dn:
+                        item_data["display_name"] = dn
+                    yield _sse_event({
+                        "type": "response.function_call.done",
+                        "item": item_data,
+                    })
+                elif isinstance(item, FunctionToolResult):
+                    if item.call_id in original_call_ids:
+                        continue
                     yield _sse_event({
                         "type": "response.tool_result.done",
                         "call_id": item.call_id,
@@ -1073,18 +1169,12 @@ class _AgentLoopRunner:
                         "status": "completed",
                     })
 
-            # Emit TODO state update if active
-            _todo_state = todo_service.get_state(self.ctx.session_id)
-            if _todo_state:
+            # Emit live skill state (e.g. TODO progress) if any
+            _live_state = skill_provider.get_live_state(self.ctx.session_id)
+            if _live_state:
                 yield _sse_event({
                     "type": "response.todo.updated",
-                    "todo": {
-                        "task": _todo_state.task,
-                        "steps": [
-                            {"description": s.description, "status": s.status, "result": s.result}
-                            for s in _todo_state.steps
-                        ],
-                    },
+                    "todo": _live_state,
                 })
 
             if response:
@@ -1137,7 +1227,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             error=ErrorObject(type=ErrorType.INVALID_REQUEST, message="No input messages"),
         )
 
-    tool_names, client_tool_schemas, client_tool_names, client_tool_prompts = _resolve_tools(request)
+    tool_names, client_tool_schemas, client_tool_names, client_tool_prompts, display_names = _resolve_tools(request)
 
     # Handle pending approval BEFORE _prepare_messages_for_session, because
     # the approval answer arrives as a tool-role message that
@@ -1148,30 +1238,40 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
     approval_usage = Usage.zero()
     approval_tc_count = 0
     approval_output_items: list = []
+    _defer_approval_to_stream = False
 
     if mcp_client._pending_tool_calls.get(session_id):
-        approval_early, _, approval_tc_count, approval_usage = (
-            await _handle_approval_continuation(
-                session_id,
-                raw_messages,
-                approval_output_items,
-                created_at,
-                model or "default",
-                Usage.zero(),
-                0,
+        if request.stream:
+            # Streaming: defer approval handling to the streaming code so
+            # that chain follow-up tools (web_fetch, grep) are emitted as
+            # SSE events.  Running it here would add items to output_items
+            # before the streaming code measures items_before, causing the
+            # chain SSE events to be silently dropped.
+            _defer_approval_to_stream = True
+        else:
+            approval_early, _, approval_tc_count, approval_usage = (
+                await _handle_approval_continuation(
+                    session_id,
+                    raw_messages,
+                    approval_output_items,
+                    created_at,
+                    model or "default",
+                    Usage.zero(),
+                    0,
+                )
             )
-        )
-        if approval_early:
-            return approval_early
-        # Approval was handled; strip the consumed tool messages so
-        # _prepare_messages_for_session doesn't try to process them again.
-        pending_call_ids = set()
-        for m in raw_messages:
-            if m.role == MessageRole.TOOL:
-                pending_call_ids.add(m.tool_call_id)
-        messages = [m for m in messages if m.tool_call_id not in pending_call_ids]
+            if approval_early:
+                return approval_early
+            # Approval was handled; strip the consumed tool messages so
+            # _prepare_messages_for_session doesn't try to process them again.
+            pending_call_ids = set()
+            for m in raw_messages:
+                if m.role == MessageRole.TOOL:
+                    pending_call_ids.add(m.tool_call_id)
+            messages = [m for m in messages if m.tool_call_id not in pending_call_ids]
 
-    messages = _prepare_messages_for_session(request, session_id, messages)
+    if not _defer_approval_to_stream:
+        messages = _prepare_messages_for_session(request, session_id, messages)
 
     ctx = _LoopContext(
         request=request,
@@ -1183,6 +1283,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         client_tool_schemas=client_tool_schemas,
         client_tool_names=client_tool_names,
         client_tool_prompts=client_tool_prompts,
+        display_names=display_names,
         total_usage=approval_usage,
         tool_call_count=approval_tc_count,
         output_items=approval_output_items,
@@ -1193,11 +1294,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         return StreamingResponse(
             runner.stream(),
             media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
+            headers=_SSE_HEADERS,
         )
 
     try:

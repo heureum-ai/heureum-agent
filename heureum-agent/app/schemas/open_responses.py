@@ -216,6 +216,7 @@ class FunctionToolCall(BaseModel):
     arguments: str
     status: ItemStatus = ItemStatus.COMPLETED
     usage: Optional["Usage"] = None
+    display_name: Optional[str] = None
 
 
 class FunctionToolResult(BaseModel):
@@ -270,6 +271,7 @@ class ToolDefinition(BaseModel):
     type: Literal["function"] = "function"
     function: FunctionDefinition
     guide: Optional[str] = None
+    display_name: Optional[str] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -284,6 +286,7 @@ class ToolDefinition(BaseModel):
                     "parameters": values.get("parameters"),
                 },
                 "guide": values.get("guide"),
+                "display_name": values.get("display_name"),
             }
         return values
 

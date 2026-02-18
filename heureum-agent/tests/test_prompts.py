@@ -9,6 +9,7 @@ from app.services.prompts.base import (
     AGENT_IDENTITY_PROMPT,
     build_system_prompt,
 )
+from app.services.providers.skill import SkillProvider
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,8 @@ class TestBuildSystemPrompt:
     def test_no_client_tools_no_client_guides(self):
         """Without client_tool_prompts, no client-provided guides appear.
         Server-side guides (todo, periodic_task) are always present."""
-        result = build_system_prompt()
+        provider = SkillProvider()
+        result = build_system_prompt(server_tool_prompts=provider.get_all_guide_prompts())
         # Server-side guides are always present
         assert "manage_todo" in result
 
