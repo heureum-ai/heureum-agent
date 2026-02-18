@@ -412,9 +412,17 @@ class PlanSkill:
                 "\"completed\" or \"failed\" before responding with text to the user. "
                 f"If the step cannot be completed, mark it as failed: "
                 f"manage_todo(action=\"update_step\", step_index={in_progress_idx}, "
-                f"status=\"failed\", result=\"reason\"). "
-                "Then proceed to the next pending step or provide a summary."
+                f"status=\"failed\", result=\"reason\")."
             )
+            if first_pending is not None:
+                lines.append(
+                    "Then proceed to the next pending step immediately. "
+                    "Keep any intermediate text to one short sentence at most."
+                )
+            else:
+                lines.append(
+                    "Then provide a final summary of all completed work."
+                )
         elif first_pending is not None:
             lines.append(
                 f"\nCall manage_todo(action=\"update_step\", "

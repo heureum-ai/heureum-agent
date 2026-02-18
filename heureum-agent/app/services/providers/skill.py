@@ -278,79 +278,6 @@ class SkillProvider:
         return prompts
 
     # ------------------------------------------------------------------
-    # Filtered schemas & prompts (client-tool-aware)
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _is_skill_active(skill: Any, client_tool_names: Set[str]) -> bool:
-        """Determine whether a skill should be active given available client tools.
-
-        - If the skill declares no ``client_tools`` → always active.
-        - If it declares ``client_tools`` → active when at least one is
-          present in *client_tool_names*.
-        """
-        meta = _load_skill_meta(skill)
-        if not meta.client_tools:
-            return True
-        return bool(set(meta.client_tools) & client_tool_names)
-
-    def _resolve_with_deps(self, active_skills: List[Any]) -> List[Any]:
-        """Expand active skill list to include ``depends_on`` skills.
-
-        Recursively walks each active skill's dependency chain and returns
-        the union of active + dependency skills (duplicates removed, insertion
-        order preserved).  Circular references are safe — the ``visited`` set
-        prevents infinite recursion.
-        """
-        result_names: set[str] = set()
-        result: list[Any] = []
-
-        def _add(skill: Any) -> None:
-            if skill.name in result_names:
-                return
-            result_names.add(skill.name)
-            result.append(skill)
-            meta = _load_skill_meta(skill)
-            for dep_name in meta.depends_on:
-                dep = self._skills.get(dep_name)
-                if dep is not None:
-                    _add(dep)
-
-        for s in active_skills:
-            _add(s)
-        return result
-
-    def get_active_tool_schemas(self, client_tool_names: Set[str]) -> List[Dict[str, Any]]:
-        """Return tool schemas only for skills whose client_tools are satisfied.
-
-        Also includes tool schemas from dependency skills (``depends_on``).
-        Strips ``display_name`` from each schema since it is not part of
-        the LLM tool interface.
-        """
-        active = [s for s in self._skills.values() if self._is_skill_active(s, client_tool_names)]
-        resolved = self._resolve_with_deps(active)
-        schemas: List[Dict[str, Any]] = []
-        for skill in resolved:
-            for s in skill.tool_schemas:
-                clean = {k: v for k, v in s.items() if k != "display_name"}
-                schemas.append(clean)
-        return schemas
-
-    def get_active_guide_prompts(self, client_tool_names: Set[str]) -> List[str]:
-        """Return guide prompts only for skills whose client_tools are satisfied.
-
-        Also includes guide prompts from dependency skills (``depends_on``).
-        """
-        active = [s for s in self._skills.values() if self._is_skill_active(s, client_tool_names)]
-        resolved = self._resolve_with_deps(active)
-        prompts: List[str] = []
-        for skill in resolved:
-            body = _load_guide_prompt(skill)
-            if body:
-                prompts.append(f'<tool_guide name="{skill.name}">\n{body}\n</tool_guide>')
-        return prompts
-
-    # ------------------------------------------------------------------
     # Tool dispatch
     # ------------------------------------------------------------------
 
@@ -395,6 +322,18 @@ class SkillProvider:
     # Generic lifecycle hooks (router should NOT reference specific skills)
     # ------------------------------------------------------------------
 
+    def clear_completed_plans(self, session_id: str) -> None:
+        """Clear completed plans so new requests start fresh.
+
+        Called at the start of each new request to prevent stale
+        completed plans from triggering should_force_text_only.
+        """
+        for skill in self._skills.values():
+            is_done = getattr(skill, "is_all_complete", None)
+            clear = getattr(skill, "clear_session", None)
+            if is_done and clear and is_done(session_id):
+                clear(session_id)
+
     def should_force_text_only(self, session_id: str) -> bool:
         """Check if any skill wants to force a text-only LLM response.
 
@@ -425,6 +364,19 @@ class SkillProvider:
                 if guidance:
                     return guidance
         return None
+
+    async def await_pending(self, session_id: str, timeout: float = 300.0) -> None:
+        """Wait for any skill-owned async work (e.g. sub-agents) to complete.
+
+        Iterates through all skills and calls ``await_pending(session_id, timeout)``
+        on each skill that implements it.  This is called by the agent loop
+        before injecting retry guidance so that results are available in the
+        session history.
+        """
+        for skill in self._skills.values():
+            fn = getattr(skill, "await_pending", None)
+            if fn is not None:
+                await fn(session_id, timeout)
 
     async def finalize_abandoned(self, session_id: str) -> None:
         """Tell all skills to finalize/fail any abandoned work."""

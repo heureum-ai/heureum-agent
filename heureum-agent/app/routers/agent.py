@@ -37,9 +37,11 @@ from app.schemas.open_responses import (
     Usage,
 )
 from app.services.agent_service import AgentService, JudgeResult, build_tool_context, judge_response
+from app.services.loop_detection import clear_session_loop_state
 from app.services.providers.mcp import MCPClient
 from app.services.providers.skill import SkillProvider
 from app.services.providers.tool import ToolChainRegistry
+from app.services.tool_hooks import hook_runner
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 
@@ -89,7 +91,7 @@ def _get_loop_lock(session_id: str) -> asyncio.Lock:
 
 
 def _cleanup_stale_locks() -> None:
-    """Remove per-session locks for evicted sessions."""
+    """Remove per-session locks for evicted sessions and sweep stale subagent records."""
     sessions = getattr(agent_service, "sessions", None)
     if sessions is None or not isinstance(sessions, MutableMapping):
         return
@@ -105,6 +107,14 @@ def _cleanup_stale_locks() -> None:
         mcp_client.clear_session_state(sid)
         chain_registry.clear_session(sid)
         skill_provider.clear_session(sid)
+        clear_session_loop_state(sid)
+
+    # GC completed subagent registry entries and their deferred state
+    try:
+        from app.services.subagent import get_registry
+        get_registry().sweep_stale()
+    except Exception:
+        pass
 
 
 _SSE_HEADERS = {
@@ -159,7 +169,9 @@ async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = 
     if mcp_client.is_server_tool(name):
         return await mcp_client.call_tool(name, arguments, session_id=session_id, cwd=cwd)
 
-    raise NotImplementedError(f"Tool executor not implemented: {name}")
+    # Gracefully handle removed/unknown tools (e.g. stale sessions
+    # referencing a tool that was since removed from the schema).
+    return f"Error: Tool '{name}' is no longer available."
 
 
 @router.post("/tools/execute")
@@ -310,14 +322,25 @@ def _build_response(
 
 async def _safe_execute_tool(tc: ToolCallInfo, session_id: str = "", cwd: str = "") -> tuple[ToolCallInfo, str]:
     """Execute a single tool call and convert failures to readable tool output."""
+    context = {"session_id": session_id, "tool_call_id": tc.id}
+
+    # Before hooks
+    hook_result = await hook_runner.run_before(tc.name, tc.args, context)
+    if hook_result.blocked:
+        return tc, f"Error: Tool blocked: {hook_result.reason}"
+    params = hook_result.adjusted_params if hook_result.adjusted_params is not None else tc.args
+
     try:
-        result = await _execute_tool(tc.name, tc.args, session_id=session_id, cwd=cwd)
+        result = await _execute_tool(tc.name, params, session_id=session_id, cwd=cwd)
         if not result or (isinstance(result, str) and not result.strip()):
-            return tc, f"[EMPTY_RESULT] {tc.name} returned no output. Consider retrying with different parameters."
+            result = f"[EMPTY_RESULT] {tc.name} returned no output. Consider retrying with different parameters."
+        await hook_runner.run_after(tc.name, params, result, None, context)
         return tc, result
     except Exception as e:
         logger.warning("Tool execution failed (%s): %s", tc.name, e)
-        return tc, f"Error executing tool '{tc.name}': {e}"
+        err_str = f"Error executing tool '{tc.name}': {e}"
+        await hook_runner.run_after(tc.name, params, None, str(e), context)
+        return tc, err_str
 
 
 async def _execute_tool_calls(
@@ -869,6 +892,7 @@ class _AgentLoopRunner:
         return prompts or None
 
     async def _run_tool_iterations(self) -> ResponseObject:
+        skill_provider.clear_completed_plans(self.ctx.session_id)
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             result = await agent_service.process_messages_with_tools(
                 messages=self.ctx.messages,
@@ -884,17 +908,42 @@ class _AgentLoopRunner:
 
             if result.type == LLMResultType.TEXT:
                 if skill_provider.has_unfinished_work(self.ctx.session_id):
-                    # Save partial response + inject guidance and continue
+                    # Wait for async skill work (e.g. sub-agents) to complete
+                    # so their results are appended to session history.
+                    await skill_provider.await_pending(self.ctx.session_id)
+
+                    # After awaiting, check again — if all work finished,
+                    # fall through to normal text handling with results in history.
+                    if skill_provider.has_unfinished_work(self.ctx.session_id):
+                        # Still unfinished (e.g. plan steps) — inject guidance
+                        abandoned_text = result.text or ""
+                        agent_service._append_to_history(
+                            self.ctx.session_id, self.ctx.messages, abandoned_text,
+                            usage=result.usage.model_dump() if result.usage else {},
+                        )
+                        guidance = skill_provider.build_retry_guidance(
+                            self.ctx.session_id, abandoned_text,
+                        )
+                        self.ctx.messages = [
+                            Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                        ]
+                        continue
+
+                    # Sub-agents completed — results are now in history.
+                    # Re-run LLM so it can synthesize the sub-agent results.
                     abandoned_text = result.text or ""
                     agent_service._append_to_history(
                         self.ctx.session_id, self.ctx.messages, abandoned_text,
                         usage=result.usage.model_dump() if result.usage else {},
                     )
-                    guidance = skill_provider.build_retry_guidance(
-                        self.ctx.session_id, abandoned_text,
-                    )
                     self.ctx.messages = [
-                        Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "All sub-agents have completed. Their results have been appended to the conversation. "
+                                "Please synthesize the results and provide a comprehensive response to the user."
+                            ),
+                        ),
                     ]
                     continue
 
@@ -1031,7 +1080,7 @@ class _AgentLoopRunner:
             server_calls, self.ctx.output_items, session_id=self.ctx.session_id,
             cwd=self.ctx.cwd,
         )
-        self.ctx.tool_call_count += len(pipeline_results)
+        self.ctx.tool_call_count += len(pipeline_results) + len(client_calls)
 
         # Append client-side tool placeholders for the LLM history
         for tc in client_calls:
@@ -1209,6 +1258,7 @@ class _AgentLoopRunner:
 
     async def _stream_tool_iterations(self):
         """Stream the tool iteration loop, yielding SSE events."""
+        skill_provider.clear_completed_plans(self.ctx.session_id)
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             # Inject current TODO state into instructions for this iteration
             self.ctx.request.instructions = self._get_instructions()
@@ -1230,18 +1280,42 @@ class _AgentLoopRunner:
             if not getattr(accumulated, "tool_calls", None):
                 # TEXT result — check if any skill has unfinished work
                 if skill_provider.has_unfinished_work(self.ctx.session_id):
+                    # Wait for async skill work (e.g. sub-agents) to complete
+                    yield _sse_event({"type": "response.output_text.abandoned", "reason": "awaiting_subagents"})
+                    await skill_provider.await_pending(self.ctx.session_id)
+
+                    # After awaiting, check again
+                    if skill_provider.has_unfinished_work(self.ctx.session_id):
+                        # Still unfinished (e.g. plan steps) — inject guidance
+                        partial_text = agent_service._extract_text(accumulated.content)
+                        agent_service._append_to_history(
+                            self.ctx.session_id, self.ctx.messages, partial_text,
+                            usage=usage.model_dump(), assistant_lc_message=accumulated,
+                        )
+                        guidance = skill_provider.build_retry_guidance(
+                            self.ctx.session_id, partial_text,
+                        )
+                        self.ctx.messages = [
+                            Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                        ]
+                        yield _sse_event({"type": "response.output_text.abandoned", "reason": "unfinished_skill"})
+                        continue
+
+                    # Sub-agents completed — results are now in history.
                     partial_text = agent_service._extract_text(accumulated.content)
                     agent_service._append_to_history(
                         self.ctx.session_id, self.ctx.messages, partial_text,
                         usage=usage.model_dump(), assistant_lc_message=accumulated,
                     )
-                    guidance = skill_provider.build_retry_guidance(
-                        self.ctx.session_id, partial_text,
-                    )
                     self.ctx.messages = [
-                        Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                        Message(
+                            role=MessageRole.USER,
+                            content=(
+                                "All sub-agents have completed. Their results have been appended to the conversation. "
+                                "Please synthesize the results and provide a comprehensive response to the user."
+                            ),
+                        ),
                     ]
-                    yield _sse_event({"type": "response.output_text.abandoned", "reason": "unfinished_skill"})
                     continue
 
                 # Priority 2: LLM-as-judge quality gate
@@ -1294,6 +1368,10 @@ class _AgentLoopRunner:
                     "response": response.model_dump(mode="json"),
                 })
                 return
+
+            # TOOL_CALL: discard narration text that was streamed alongside
+            # tool_calls (e.g. "mcp_web__search를 사용하여...").
+            yield _sse_event({"type": "response.output_text.abandoned", "reason": "tool_call"})
 
             # TOOL_CALL result — but drop if skills signal completion.
             # Only on iteration > 1 so stale plans don't block new tool calls.
@@ -1494,6 +1572,13 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
     if not _defer_approval_to_stream:
         messages = _prepare_messages_for_session(request, session_id, messages)
 
+    # Count tool results in input to carry over context from INCOMPLETE requests.
+    # When the frontend sends back tool results (e.g. ask_question answer),
+    # tool_call_count must be > 0 so the judge evaluates the follow-up response.
+    input_tool_count = approval_tc_count + sum(
+        1 for m in raw_messages if m.role == MessageRole.TOOL
+    )
+
     ctx = _LoopContext(
         request=request,
         created_at=created_at,
@@ -1506,7 +1591,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         client_tool_prompts=client_tool_prompts,
         display_names=display_names,
         total_usage=approval_usage,
-        tool_call_count=approval_tc_count,
+        tool_call_count=input_tool_count,
         output_items=approval_output_items,
         cwd=cwd,
     )
@@ -1549,6 +1634,32 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             tool_call_count=ctx.tool_call_count,
             tool_history=ctx.output_items or None,
         )
+
+
+@router.get("/subagent/status/{session_id}")
+async def subagent_status(session_id: str) -> dict:
+    """Return sub-agent run status for the given parent session."""
+    from app.services.subagent import get_registry
+
+    now = time.time()
+    records = get_registry().list_by_parent(session_id)
+    return {
+        "children": [
+            {
+                "child_session_id": r.child_session_id,
+                "task": r.task[:200],
+                "status": r.status,
+                "elapsed_seconds": round(now - r.started_at, 1),
+                "result_summary": r.result_summary[:500] if r.result_summary else None,
+                "current_iteration": r.current_iteration,
+                "progress": [
+                    {"tool_name": s.tool_name, "detail": s.detail[:100], "status": s.status}
+                    for s in list(r.progress_log)
+                ],
+            }
+            for r in records
+        ]
+    }
 
 
 @router.post("/title")

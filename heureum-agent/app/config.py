@@ -110,6 +110,25 @@ class Settings(BaseSettings):
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
 
+    # Tool loop detection
+    LOOP_DETECTION_ENABLED: bool = True
+    LOOP_DETECTION_HISTORY_SIZE: int = 30
+    LOOP_DETECTION_WARNING_THRESHOLD: int = 10
+    LOOP_DETECTION_CRITICAL_THRESHOLD: int = 20
+    LOOP_DETECTION_CIRCUIT_BREAKER_THRESHOLD: int = 30
+
+    # Model fallback
+    MODEL_FALLBACK_PRIMARY: str = ""  # empty → inferred from AGENT_MODEL
+    MODEL_FALLBACK_CHAIN: str = "openai/gpt-4o"
+    MODEL_FALLBACK_COOLDOWN_BASE_SECONDS: int = 60
+    MODEL_FALLBACK_COOLDOWN_MAX_SECONDS: int = 3600
+    ANTHROPIC_API_KEY: str = ""
+
+    # Sub-agent
+    SUBAGENT_MAX_SPAWN_DEPTH: int = 1
+    SUBAGENT_MAX_CHILDREN: int = 5
+    SUBAGENT_TIMEOUT_SECONDS: int = 300
+
     def get_cors_origins(self) -> List[str]:
         """Parse CORS origins as list.
 
@@ -126,6 +145,23 @@ class Settings(BaseSettings):
             List[str]: A list of MCP server URLs for tool discovery.
         """
         return [url.strip() for url in self.MCP_SERVER_URLS.split(",") if url.strip()]
+
+    def get_model_fallback_primary(self) -> str:
+        """Infer 'provider/model' from AGENT_MODEL if not explicitly set."""
+        if self.MODEL_FALLBACK_PRIMARY:
+            return self.MODEL_FALLBACK_PRIMARY
+        model = self.AGENT_MODEL
+        if model.startswith("gemini"):
+            return f"google/{model}"
+        if model.startswith(("gpt-", "o1", "o3", "o4")):
+            return f"openai/{model}"
+        if model.startswith("claude"):
+            return f"anthropic/{model}"
+        return f"openai/{model}"
+
+    def get_model_fallback_chain(self) -> List[str]:
+        """Parse MODEL_FALLBACK_CHAIN as comma-separated list."""
+        return [s.strip() for s in self.MODEL_FALLBACK_CHAIN.split(",") if s.strip()]
 
 
 settings = Settings()

@@ -2,17 +2,26 @@
 name: plan_task
 description: Task planning and execution tracking
 server_tools: manage_todo
-client_tools:
+client_tools: ask_question
+depends_on:
 ---
 You have a `manage_todo` tool for structured task planning and execution tracking.
+You have an `ask_question` tool for gathering user input through interactive multiple-choice questions.
 
-When to use:
+When to use manage_todo:
 - When the user's request requires 2 or more distinct steps or tool calls.
 - When a task involves gathering data, processing it, and producing output.
 
-When NOT to use:
+When NOT to use manage_todo:
 - Simple questions that need only a text response.
 - Single-step tasks (one tool call and done).
+
+When to use ask_question:
+- Only when the user's request is ambiguous and you cannot proceed without clarification.
+- When there are multiple valid approaches and the user should choose.
+- Analyze the request first — if you can reasonably infer the user's intent, proceed without asking.
+- When you do ask, provide 2–5 clear, distinct choices and set `allow_user_input` to `true` when a custom answer is possible.
+- Use this tool instead of asking questions in plain text.
 
 Workflow — follow this strictly for every multi-step task:
 
@@ -68,3 +77,12 @@ Turn 4:
 manage_todo(action="update_step", step_index=2, status="completed", result="Saved to today_headlines.md")
 ```
 (final summary text response)
+
+Example — when the request is ambiguous, ask within a plan step:
+
+Turn 1:
+```
+manage_todo(action="create", task="...", steps=["Clarify preference", "Execute", "Present result"])
+manage_todo(action="update_step", step_index=0, status="in_progress")
+ask_question(question="...", choices=["Option A", "Option B", "Option C"], allow_user_input=true)
+```

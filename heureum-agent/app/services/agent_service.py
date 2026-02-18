@@ -23,6 +23,8 @@ from collections.abc import MutableMapping
 from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
+
 from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
 from app.schemas.open_responses import (
@@ -177,6 +179,42 @@ def create_llm():
         )
 
 
+def _strip_tool_call_narration(lc_messages: list) -> list:
+    """Remove narration text from AIMessages that carry tool_calls.
+
+    When the LLM generates text alongside tool_calls (e.g.
+    "I'll use mcp_web__search to find..."), the narration text
+    pollutes the history and causes the model to repeat the pattern
+    on subsequent turns.
+
+    This creates shallow copies of affected messages (content cleared,
+    tool_calls preserved) so the originals in session storage are not
+    mutated — keeping Gemini thought-signature metadata intact for the
+    stored version.
+
+    If clearing the content causes Gemini to reject the message on
+    replay, the existing ``_strip_tool_messages`` fallback will handle
+    it.
+    """
+    result: list = []
+    for msg in lc_messages:
+        if (
+            isinstance(msg, AIMessage)
+            and getattr(msg, "tool_calls", None)
+            and msg.content
+        ):
+            result.append(AIMessage(
+                content="",
+                tool_calls=msg.tool_calls,
+                response_metadata=getattr(msg, "response_metadata", {}),
+                usage_metadata=getattr(msg, "usage_metadata", None),
+                additional_kwargs=getattr(msg, "additional_kwargs", {}),
+            ))
+        else:
+            result.append(msg)
+    return result
+
+
 def _strip_tool_messages(lc_messages: list) -> tuple[list, bool]:
     """Convert tool-related LangChain messages to plain text equivalents.
 
@@ -290,6 +328,10 @@ class AgentService:
         self.mcp_tools = mcp_tools
         self.skill_provider = skill_provider
         self.llm = create_llm()
+        self._platform_client = httpx.AsyncClient(
+            base_url=settings.PLATFORM_API_URL,
+            timeout=httpx.Timeout(10.0, connect=3.0),
+        )
 
     def _evict_session(self, session_id: str) -> None:
         """Remove all data associated with a session.
@@ -329,47 +371,158 @@ class AgentService:
                 return int(token_usage["input_tokens"])
         return None
 
+    @staticmethod
+    def _normalize_content(content: Any) -> str:
+        """Extract plain text from Open Responses structured content.
+
+        Platform DB may store content as:
+          - A plain string: "hello"
+          - A structured list: [{"type": "input_text", "text": "hello"}]
+          - A list with multiple parts: [{"type": "output_text", "text": "hi"}, ...]
+
+        LangChain/Gemini only understands plain strings, so we must flatten
+        structured content before constructing BaseMessage objects.
+        """
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, str):
+                    parts.append(part)
+                elif isinstance(part, dict):
+                    # Open Responses types: input_text, output_text, text, refusal, etc.
+                    text = part.get("text", "")
+                    if text:
+                        parts.append(text)
+            return "\n".join(parts) if parts else ""
+        if isinstance(content, dict):
+            return content.get("text", str(content))
+        return str(content) if content else ""
+
+    @staticmethod
+    def _platform_message_to_lc(record: Dict[str, Any]) -> Optional[BaseMessage]:
+        """Convert a Platform DB message record to a LangChain BaseMessage.
+
+        Platform DB format:
+          - Text messages: {"type": "message", "role": "user|assistant",
+            "content": [{"type": "input_text|output_text", "text": "..."}]}
+          - Function call: {"type": "function_call",
+            "content": {"type": "function_call", "call_id": "...",
+                         "name": "...", "arguments": "..."}}
+          - Function call output: {"type": "function_call_output",
+            "content": {"type": "function_call_output", "call_id": "...",
+                         "output": "..."}}
+          - Skip: permission_grant, todo_state
+
+        Returns None for empty/unrecognized records (caller skips them).
+        """
+        msg_type = record.get("type", "")
+        role = record.get("role", "")
+        raw_content = record.get("content", "")
+
+        # Skip non-conversational record types
+        if msg_type in ("permission_grant", "todo_state"):
+            return None
+
+        # Function call → AIMessage with tool_calls
+        # Data lives inside record["content"] dict
+        if msg_type == "function_call":
+            inner = raw_content if isinstance(raw_content, dict) else {}
+            call_id = inner.get("call_id") or inner.get("id") or record.get("call_id", "unknown")
+            name = inner.get("name") or record.get("name", "")
+            arguments = inner.get("arguments") or record.get("arguments", "{}")
+            if isinstance(arguments, str):
+                try:
+                    args = json.loads(arguments)
+                except (json.JSONDecodeError, TypeError):
+                    args = {}
+            else:
+                args = arguments
+            return AIMessage(
+                content="",
+                tool_calls=[{"name": name, "args": args, "id": call_id}],
+            )
+
+        # Function call output → ToolMessage
+        # Data lives inside record["content"] dict
+        if msg_type == "function_call_output":
+            inner = raw_content if isinstance(raw_content, dict) else {}
+            output = inner.get("output") or record.get("output", "")
+            call_id = inner.get("call_id") or record.get("call_id", "unknown")
+            return ToolMessage(content=output, tool_call_id=call_id)
+
+        # Standard role-based messages — normalize structured content to plain text
+        content = AgentService._normalize_content(raw_content)
+
+        if not content and not role:
+            return None
+
+        if role == "user":
+            return HumanMessage(content=content)
+        if role == "assistant":
+            return AIMessage(content=content)
+        if role == "system":
+            return SystemMessage(content=content)
+        if role == "tool":
+            return ToolMessage(
+                content=content,
+                tool_call_id=record.get("tool_call_id", "unknown"),
+            )
+
+        # Unrecognized — skip
+        return None
+
     async def _rehydrate_session(self, session_id: str) -> Optional[List[BaseMessage]]:
         """Rehydrate a session's message history from the Platform DB.
 
-        Called when a known session_id is not found in the in-memory cache
-        (e.g. after server restart or when a request is routed to a different
-        instance in a multi-instance deployment).
-
-        Expected flow:
-          1. Call Platform API: GET /api/v1/messages/?session_id={session_id}
-          2. Convert stored records back into List[BaseMessage]
-          3. If a compaction summary exists, use it instead of the full history
-             to avoid re-triggering context overflow
-          4. Return the rehydrated history (caller populates self.sessions)
-
-        Compaction-aware rehydration (mirrors OpenClaw pattern):
-          - OpenClaw stores compaction summaries inline in the transcript and
-            tracks ``compactionCount`` in session metadata.
-          - Platform DB should store compaction events similarly — when Agent
-            compacts a session, the summary should be persisted to Platform
-            (via POST /api/v1/compaction-events/) alongside the IDs of
-            messages that were summarized.
-          - On rehydration, Platform should return the **compacted** view:
-            [compaction_summary_msg] + [messages after firstKeptEntryId]
-          - If no compaction has occurred, return all messages.
+        Calls Platform API to retrieve stored messages and converts them
+        back into LangChain BaseMessage objects.
 
         Args:
-            session_id (str): The session to rehydrate from Platform DB.
+            session_id: The session to rehydrate from Platform DB.
 
         Returns:
-            Optional[List[BaseMessage]]: The rehydrated message list, or None
-                if the session does not exist in the Platform DB.
-
-        TODO:
-            - Implement Platform API client (httpx call to platform service)
-            - Map Platform Message records to LangChain BaseMessage
-            - Handle compaction entries (type="compaction" in Platform DB)
-            - Add error handling for Platform unavailability (graceful fallback)
-            - Notify Platform after compaction runs (_compact_session) so
-              compaction state is persisted and survives Agent restart
+            The rehydrated message list, or None if the session does not
+            exist or Platform is unreachable.
         """
-        return None
+        try:
+            resp = await self._platform_client.get(
+                "/api/v1/messages/",
+                params={"session_id": session_id, "ordering": "created_at"},
+            )
+        except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
+            logger.warning("Platform unreachable during rehydration: %s", exc)
+            return None
+
+        if resp.status_code == 404:
+            return None
+        if resp.status_code != 200:
+            logger.warning(
+                "Platform returned %d for session %s rehydration",
+                resp.status_code,
+                session_id,
+            )
+            return None
+
+        try:
+            data = resp.json()
+        except (json.JSONDecodeError, ValueError):
+            logger.warning("Invalid JSON from Platform for session %s", session_id)
+            return None
+
+        records = data if isinstance(data, list) else data.get("results", [])
+        lc_messages: List[BaseMessage] = []
+        for record in records:
+            msg = self._platform_message_to_lc(record)
+            if msg is not None:
+                lc_messages.append(msg)
+
+        return lc_messages if lc_messages else None
+
+    async def aclose(self) -> None:
+        """Close the httpx client. Called during application shutdown."""
+        await self._platform_client.aclose()
 
     async def _get_or_create_session(
         self, session_id: Optional[str]
@@ -745,8 +898,8 @@ class AgentService:
                     client_tool_names.add(func["name"])
 
         if self.skill_provider:
-            server_tool_prompts = self.skill_provider.get_active_guide_prompts(client_tool_names)
-            server_tool_schemas = self.skill_provider.get_active_tool_schemas(client_tool_names)
+            server_tool_prompts = self.skill_provider.get_all_guide_prompts()
+            server_tool_schemas = self.skill_provider.get_all_tool_schemas()
         else:
             server_tool_prompts = []
             server_tool_schemas = []
@@ -1066,6 +1219,7 @@ class AgentService:
             lc_messages = [SystemMessage(content=prompt)]
             lc_messages.extend(self._lc_sessions.get(session_id, []))
             lc_messages.extend(lc_new_messages)
+            lc_messages = _strip_tool_call_narration(lc_messages)
             try:
                 self._log_pre_llm_history(
                     stage="primary",
@@ -1428,6 +1582,7 @@ class AgentService:
             lc_messages = [SystemMessage(content=prompt)]
             lc_messages.extend(self._lc_sessions.get(session_id, []))
             lc_messages.extend(lc_new)
+            lc_messages = _strip_tool_call_narration(lc_messages)
 
             try:
                 self._log_pre_llm_history(
