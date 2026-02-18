@@ -27,7 +27,7 @@ Any constraints, preferences, or requirements mentioned by user. "(none)" if non
 
 <progress>
 <done>Completed tasks/changes, one per line.</done>
-<in-progress>Current work, one per line.</in-progress>
+<in_progress>Current work, one per line.</in_progress>
 <blocked>Issues preventing progress, if any.</blocked>
 </progress>
 
@@ -35,23 +35,23 @@ Any constraints, preferences, or requirements mentioned by user. "(none)" if non
 Decision: Brief rationale. One per line.
 </decisions>
 
-<next-steps>
+<next_steps>
 Ordered list of what should happen next, one per line.
-</next-steps>
+</next_steps>
 
-<critical-context>
+<critical_context>
 Any data, examples, or references needed to continue. "(none)" if not applicable.
-</critical-context>
+</critical_context>
 
 Keep each section concise. Preserve exact file paths, function names, and error messages."""
 
-COMPACTION_UPDATE_BODY = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous-summary> tags.
+COMPACTION_UPDATE_BODY = """The messages above are NEW conversation messages to incorporate into the existing summary provided in <previous_summary> tags.
 
 Update the existing structured summary with new information. RULES:
 - PRESERVE all existing information from the previous summary
 - ADD new progress, decisions, and context from the new messages
-- UPDATE the progress section: move items from in-progress to done when completed
-- UPDATE next-steps based on what was accomplished
+- UPDATE the progress section: move items from in_progress to done when completed
+- UPDATE next_steps based on what was accomplished
 - PRESERVE exact file paths, function names, and error messages
 - If something is no longer relevant, you may remove it
 
@@ -67,7 +67,7 @@ Preserve existing, add new ones discovered.
 
 <progress>
 <done>Include previously done items AND newly completed items, one per line.</done>
-<in-progress>Current work — update based on progress, one per line.</in-progress>
+<in_progress>Current work — update based on progress, one per line.</in_progress>
 <blocked>Current blockers — remove if resolved.</blocked>
 </progress>
 
@@ -75,13 +75,13 @@ Preserve existing, add new ones discovered.
 Decision: Brief rationale. Preserve all previous, add new. One per line.
 </decisions>
 
-<next-steps>
+<next_steps>
 Update based on current state, one per line.
-</next-steps>
+</next_steps>
 
-<critical-context>
+<critical_context>
 Preserve important context, add new if needed.
-</critical-context>
+</critical_context>
 
 Keep each section concise. Preserve exact file paths, function names, and error messages."""
 
@@ -94,7 +94,7 @@ def build_compaction_prompt(
     parts = [f"<conversation>\n{conversation.strip()}\n</conversation>"]
 
     if previous_summary:
-        parts.append(f"<previous-summary>\n{previous_summary.strip()}\n</previous-summary>")
+        parts.append(f"<previous_summary>\n{previous_summary.strip()}\n</previous_summary>")
         parts.append(COMPACTION_UPDATE_BODY)
     else:
         parts.append(COMPACTION_INITIAL_BODY)

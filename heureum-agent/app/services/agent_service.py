@@ -709,6 +709,7 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_prompts: Optional[List[str]] = None,
         client_tool_schemas: Optional[List[dict]] = None,
+        state_prompts: Optional[List[str]] = None,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
@@ -723,6 +724,8 @@ class AgentService:
                 clients for inclusion in the system prompt.
             client_tool_schemas (Optional[List[dict]]): Client-provided
                 OpenAI-format tool schemas.
+            state_prompts (Optional[List[str]]): Per-turn runtime state
+                prompts from skills (wrapped inside ``<session_state>``).
 
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
@@ -750,6 +753,7 @@ class AgentService:
             server_tool_prompts=server_tool_prompts,
             client_tool_prompts=client_tool_prompts,
             instructions=instructions,
+            state_prompts=state_prompts,
         )
 
         tools = list(client_tool_schemas or [])
@@ -765,6 +769,7 @@ class AgentService:
         new_messages: List[Message],
         instructions: Optional[str] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        state_prompts: Optional[List[str]] = None,
     ) -> list:
         """Build LangChain message list: [system] + [history] + [new].
 
@@ -777,6 +782,8 @@ class AgentService:
             instructions (Optional[str]): Extra instructions for the prompt.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for inclusion in the system prompt.
+            state_prompts (Optional[List[str]]): Per-turn runtime state
+                prompts from skills.
 
         Returns:
             list: Ordered list of LangChain message objects.
@@ -784,6 +791,7 @@ class AgentService:
         prompt, _ = self._prepare_prompt_and_tools(
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
+            state_prompts=state_prompts,
         )
         lc_messages = [SystemMessage(content=prompt)]
         lc_messages.extend(self._to_lc_message(msg) for msg in history)
@@ -997,6 +1005,7 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        state_prompts: Optional[List[str]] = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -1014,6 +1023,8 @@ class AgentService:
                 schemas.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            state_prompts (Optional[List[str]]): Per-turn runtime state
+                prompts from skills.
 
         Returns:
             AIMessage: The successful LLM response.
@@ -1034,6 +1045,7 @@ class AgentService:
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
+            state_prompts=state_prompts,
         )
         lc_new_messages = [self._to_lc_message(msg) for msg in new_messages]
         overflow_retries = 0
@@ -1304,6 +1316,7 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        state_prompts: Optional[List[str]] = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1318,6 +1331,8 @@ class AgentService:
                 automatically.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            state_prompts (Optional[List[str]]): Per-turn runtime state
+                prompts from skills.
 
         Returns:
             LLMResult: A text result or tool call result with usage.
@@ -1331,6 +1346,7 @@ class AgentService:
                 instructions=instructions,
                 client_tool_schemas=client_tool_schemas,
                 client_tool_prompts=client_tool_prompts,
+                state_prompts=state_prompts,
             )
 
             usage = self._extract_usage(response)
@@ -1370,6 +1386,7 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        state_prompts: Optional[List[str]] = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1385,6 +1402,8 @@ class AgentService:
                 automatically.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            state_prompts (Optional[List[str]]): Per-turn runtime state
+                prompts from skills.
 
         Yields:
             AIMessageChunk: Incremental response chunks.
@@ -1394,6 +1413,7 @@ class AgentService:
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
+            state_prompts=state_prompts,
         )
         lc_new = [self._to_lc_message(msg) for msg in messages]
         overflow_retries = 0

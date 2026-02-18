@@ -98,38 +98,156 @@ match that language instead.
 """
 
 
+# ---------------------------------------------------------------------------
+# SystemPromptBuilder
+# ---------------------------------------------------------------------------
+
+
+class SystemPromptBuilder:
+    """Central builder for assembling the system prompt.
+
+    Collects all prompt sections via dedicated ``add_*`` methods and
+    produces the final string via :meth:`build`.  Each section is
+    wrapped in a consistent XML tag following the Anthropic best-practice
+    pattern (flat, semantic, snake_case).
+
+    Final prompt layout::
+
+        <identity>…</identity>
+        <safety>…</safety>
+        <response_style>…</response_style>
+        <tool_usage>…</tool_usage>
+        <conversation>…</conversation>
+        <language>…</language>
+
+        <tool_guides>
+          <tool_guide name="…">…</tool_guide>
+          …
+        </tool_guides>
+
+        <session_state>
+          …per-turn runtime context…
+        </session_state>
+
+        <instructions>
+          …user-provided instructions…
+        </instructions>
+
+        <current_date>YYYY-MM-DD</current_date>
+    """
+
+    def __init__(self) -> None:
+        self._tool_guides: List[str] = []
+        self._state_prompts: List[str] = []
+        self._instructions: Optional[str] = None
+
+    # -- section adders ----------------------------------------------------
+
+    def add_tool_guide(self, name: str, body: str) -> "SystemPromptBuilder":
+        """Add a single tool guide, wrapping in ``<tool_guide>`` if needed."""
+        stripped = body.strip()
+        if stripped.startswith("<tool_guide"):
+            self._tool_guides.append(stripped)
+        else:
+            self._tool_guides.append(
+                f'<tool_guide name="{name}">\n{stripped}\n</tool_guide>'
+            )
+        return self
+
+    def add_tool_guides(self, guides: List[str]) -> "SystemPromptBuilder":
+        """Add pre-wrapped ``<tool_guide>`` strings (from SkillProvider)."""
+        for g in guides:
+            stripped = g.strip()
+            if stripped.startswith("<tool_guide"):
+                self._tool_guides.append(stripped)
+            else:
+                self.add_tool_guide("unknown", stripped)
+        return self
+
+    def add_state_prompt(self, prompt: str) -> "SystemPromptBuilder":
+        """Add a per-turn runtime state prompt (e.g. current_todo)."""
+        if prompt and prompt.strip():
+            self._state_prompts.append(prompt.strip())
+        return self
+
+    def add_state_prompts(self, prompts: List[str]) -> "SystemPromptBuilder":
+        """Add multiple state prompts."""
+        for p in prompts:
+            self.add_state_prompt(p)
+        return self
+
+    def set_instructions(self, instructions: str) -> "SystemPromptBuilder":
+        """Set user-provided instructions."""
+        if instructions and instructions.strip():
+            self._instructions = instructions.strip()
+        return self
+
+    # -- build -------------------------------------------------------------
+
+    def build(self) -> str:
+        """Assemble and return the final system prompt string."""
+        parts: List[str] = [AGENT_IDENTITY_PROMPT]
+
+        if self._tool_guides:
+            inner = "\n".join(self._tool_guides)
+            parts.append(f"\n<tool_guides>\n{inner}\n</tool_guides>")
+
+        if self._state_prompts:
+            inner = "\n".join(self._state_prompts)
+            parts.append(f"\n<session_state>\n{inner}\n</session_state>")
+
+        if self._instructions:
+            parts.append(
+                f"\n<instructions>\n{self._instructions}\n</instructions>"
+            )
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        parts.append(f"\n<current_date>{today}</current_date>")
+
+        return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible free function
+# ---------------------------------------------------------------------------
+
+
 def build_system_prompt(
     server_tool_prompts: Optional[List[str]] = None,
     client_tool_prompts: Optional[List[str]] = None,
     instructions: Optional[str] = None,
+    state_prompts: Optional[List[str]] = None,
 ) -> str:
     """Build a system prompt based on available tools.
 
+    Thin wrapper around :class:`SystemPromptBuilder` to keep existing
+    call-sites working without modification.
+
     Args:
-        server_tool_prompts (Optional[List[str]]): Guide texts from
-            the skill registry (XML-wrapped SKILL.md bodies).
-        client_tool_prompts (Optional[List[str]]): Guide texts provided by
-            clients for inclusion in the system prompt.
-        instructions (Optional[str]): Extra instructions to append
-            inside an ``<instructions>`` XML block.
+        server_tool_prompts: Guide texts from the skill registry
+            (XML-wrapped SKILL.md bodies).
+        client_tool_prompts: Guide texts provided by clients.
+        instructions: Extra instructions to append inside an
+            ``<instructions>`` XML block.
+        state_prompts: Per-turn runtime state prompts from skills
+            (wrapped inside ``<session_state>``).
 
     Returns:
-        str: The assembled system prompt string.
+        The assembled system prompt string.
     """
-    parts = [AGENT_IDENTITY_PROMPT]
+    builder = SystemPromptBuilder()
 
-    # Server-side tool guides from skill registry
     if server_tool_prompts:
-        parts.extend(server_tool_prompts)
-
+        builder.add_tool_guides(server_tool_prompts)
     if client_tool_prompts:
         for guide in client_tool_prompts:
-            parts.append(guide)
-
+            if guide.strip().startswith("<tool_guide"):
+                builder.add_tool_guides([guide])
+            else:
+                builder.add_tool_guide("client", guide)
+    if state_prompts:
+        builder.add_state_prompts(state_prompts)
     if instructions:
-        parts.append(f"\n<instructions>\n{instructions}\n</instructions>")
+        builder.set_instructions(instructions)
 
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    parts.append(f"\n<current_date>{today}</current_date>")
-
-    return "\n".join(parts)
+    return builder.build()

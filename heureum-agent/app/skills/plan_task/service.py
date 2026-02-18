@@ -357,20 +357,47 @@ class PlanSkill:
         if not todo:
             return parts[0] if parts else None
 
-        lines = ["<current_todo>", f"Task: {todo.task}", "Steps:"]
+        lines = ["<current_todo>", f"Task: {todo.task}"]
+
+        # Classify steps by status
+        completed_lines: List[str] = []
+        current_lines: List[str] = []
+        pending_lines: List[str] = []
         first_pending = None
         in_progress_idx = None
         failed_idx = None
+
         for i, step in enumerate(todo.steps):
             result_part = f" — {step.result}" if step.result else ""
-            lines.append(f"  {i}. [{step.status}] {step.description}{result_part}")
-            if step.status == "in_progress":
+            entry = f"  {i}. {step.description}{result_part}"
+            if step.status == "completed":
+                completed_lines.append(entry)
+            elif step.status == "in_progress":
+                current_lines.append(entry)
                 in_progress_idx = i
-            elif step.status == "failed" and failed_idx is None:
-                failed_idx = i
-            elif step.status == "pending" and first_pending is None:
-                first_pending = i
+            elif step.status == "failed":
+                current_lines.append(f"  {i}. [FAILED] {step.description}{result_part}")
+                if failed_idx is None:
+                    failed_idx = i
+            else:  # pending
+                pending_lines.append(entry)
+                if first_pending is None:
+                    first_pending = i
 
+        if completed_lines:
+            lines.append("<completed_steps>")
+            lines.extend(completed_lines)
+            lines.append("</completed_steps>")
+        if current_lines:
+            lines.append("<current_step>")
+            lines.extend(current_lines)
+            lines.append("</current_step>")
+        if pending_lines:
+            lines.append("<pending_steps>")
+            lines.extend(pending_lines)
+            lines.append("</pending_steps>")
+
+        # Action directive
         if failed_idx is not None:
             lines.append(
                 f"\nSTOP: Step {failed_idx} has failed. "
@@ -380,10 +407,9 @@ class PlanSkill:
             )
         elif in_progress_idx is not None:
             lines.append(
-                f"\nCRITICAL — Step {in_progress_idx} is in_progress. "
-                "You MUST call manage_todo(action=\"update_step\") to set this step to "
-                "\"completed\" or \"failed\" BEFORE responding with any text to the user. "
-                "NEVER send a text response while a step is still in_progress. "
+                f"\nStep {in_progress_idx} is in_progress. "
+                "Call manage_todo(action=\"update_step\") to set this step to "
+                "\"completed\" or \"failed\" before responding with text to the user. "
                 f"If the step cannot be completed, mark it as failed: "
                 f"manage_todo(action=\"update_step\", step_index={in_progress_idx}, "
                 f"status=\"failed\", result=\"reason\"). "
@@ -391,16 +417,15 @@ class PlanSkill:
             )
         elif first_pending is not None:
             lines.append(
-                f"\nACTION REQUIRED: Call manage_todo(action=\"update_step\", "
+                f"\nCall manage_todo(action=\"update_step\", "
                 f"step_index={first_pending}, status=\"in_progress\") to start the next step."
             )
         else:
             completed = sum(1 for s in todo.steps if s.status == "completed")
             if completed == len(todo.steps):
                 lines.append(
-                    "\nAll steps completed. Respond with a final summary ONLY. "
-                    "Do NOT call any more tools — no web_fetch, no web_search, nothing. "
-                    "Just provide a text response summarizing the results."
+                    "\nAll steps completed. Respond with a final summary only. "
+                    "Do not call any more tools."
                 )
 
         lines.append("</current_todo>")
