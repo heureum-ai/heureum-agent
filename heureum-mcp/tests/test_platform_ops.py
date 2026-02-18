@@ -2,11 +2,9 @@
 
 """Tests for Platform API-backed filesystem Operations."""
 
-import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 from src.tools.filesystem.platform_ops import (
     PlatformEditOperations,
     PlatformFileClient,
@@ -15,7 +13,6 @@ from src.tools.filesystem.platform_ops import (
     PlatformReadOperations,
     PlatformWriteOperations,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -153,7 +150,6 @@ class TestPlatformFileClient:
 
 
 class TestPlatformReadOperations:
-
     @pytest.mark.asyncio
     async def test_read_file_returns_bytes(self, client):
         mock_resp = MagicMock()
@@ -192,6 +188,7 @@ class TestPlatformReadOperations:
 
     def test_detect_image_mime_type(self, client):
         import asyncio
+
         ops = PlatformReadOperations(client)
 
         result = asyncio.get_event_loop().run_until_complete(
@@ -211,7 +208,6 @@ class TestPlatformReadOperations:
 
 
 class TestPlatformWriteOperations:
-
     @pytest.mark.asyncio
     async def test_write_file(self, client):
         mock_resp = MagicMock()
@@ -238,7 +234,6 @@ class TestPlatformWriteOperations:
 
 
 class TestPlatformEditOperations:
-
     @pytest.mark.asyncio
     async def test_read_then_write(self, client):
         """Edit operations can read and write through Platform API."""
@@ -270,10 +265,8 @@ class TestPlatformEditOperations:
 
 
 class TestPlatformLsOperations:
-
     def test_readdir_parses_flat_files(self, client):
         """readdir extracts file names from Platform API list response."""
-        import httpx as real_httpx
 
         mock_resp = MagicMock()
         mock_resp.status_code = 200
@@ -347,7 +340,6 @@ class TestPlatformLsOperations:
 
 
 class TestPlatformFindOperations:
-
     @pytest.mark.asyncio
     async def test_glob_matches_pattern(self, client):
         mock_resp = MagicMock()
@@ -371,8 +363,7 @@ class TestPlatformFindOperations:
         mock_resp = MagicMock()
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
-            {"path": f"file{i}.md", "size": 10, "content_type": "text/markdown"}
-            for i in range(20)
+            {"path": f"file{i}.md", "size": 10, "content_type": "text/markdown"} for i in range(20)
         ]
         client._http = AsyncMock()
         client._http.get = AsyncMock(return_value=mock_resp)
@@ -388,7 +379,11 @@ class TestPlatformFindOperations:
         mock_resp.status_code = 200
         mock_resp.json.return_value = [
             {"path": "src/main.py", "size": 100, "content_type": "text/x-python"},
-            {"path": "node_modules/pkg/index.js", "size": 200, "content_type": "text/javascript"},
+            {
+                "path": "node_modules/pkg/index.js",
+                "size": 200,
+                "content_type": "text/javascript",
+            },
         ]
         client._http = AsyncMock()
         client._http.get = AsyncMock(return_value=mock_resp)
@@ -415,4 +410,3 @@ class TestPlatformFindOperations:
         results = await ops.glob("*.md", "/session/docs", [], 100)
 
         assert results == ["/session/docs/a.md", "/session/docs/b.md"]
-

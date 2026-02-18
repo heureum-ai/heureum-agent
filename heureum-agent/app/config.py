@@ -119,7 +119,7 @@ class Settings(BaseSettings):
 
     # Model fallback
     MODEL_FALLBACK_PRIMARY: str = ""  # empty → inferred from AGENT_MODEL
-    MODEL_FALLBACK_CHAIN: str = "openai/gpt-4o"
+    MODEL_FALLBACK_CHAIN: str = ""  # comma-separated "provider/model" specs
     MODEL_FALLBACK_COOLDOWN_BASE_SECONDS: int = 60
     MODEL_FALLBACK_COOLDOWN_MAX_SECONDS: int = 3600
     ANTHROPIC_API_KEY: str = ""

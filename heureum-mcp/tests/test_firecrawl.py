@@ -1,13 +1,12 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """Tests for Firecrawl fallback content extraction."""
-from unittest.mock import AsyncMock, patch, MagicMock
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
 from src.tools.web.fetch import fetch_firecrawl
-
 
 # ---------------------------------------------------------------------------
 # Fixtures to reduce boilerplate
@@ -145,7 +144,9 @@ class TestFirecrawlFailures:
     @pytest.mark.asyncio
     async def test_api_http_error(self, firecrawl_settings, mock_httpx_client):
         """Verify that an HTTP error response returns None."""
-        mock_httpx_client.post.return_value = _make_firecrawl_response(is_success=False, status_code=500)
+        mock_httpx_client.post.return_value = _make_firecrawl_response(
+            is_success=False, status_code=500
+        )
         assert await fetch_firecrawl("https://example.com") is None
 
     @pytest.mark.asyncio

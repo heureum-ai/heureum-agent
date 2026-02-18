@@ -3,12 +3,18 @@
 """
 URL configuration for heureum_platform project.
 """
-from django.contrib import admin
-from django.urls import path, include
-from rest_framework.routers import DefaultRouter
 
-from chat_messages.views import MessageViewSet, SessionViewSet, ToolPermissionViewSet, QuestionViewSet, SuggestedQuestionViewSet
+from chat_messages.views import (
+    MessageViewSet,
+    QuestionViewSet,
+    SessionViewSet,
+    SuggestedQuestionViewSet,
+    ToolPermissionViewSet,
+)
+from django.contrib import admin
+from django.urls import include, path
 from proxy.views import proxy_subagent_status, proxy_to_agent
+from rest_framework.routers import DefaultRouter
 
 router = DefaultRouter()
 router.register(r"messages", MessageViewSet, basename="message")
@@ -24,7 +30,11 @@ urlpatterns = [
     path("v1/responses", proxy_to_agent, name="responses"),
     # Legacy endpoint (for backward compatibility)
     path("api/v1/proxy/", proxy_to_agent, name="proxy"),
-    path("api/v1/subagent/status/<str:session_id>/", proxy_subagent_status, name="subagent_status"),
+    path(
+        "api/v1/subagent/status/<str:session_id>/",
+        proxy_subagent_status,
+        name="subagent_status",
+    ),
     # Authentication
     path("accounts/", include("allauth.urls")),
     path("_allauth/", include("allauth.headless.urls")),

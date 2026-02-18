@@ -3,7 +3,6 @@
 """Web domain tools: fetch, search."""
 
 from mcp.server.fastmcp import FastMCP
-
 from src.tools.web.fetch import register_web_fetch
 from src.tools.web.search import register_search
 

@@ -10,7 +10,15 @@ this module thin.
 
 import json
 import logging
+import time
 from typing import Any, Dict
+
+from app.services.subagent import (
+    SpawnRequest,
+    await_active_subagents,
+    get_registry,
+    spawn_subagent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -86,8 +94,6 @@ class SessionsSpawnSkill:
     def has_unfinished_steps(self, session_id: str) -> bool:
         """Return True if any sub-agent is still running for this parent session."""
         try:
-            from app.services.subagent import get_registry
-
             registry = get_registry()
             return registry.count_active(session_id) > 0
         except Exception:
@@ -100,8 +106,6 @@ class SessionsSpawnSkill:
         Includes status of each sub-agent for context.
         """
         try:
-            from app.services.subagent import get_registry
-
             registry = get_registry()
             records = registry.list_by_parent(session_id)
 
@@ -136,8 +140,6 @@ class SessionsSpawnSkill:
         session history for the next LLM call.
         """
         try:
-            from app.services.subagent import await_active_subagents
-
             await await_active_subagents(session_id, timeout=timeout)
         except Exception:
             logger.warning("await_pending failed for session %s", session_id, exc_info=True)
@@ -152,8 +154,6 @@ class SessionsSpawnSkill:
 
     async def _spawn(self, args: Dict[str, Any], session_id: str) -> str:
         try:
-            from app.services.subagent import SpawnRequest, spawn_subagent
-
             request = SpawnRequest(
                 parent_session_id=session_id,
                 task=args.get("task", ""),
@@ -161,21 +161,19 @@ class SessionsSpawnSkill:
                 cleanup=args.get("cleanup", "delete"),
             )
             result = await spawn_subagent(request)
-            return json.dumps({
-                "status": result.status,
-                "child_session_id": result.child_session_id,
-                "message": result.message,
-            })
+            return json.dumps(
+                {
+                    "status": result.status,
+                    "child_session_id": result.child_session_id,
+                    "message": result.message,
+                }
+            )
         except Exception as e:
             logger.warning("Sub-agent spawn failed: %s", e)
             return json.dumps({"error": str(e)})
 
     async def _status(self, args: Dict[str, Any], session_id: str) -> str:
-        import time
-
         try:
-            from app.services.subagent import get_registry
-
             registry = get_registry()
             child_id = args.get("child_session_id")
 
@@ -183,24 +181,29 @@ class SessionsSpawnSkill:
                 record = registry.get(child_id)
                 if not record:
                     return json.dumps({"error": f"Sub-agent '{child_id}' not found"})
+                # Verify parent ownership
+                if record.parent_session_id != session_id:
+                    return json.dumps({"error": f"Sub-agent '{child_id}' not found"})
                 return json.dumps(self._record_to_dict(record))
 
             # List all sub-agents for this parent session
             records = registry.list_by_parent(session_id)
             if not records:
-                return json.dumps({"message": "No sub-agents found for this session", "children": []})
+                return json.dumps(
+                    {"message": "No sub-agents found for this session", "children": []}
+                )
 
-            return json.dumps({
-                "children": [self._record_to_dict(r) for r in records],
-            })
+            return json.dumps(
+                {
+                    "children": [self._record_to_dict(r) for r in records],
+                }
+            )
         except Exception as e:
             logger.warning("Sub-agent status check failed: %s", e)
             return json.dumps({"error": str(e)})
 
     @staticmethod
     def _record_to_dict(record) -> Dict[str, Any]:
-        import time
-
         elapsed = time.time() - record.started_at
         result: Dict[str, Any] = {
             "child_session_id": record.child_session_id,

@@ -2,17 +2,13 @@
 
 """Tests for MCP client (app/services/providers/mcp.py)."""
 
-import json
 import sys
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _mock_tool(name="test_tool", description="A test tool", input_schema=None, meta=None):
     tool = MagicMock()
@@ -62,19 +58,19 @@ sys.modules.setdefault("mcp", _fake_mcp)
 sys.modules.setdefault("mcp.client", _fake_mcp.client)
 sys.modules.setdefault("mcp.client.streamable_http", _fake_mcp.client.streamable_http)
 
+from app.config import ApprovalChoice  # noqa: E402
+from app.config import settings  # noqa: E402
 from app.models import Message, ToolCallInfo  # noqa: E402
 from app.schemas.open_responses import MessageRole  # noqa: E402
-from app.config import settings  # noqa: E402
-from app.config import ApprovalChoice  # noqa: E402
 from app.services.providers.mcp import (  # noqa: E402
     MCPClient,
     _ServerConnection,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. TestMCPClientInit
 # ---------------------------------------------------------------------------
+
 
 class TestMCPClientInit:
     def test_default_server_urls(self):
@@ -99,13 +95,16 @@ class TestMCPClientInit:
 # 2. TestDiscoverTools
 # ---------------------------------------------------------------------------
 
+
 class TestDiscoverTools:
     async def test_returns_tool_list(self):
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_test__alpha", "First", {"type": "object"}),
-            _mock_tool("mcp_test__beta", "Second", {"type": "string"}),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_test__alpha", "First", {"type": "object"}),
+                _mock_tool("mcp_test__beta", "Second", {"type": "string"}),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "test")
 
@@ -174,11 +173,13 @@ class TestDiscoverTools:
     async def test_collects_requires_approval_from_meta(self):
         """Tools with meta.requires_approval are added to _approval_required_tools."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-            _mock_tool("mcp_web__fetch", meta={"requires_approval": True}),
-            _mock_tool("mcp_web__calculator"),  # no meta
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+                _mock_tool("mcp_web__fetch", meta={"requires_approval": True}),
+                _mock_tool("mcp_web__calculator"),  # no meta
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
 
@@ -189,11 +190,13 @@ class TestDiscoverTools:
     async def test_no_approval_without_meta(self):
         """Tools without meta or with requires_approval=False are not approval-required."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("tool_a"),
-            _mock_tool("tool_b", meta={"requires_approval": False}),
-            _mock_tool("tool_c", meta={"chain": []}),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("tool_a"),
+                _mock_tool("tool_b", meta={"requires_approval": False}),
+                _mock_tool("tool_c", meta={"chain": []}),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv")
 
@@ -226,6 +229,7 @@ class TestDiscoverTools:
 # ---------------------------------------------------------------------------
 # 3. TestGetSession
 # ---------------------------------------------------------------------------
+
 
 class TestGetSession:
     async def test_session_creation(self):
@@ -286,6 +290,7 @@ class TestGetSession:
 # 4. TestCallTool (was 3)
 # ---------------------------------------------------------------------------
 
+
 class TestCallTool:
     async def test_normal_call(self):
         """call_tool dispatches with the tool name as-is."""
@@ -297,7 +302,9 @@ class TestCallTool:
         result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp"})
 
         assert result == "hello world"
-        session.call_tool.assert_awaited_once_with("mcp_filesystem__read", {"path": "/tmp"}, meta=None)
+        session.call_tool.assert_awaited_once_with(
+            "mcp_filesystem__read", {"path": "/tmp"}, meta=None
+        )
 
     async def test_tool_not_found(self):
         client = MCPClient(server_urls=["http://srv"])
@@ -347,6 +354,7 @@ class TestCallTool:
 # 4. TestIsServerTool
 # ---------------------------------------------------------------------------
 
+
 class TestIsServerTool:
     async def test_known_tool(self):
         client = MCPClient(server_urls=["http://srv"])
@@ -376,6 +384,7 @@ class TestIsServerTool:
 # ---------------------------------------------------------------------------
 # 5. TestInvalidateCache
 # ---------------------------------------------------------------------------
+
 
 class TestInvalidateCache:
     async def test_resets_timestamp(self):
@@ -408,6 +417,7 @@ class TestInvalidateCache:
 # 6. TestClose
 # ---------------------------------------------------------------------------
 
+
 class TestClose:
     async def test_closes_all_connections(self):
         client = MCPClient(server_urls=["http://a", "http://b"])
@@ -432,6 +442,7 @@ class TestClose:
 # ---------------------------------------------------------------------------
 # 7. TestAsyncContextManager
 # ---------------------------------------------------------------------------
+
 
 class TestAsyncContextManager:
     async def test_aenter_returns_self(self):
@@ -463,6 +474,7 @@ class TestAsyncContextManager:
 # 8. TestServerToolNamesProperty
 # ---------------------------------------------------------------------------
 
+
 class TestServerToolNamesProperty:
     async def test_returns_set(self):
         client = MCPClient(server_urls=["http://srv"])
@@ -478,6 +490,7 @@ class TestServerToolNamesProperty:
 # 9. TestClassifyToolCalls
 # ---------------------------------------------------------------------------
 
+
 class TestClassifyToolCalls:
     def test_2way_classification(self):
         """Correctly splits tool calls into client and server."""
@@ -490,7 +503,9 @@ class TestClassifyToolCalls:
         ]
 
         client_calls, server_calls = client.classify_tool_calls(
-            tool_calls, "s1", client_tool_names={"ask_question"},
+            tool_calls,
+            "s1",
+            client_tool_names={"ask_question"},
         )
 
         assert [tc.name for tc in client_calls] == ["ask_question"]
@@ -512,6 +527,7 @@ class TestClassifyToolCalls:
 # ---------------------------------------------------------------------------
 # 10. TestRequestApproval
 # ---------------------------------------------------------------------------
+
 
 class TestRequestApproval:
     def test_stores_pending_and_returns_question(self):
@@ -540,6 +556,7 @@ class TestRequestApproval:
 # 11. TestHandleApprovalResponse
 # ---------------------------------------------------------------------------
 
+
 class TestHandleApprovalResponse:
     def test_allow_once(self):
         """'Allow Once' returns allow_once decision and does not auto-approve."""
@@ -550,7 +567,13 @@ class TestHandleApprovalResponse:
             "usage": None,
             "input_messages": [],
         }
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.ALLOW_ONCE, tool_call_id="ask_1")]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALLOW_ONCE,
+                tool_call_id="ask_1",
+            )
+        ]
 
         result = client.handle_approval_response("s1", messages)
 
@@ -570,7 +593,13 @@ class TestHandleApprovalResponse:
             "usage": None,
             "input_messages": [],
         }
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.ALWAYS_ALLOW, tool_call_id="ask_2")]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALWAYS_ALLOW,
+                tool_call_id="ask_2",
+            )
+        ]
 
         result = client.handle_approval_response("s1", messages)
 
@@ -586,7 +615,9 @@ class TestHandleApprovalResponse:
             "usage": None,
             "input_messages": [],
         }
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.DENY, tool_call_id="ask_3")]
+        messages = [
+            Message(role=MessageRole.TOOL, content=ApprovalChoice.DENY, tool_call_id="ask_3")
+        ]
 
         result = client.handle_approval_response("s1", messages)
 
@@ -595,7 +626,13 @@ class TestHandleApprovalResponse:
     def test_no_pending(self):
         """Returns None when no pending state exists."""
         client = MCPClient(server_urls=["http://srv"])
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.ALLOW_ONCE, tool_call_id="ask_1")]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALLOW_ONCE,
+                tool_call_id="ask_1",
+            )
+        ]
 
         result = client.handle_approval_response("s1", messages)
 
@@ -628,7 +665,11 @@ class TestHandleApprovalResponse:
         }
         messages = [
             Message(role=MessageRole.USER, content="hello"),
-            Message(role=MessageRole.TOOL, content=ApprovalChoice.ALLOW_ONCE, tool_call_id="ask_1"),
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALLOW_ONCE,
+                tool_call_id="ask_1",
+            ),
         ]
 
         result = client.handle_approval_response("s1", messages)
@@ -646,16 +687,19 @@ class TestHandleApprovalResponse:
 # 13. TestApprovalLifecycle — discovery → classify → approval → auto-approve
 # ---------------------------------------------------------------------------
 
+
 class TestApprovalLifecycle:
     """End-to-end: requires_approval meta → classify → user response → future calls."""
 
     async def test_allow_once_still_requires_approval_next_time(self):
         """Allow Once executes the tool but does NOT auto-approve future calls."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-            _mock_tool("mcp_web__calculator"),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+                _mock_tool("mcp_web__calculator"),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -669,7 +713,13 @@ class TestApprovalLifecycle:
 
         # 2) User responds "Allow Once"
         info = client.request_approval(server_calls, "s1", None, [])
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.ALLOW_ONCE, tool_call_id=info["approval_call_id"])]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALLOW_ONCE,
+                tool_call_id=info["approval_call_id"],
+            )
+        ]
         result = client.handle_approval_response("s1", messages)
         assert result["decision"] == ApprovalChoice.ALLOW_ONCE.decision
 
@@ -679,10 +729,12 @@ class TestApprovalLifecycle:
     async def test_always_allow_skips_approval_on_next_call(self):
         """Always Allow auto-approves the tool for all future calls in the session."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-            _mock_tool("mcp_web__calculator"),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+                _mock_tool("mcp_web__calculator"),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -696,7 +748,13 @@ class TestApprovalLifecycle:
 
         # 2) User responds "Always Allow"
         info = client.request_approval(server_calls, "s1", None, [])
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.ALWAYS_ALLOW, tool_call_id=info["approval_call_id"])]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.ALWAYS_ALLOW,
+                tool_call_id=info["approval_call_id"],
+            )
+        ]
         result = client.handle_approval_response("s1", messages)
         assert result["decision"] == ApprovalChoice.ALWAYS_ALLOW.decision
         assert ws in client._auto_approved_tools["s1"]
@@ -707,9 +765,11 @@ class TestApprovalLifecycle:
     async def test_deny_does_not_auto_approve(self):
         """Deny does not add tool to auto-approved; next call still requires approval."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -718,7 +778,13 @@ class TestApprovalLifecycle:
         tc = [ToolCallInfo(name=ws, args={"query": "q"}, id="c1")]
         _, server_calls = client.classify_tool_calls(tc, "s1")
         info = client.request_approval(server_calls, "s1", None, [])
-        messages = [Message(role=MessageRole.TOOL, content=ApprovalChoice.DENY, tool_call_id=info["approval_call_id"])]
+        messages = [
+            Message(
+                role=MessageRole.TOOL,
+                content=ApprovalChoice.DENY,
+                tool_call_id=info["approval_call_id"],
+            )
+        ]
         result = client.handle_approval_response("s1", messages)
         assert result["decision"] == ApprovalChoice.DENY.decision
 
@@ -728,10 +794,12 @@ class TestApprovalLifecycle:
     async def test_tool_without_meta_never_requires_approval(self):
         """Tools without requires_approval meta always go to auto."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("calculator"),
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("calculator"),
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -751,9 +819,11 @@ class TestApprovalLifecycle:
     async def test_always_allow_is_per_session(self):
         """Auto-approval for session s1 does not affect session s2."""
         client = MCPClient(server_urls=["http://srv"])
-        session = _make_session(tools=[
-            _mock_tool("mcp_web__search", meta={"requires_approval": True}),
-        ])
+        session = _make_session(
+            tools=[
+                _mock_tool("mcp_web__search", meta={"requires_approval": True}),
+            ]
+        )
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
         await client.discover_tools()
@@ -773,6 +843,7 @@ class TestApprovalLifecycle:
 # ---------------------------------------------------------------------------
 # 15. TestClearSessionState
 # ---------------------------------------------------------------------------
+
 
 class TestClearSessionState:
     def test_clears_pending_and_auto(self):
@@ -796,6 +867,7 @@ class TestClearSessionState:
 # 16. TestToolNamespacing
 # ---------------------------------------------------------------------------
 
+
 class TestToolPassthrough:
     """Tests for source-side tool naming — names pass through unchanged."""
 
@@ -815,7 +887,9 @@ class TestToolPassthrough:
 
         result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp/x"})
         assert result == "file content"
-        session.call_tool.assert_awaited_once_with("mcp_filesystem__read", {"path": "/tmp/x"}, meta=None)
+        session.call_tool.assert_awaited_once_with(
+            "mcp_filesystem__read", {"path": "/tmp/x"}, meta=None
+        )
 
     async def test_distinct_names_from_different_servers(self):
         """Two servers register tools with their own namespaced names."""

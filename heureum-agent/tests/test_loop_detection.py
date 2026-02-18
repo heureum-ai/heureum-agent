@@ -3,7 +3,6 @@
 """Tests for tool loop detection."""
 
 import pytest
-
 from app.services.loop_detection import (
     BUCKET_SIZE,
     LoopSeverity,
@@ -15,7 +14,6 @@ from app.services.loop_detection import (
     get_ping_pong_streak,
     get_session_loop_state,
     hash_tool_call,
-    hash_tool_outcome,
     record_tool_call,
     record_tool_outcome,
     should_emit_warning,
@@ -29,6 +27,7 @@ def _clean_state():
     yield
     # Clear all session states
     from app.services.loop_detection import _session_states
+
     _session_states.clear()
 
 
@@ -104,10 +103,7 @@ class TestGetNoProgressStreak:
         assert get_no_progress_streak(records) == 3
 
     def test_all_same(self):
-        records = [
-            ToolCallRecord(tool_name="a", call_hash="h", result_hash="r")
-            for _ in range(5)
-        ]
+        records = [ToolCallRecord(tool_name="a", call_hash="h", result_hash="r") for _ in range(5)]
         assert get_no_progress_streak(records) == 5
 
 
@@ -118,10 +114,7 @@ class TestGetNoProgressStreak:
 
 class TestGetPingPongStreak:
     def test_no_alternation(self):
-        records = [
-            ToolCallRecord(tool_name="a", call_hash="h", result_hash="r")
-            for _ in range(4)
-        ]
+        records = [ToolCallRecord(tool_name="a", call_hash="h", result_hash="r") for _ in range(4)]
         assert get_ping_pong_streak(records) == 0
 
     def test_too_few_records(self):
@@ -145,9 +138,7 @@ class TestGetPingPongStreak:
         records = []
         for i in range(8):
             name = "a" if i % 2 == 0 else "b"
-            records.append(
-                ToolCallRecord(tool_name=name, call_hash=f"h{name}", result_hash="r")
-            )
+            records.append(ToolCallRecord(tool_name=name, call_hash=f"h{name}", result_hash="r"))
         assert get_ping_pong_streak(records) == 8
 
 
@@ -167,7 +158,9 @@ class TestDetectToolCallLoop:
         assert result.severity == LoopSeverity.OK
 
     def test_generic_warning(self):
-        cfg = ToolLoopDetectionConfig(warning_threshold=3, critical_threshold=6, circuit_breaker_threshold=10)
+        cfg = ToolLoopDetectionConfig(
+            warning_threshold=3, critical_threshold=6, circuit_breaker_threshold=10
+        )
         state = get_session_loop_state("s2")
         for _ in range(4):
             rec = ToolCallRecord(tool_name="read", call_hash="h", result_hash="same")
@@ -178,7 +171,9 @@ class TestDetectToolCallLoop:
         assert result.pattern == "no_progress"
 
     def test_circuit_breaker(self):
-        cfg = ToolLoopDetectionConfig(warning_threshold=3, critical_threshold=6, circuit_breaker_threshold=10)
+        cfg = ToolLoopDetectionConfig(
+            warning_threshold=3, critical_threshold=6, circuit_breaker_threshold=10
+        )
         state = get_session_loop_state("s3")
         for _ in range(12):
             rec = ToolCallRecord(tool_name="read", call_hash="h", result_hash="same")
@@ -188,7 +183,9 @@ class TestDetectToolCallLoop:
         assert result.severity == LoopSeverity.CIRCUIT_BREAKER
 
     def test_critical_poll(self):
-        cfg = ToolLoopDetectionConfig(warning_threshold=3, critical_threshold=5, circuit_breaker_threshold=30)
+        cfg = ToolLoopDetectionConfig(
+            warning_threshold=3, critical_threshold=5, circuit_breaker_threshold=30
+        )
         state = get_session_loop_state("s4")
         for _ in range(6):
             rec = ToolCallRecord(tool_name="browser_wait", call_hash="h", result_hash="same")

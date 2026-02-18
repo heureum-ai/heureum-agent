@@ -13,6 +13,7 @@ When called with session context (via ``_meta``), the fetched content is
 automatically saved to the Platform DB so that filesystem tools (``read``,
 ``find``, ``ls``) can access it within the same session.
 """
+
 import hashlib
 import json
 import logging
@@ -26,13 +27,16 @@ from urllib.parse import urlparse
 
 import html2text
 import httpx
-from readability import Document
-
 from mcp.server.fastmcp import Context, FastMCP
+from readability import Document
 from src.common.cache import make_cache_key, raw_content_cache
 from src.common.content_safety import wrap_and_truncate, wrapper_overhead
 from src.common.security import SSRFError, fetch_with_ssrf_guard
-from src.common.session_context import extract_session_context, get_platform_client, SessionContext
+from src.common.session_context import (
+    SessionContext,
+    extract_session_context,
+    get_platform_client,
+)
 from src.config import settings
 
 logger = logging.getLogger(__name__)
@@ -48,14 +52,14 @@ ExtractMode = Literal["markdown", "text"]
 def _make_html2text(*, body_width: int = 78) -> html2text.HTML2Text:
     """Create a pre-configured html2text converter."""
     h = html2text.HTML2Text()
-    h.body_width = body_width        # word-wrap at 78 chars (LangChain default)
-    h.ignore_images = True            # images aren't useful for LLM context
+    h.body_width = body_width  # word-wrap at 78 chars (LangChain default)
+    h.ignore_images = True  # images aren't useful for LLM context
     h.ignore_emphasis = False
-    h.protect_links = True            # keep [text](url) intact
-    h.unicode_snob = True             # use unicode instead of HTML entities
-    h.wrap_links = False              # don't break URLs across lines
-    h.wrap_list_items = True          # wrap long list items
-    h.single_line_break = False       # CommonMark: blank line between paragraphs
+    h.protect_links = True  # keep [text](url) intact
+    h.unicode_snob = True  # use unicode instead of HTML entities
+    h.wrap_links = False  # don't break URLs across lines
+    h.wrap_list_items = True  # wrap long list items
+    h.single_line_break = False  # CommonMark: blank line between paragraphs
     return h
 
 
@@ -284,7 +288,10 @@ def register_web_fetch(mcp: FastMCP) -> None:
             tool with.
     """
 
-    @mcp.tool(name="mcp_web__fetch", meta={"requires_approval": True, "display_name": "Web Fetch"})
+    @mcp.tool(
+        name="mcp_web__fetch",
+        meta={"requires_approval": True, "display_name": "Web Fetch"},
+    )
     async def web_fetch(
         url: str,
         max_length: int = settings.WEB_FETCH_MAX_LENGTH,
@@ -358,27 +365,45 @@ via start_index/max_length for long pages.
                 timeout=settings.WEB_FETCH_TIMEOUT,
             )
         except SSRFError as e:
-            return json.dumps({
-                "error": str(e),
-                "url": url,
-                "blocked": True,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": str(e),
+                    "url": url,
+                    "blocked": True,
+                },
+                ensure_ascii=False,
+            )
         except (httpx.TimeoutException, httpx.HTTPStatusError, Exception) as e:
             # Fallback 1: network / HTTP error → try Firecrawl
             fc_result = await fetch_firecrawl(url)
             if fc_result is not None:
-                _cache_raw(raw_cache_key, has_custom_headers,
-                           final_url=url, status_code=0, content_type="",
-                           title=fc_result.title or "", text=fc_result.text,
-                           extractor=fc_result.extractor)
-                result_json, full_text = _build_result(
-                    url=url, final_url=url, status_code=0, content_type="",
-                    title=fc_result.title or "", text=fc_result.text,
-                    extractor=fc_result.extractor, mode=mode,
-                    max_length=max_length, start_index=start_index,
-                    start_time=start, source_url=url,
+                _cache_raw(
+                    raw_cache_key,
+                    has_custom_headers,
+                    final_url=url,
+                    status_code=0,
+                    content_type="",
+                    title=fc_result.title or "",
+                    text=fc_result.text,
+                    extractor=fc_result.extractor,
                 )
-                return await _maybe_save_to_session(result_json, url, session_ctx, full_text=full_text)
+                result_json, full_text = _build_result(
+                    url=url,
+                    final_url=url,
+                    status_code=0,
+                    content_type="",
+                    title=fc_result.title or "",
+                    text=fc_result.text,
+                    extractor=fc_result.extractor,
+                    mode=mode,
+                    max_length=max_length,
+                    start_index=start_index,
+                    start_time=start,
+                    source_url=url,
+                )
+                return await _maybe_save_to_session(
+                    result_json, url, session_ctx, full_text=full_text
+                )
 
             if isinstance(e, httpx.TimeoutException):
                 error_msg = f"Request timed out after {settings.WEB_FETCH_TIMEOUT}s"
@@ -387,33 +412,54 @@ via start_index/max_length for long pages.
             else:
                 error_msg = f"Fetch failed: {e}"
 
-            return json.dumps({
-                "error": error_msg,
-                "url": url,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": error_msg,
+                    "url": url,
+                },
+                ensure_ascii=False,
+            )
 
         # Fallback 2: non-success HTTP status → try Firecrawl
         if not response.is_success:
             fc_result = await fetch_firecrawl(url)
             if fc_result is not None:
-                _cache_raw(raw_cache_key, has_custom_headers,
-                           final_url=url, status_code=response.status_code,
-                           content_type="", title=fc_result.title or "",
-                           text=fc_result.text, extractor=fc_result.extractor)
-                result_json, full_text = _build_result(
-                    url=url, final_url=url, status_code=response.status_code,
-                    content_type="", title=fc_result.title or "",
-                    text=fc_result.text, extractor=fc_result.extractor,
-                    mode=mode, max_length=max_length, start_index=start_index,
-                    start_time=start, source_url=url,
+                _cache_raw(
+                    raw_cache_key,
+                    has_custom_headers,
+                    final_url=url,
+                    status_code=response.status_code,
+                    content_type="",
+                    title=fc_result.title or "",
+                    text=fc_result.text,
+                    extractor=fc_result.extractor,
                 )
-                return await _maybe_save_to_session(result_json, url, session_ctx, full_text=full_text)
+                result_json, full_text = _build_result(
+                    url=url,
+                    final_url=url,
+                    status_code=response.status_code,
+                    content_type="",
+                    title=fc_result.title or "",
+                    text=fc_result.text,
+                    extractor=fc_result.extractor,
+                    mode=mode,
+                    max_length=max_length,
+                    start_index=start_index,
+                    start_time=start,
+                    source_url=url,
+                )
+                return await _maybe_save_to_session(
+                    result_json, url, session_ctx, full_text=full_text
+                )
 
-            return json.dumps({
-                "error": f"HTTP {response.status_code}: {response.reason_phrase}",
-                "url": url,
-                "status": response.status_code,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": f"HTTP {response.status_code}: {response.reason_phrase}",
+                    "url": url,
+                    "status": response.status_code,
+                },
+                ensure_ascii=False,
+            )
 
         content_type = response.headers.get("content-type", "")
         final_url = str(response.url)
@@ -432,17 +478,30 @@ via start_index/max_length for long pages.
             if fc_result is not None:
                 extracted = fc_result
 
-        _cache_raw(raw_cache_key, has_custom_headers,
-                   final_url=final_url, status_code=status_code,
-                   content_type=content_type, title=extracted.title or "",
-                   text=extracted.text, extractor=extracted.extractor)
+        _cache_raw(
+            raw_cache_key,
+            has_custom_headers,
+            final_url=final_url,
+            status_code=status_code,
+            content_type=content_type,
+            title=extracted.title or "",
+            text=extracted.text,
+            extractor=extracted.extractor,
+        )
 
         result_json, full_text = _build_result(
-            url=url, final_url=final_url, status_code=status_code,
-            content_type=content_type, title=extracted.title or "",
-            text=extracted.text, extractor=extracted.extractor,
-            mode=mode, max_length=max_length, start_index=start_index,
-            start_time=start, source_url=url,
+            url=url,
+            final_url=final_url,
+            status_code=status_code,
+            content_type=content_type,
+            title=extracted.title or "",
+            text=extracted.text,
+            extractor=extracted.extractor,
+            mode=mode,
+            max_length=max_length,
+            start_index=start_index,
+            start_time=start,
+            source_url=url,
         )
         return await _maybe_save_to_session(result_json, url, session_ctx, full_text=full_text)
 
@@ -461,14 +520,17 @@ def _cache_raw(
     """Store raw extracted content in the content cache (keyed by URL + mode)."""
     if has_custom_headers or not settings.CACHE_ENABLED:
         return
-    raw_content_cache.set(raw_cache_key, {
-        "final_url": final_url,
-        "status_code": status_code,
-        "content_type": content_type,
-        "title": title,
-        "text": text,
-        "extractor": extractor,
-    })
+    raw_content_cache.set(
+        raw_cache_key,
+        {
+            "final_url": final_url,
+            "status_code": status_code,
+            "content_type": content_type,
+            "title": title,
+            "text": text,
+            "extractor": extractor,
+        },
+    )
 
 
 def _build_result(
@@ -610,7 +672,7 @@ async def _maybe_save_to_session(
         data["next_start_index"] = None
         data["instruction"] = (
             f"Full content ({saved_len} chars) saved to session_file. "
-            f"Use read(path=\"{data['session_file']}\") to view the content."
+            f'Use read(path="{data["session_file"]}") to view the content.'
         )
         return json.dumps(data, ensure_ascii=False)
     except Exception:

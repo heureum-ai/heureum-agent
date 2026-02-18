@@ -13,7 +13,6 @@ Pure logic module with no dependency on agent internals.
 """
 
 import hashlib
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -88,14 +87,16 @@ _default_config = ToolLoopDetectionConfig()
 
 BUCKET_SIZE = 10
 
-_KNOWN_POLL_TOOLS = frozenset({
-    "browser_wait",
-    "browser_wait_for",
-    "process_poll",
-    "process_wait",
-    "wait",
-    "sleep",
-})
+_KNOWN_POLL_TOOLS = frozenset(
+    {
+        "browser_wait",
+        "browser_wait_for",
+        "process_poll",
+        "process_wait",
+        "wait",
+        "sleep",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +107,7 @@ _KNOWN_POLL_TOOLS = frozenset({
 def stable_stringify(obj: Any) -> str:
     """Deterministic JSON string with sorted keys."""
     if isinstance(obj, dict):
-        sorted_items = sorted(
-            (k, stable_stringify(v)) for k, v in obj.items()
-        )
+        sorted_items = sorted((k, stable_stringify(v)) for k, v in obj.items())
         return "{" + ",".join(f"{k!r}:{v}" for k, v in sorted_items) + "}"
     if isinstance(obj, (list, tuple)):
         return "[" + ",".join(stable_stringify(x) for x in obj) + "]"
@@ -173,7 +172,7 @@ def record_tool_call(
 
     # Sliding window trim
     if len(state.records) > cfg.history_size:
-        state.records = state.records[-cfg.history_size:]
+        state.records = state.records[-cfg.history_size :]
 
     return record
 
@@ -315,7 +314,9 @@ def detect_tool_call_loop(
 
     # Generic no-progress
     if no_progress >= cfg.warning_threshold:
-        sev = LoopSeverity.CRITICAL if no_progress >= cfg.critical_threshold else LoopSeverity.WARNING
+        sev = (
+            LoopSeverity.CRITICAL if no_progress >= cfg.critical_threshold else LoopSeverity.WARNING
+        )
         return LoopDetectionResult(
             severity=sev,
             streak=no_progress,

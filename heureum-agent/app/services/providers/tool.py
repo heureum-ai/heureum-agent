@@ -151,12 +151,12 @@ class ToolChainRegistry:
         if placeholder == "$value":
             return val
         if placeholder.startswith("$value."):
-            field = placeholder[len("$value."):]
+            field = placeholder[len("$value.") :]
             return val.get(field) if isinstance(val, dict) else val
         if placeholder == "$source_args":
             return source_args or {}
         if placeholder.startswith("$source_args."):
-            field = placeholder[len("$source_args."):]
+            field = placeholder[len("$source_args.") :]
             return (source_args or {}).get(field) or None
         return placeholder
 
@@ -247,7 +247,9 @@ class ToolChainRegistry:
                 if path_key not in _path_cache:
                     _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
                 for args in self._extract_chain_args_from_data(
-                    data, step, source_args=source_args,
+                    data,
+                    step,
+                    source_args=source_args,
                 ):
                     step_follow_ups.append(
                         ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
@@ -273,7 +275,9 @@ class ToolChainRegistry:
                     if path_key not in _path_cache:
                         _path_cache[path_key] = self._resolve_jsonpath(data, step.extract)
                     for args in self._extract_chain_args_from_data(
-                        data, step, source_args=src_args,
+                        data,
+                        step,
+                        source_args=src_args,
                     ):
                         step_follow_ups.append(
                             ToolCallInfo(name=step.target, args=args, id=_gen_call_id())
@@ -325,17 +329,18 @@ class ToolChainRegistry:
         for tc, result_msg in zip(executed_calls, tool_results):
             chained.extend(
                 self.build_per_result(
-                    tc, result_msg, session_id=session_id,
-                    _parse_cache=_parse_cache, _path_cache=_path_cache,
+                    tc,
+                    result_msg,
+                    session_id=session_id,
+                    _parse_cache=_parse_cache,
+                    _path_cache=_path_cache,
                 )
             )
 
         return chained
 
     @staticmethod
-    def _extract_chain_args(
-        result_json: str, step: ChainStep
-    ) -> List[Dict[str, Any]]:
+    def _extract_chain_args(result_json: str, step: ChainStep) -> List[Dict[str, Any]]:
         """Extract chained tool arguments from a result using a chain step.
 
         Kept for backward compatibility. Internally delegates to

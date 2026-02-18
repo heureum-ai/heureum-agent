@@ -3,7 +3,7 @@
 """Tests for app.services.providers.skill — SkillProvider class."""
 
 import pytest
-from app.services.providers.skill import SkillProvider, SkillMeta, parse_skill_md
+from app.services.providers.skill import SkillProvider, parse_skill_md
 
 
 @pytest.fixture
@@ -59,10 +59,7 @@ class TestParseSkillMd:
     def test_empty_client_tools(self, tmp_path):
         md = tmp_path / "SKILL.md"
         md.write_text(
-            "---\nname: test\ndescription: desc\n"
-            "server_tools: my_tool\n"
-            "client_tools:\n"
-            "---\nBody."
+            "---\nname: test\ndescription: desc\nserver_tools: my_tool\nclient_tools:\n---\nBody."
         )
         meta = parse_skill_md(str(md))
         assert meta.server_tools == ["my_tool"]
@@ -134,11 +131,7 @@ class TestDependsOn:
     def test_parse_depends_on(self, tmp_path):
         """depends_on is parsed from frontmatter."""
         md = tmp_path / "SKILL.md"
-        md.write_text(
-            "---\nname: a\ndescription: A\n"
-            "depends_on: b, c\n"
-            "---\nBody."
-        )
+        md.write_text("---\nname: a\ndescription: A\ndepends_on: b, c\n---\nBody.")
         meta = parse_skill_md(str(md))
         assert meta.depends_on == ["b", "c"]
 
@@ -177,7 +170,12 @@ class TestPlanSkillIntegration:
         )
         result = await plan.execute(
             "manage_todo",
-            {"action": "update_step", "step_index": 0, "status": "completed", "result": "Done"},
+            {
+                "action": "update_step",
+                "step_index": 0,
+                "status": "completed",
+                "result": "Done",
+            },
             "test_update_session",
         )
         assert "Done" in result

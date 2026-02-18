@@ -3,7 +3,6 @@
 """Server factory and registry."""
 
 from mcp.server.fastmcp import FastMCP
-
 from src.config import settings
 
 

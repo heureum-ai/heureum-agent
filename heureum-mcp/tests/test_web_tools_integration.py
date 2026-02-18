@@ -7,8 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-from src.common.cache import search_cache, fetch_cache, raw_content_cache
+from src.common.cache import fetch_cache, raw_content_cache, search_cache
 from src.common.security import SSRFError
 from src.tools.web.search import SearchItem, SearchResponse
 
@@ -20,8 +19,8 @@ from src.tools.web.search import SearchItem, SearchResponse
 def _make_server():
     """Create a web MCP server with Tavily search + web_fetch registered."""
     from mcp.server.fastmcp import FastMCP
-    from src.tools.web.search import register_search
     from src.tools.web.fetch import register_web_fetch
+    from src.tools.web.search import register_search
 
     mcp = FastMCP("test-web-integration")
     register_search(mcp)
@@ -56,10 +55,13 @@ def _clear_caches():
 @pytest.fixture(autouse=True)
 def _disable_cache():
     """Disable cache by default. Tests that need cache can override."""
-    with patch("src.tools.web.search.settings") as mock_search_settings, \
-         patch("src.tools.web.fetch.settings") as mock_fetch_settings:
+    with (
+        patch("src.tools.web.search.settings") as mock_search_settings,
+        patch("src.tools.web.fetch.settings") as mock_fetch_settings,
+    ):
         # Copy real settings attrs, then disable cache
         from src.config import settings as real_settings
+
         for attr in dir(real_settings):
             if attr.isupper():
                 setattr(mock_search_settings, attr, getattr(real_settings, attr))
@@ -143,6 +145,7 @@ def _patch_fetch_error(exc):
 # 1. search → fetch 파이프라인
 # ===========================================================================
 
+
 class TestSearchThenFetch:
     """web_search 결과의 URL을 web_fetch로 가져오는 E2E 파이프라인."""
 
@@ -153,15 +156,19 @@ class TestSearchThenFetch:
         httpx_resp = _build_httpx_response(
             url="https://example.com/article",
             html="<html><head><title>Example Page</title></head>"
-                 "<body><p>This is the full article content.</p></body></html>",
+            "<body><p>This is the full article content.</p></body></html>",
         )
 
-        with _patch_tavily([{
-            "title": "Example Page",
-            "url": "https://example.com/article",
-            "content": "Example Domain is reserved for documentation.",
-            "score": 0.95,
-        }]):
+        with _patch_tavily(
+            [
+                {
+                    "title": "Example Page",
+                    "url": "https://example.com/article",
+                    "content": "Example Domain is reserved for documentation.",
+                    "score": 0.95,
+                }
+            ]
+        ):
             server = _make_server()
             search = await _call_tool(server, "mcp_web__search", {"query": "example 2026"})
 
@@ -185,10 +192,22 @@ class TestSearchThenFetch:
     @pytest.mark.asyncio
     async def test_multiple_results(self):
         """복수 결과가 있는 검색 결과."""
-        with _patch_tavily([
-            {"title": "Python Docs", "url": "https://python.org/docs", "content": "Python info.", "score": 0.9},
-            {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "Rust info.", "score": 0.8},
-        ]):
+        with _patch_tavily(
+            [
+                {
+                    "title": "Python Docs",
+                    "url": "https://python.org/docs",
+                    "content": "Python info.",
+                    "score": 0.9,
+                },
+                {
+                    "title": "Rust Lang",
+                    "url": "https://rust-lang.org",
+                    "content": "Rust info.",
+                    "score": 0.8,
+                },
+            ]
+        ):
             server = _make_server()
             result = await _call_tool(server, "mcp_web__search", {"query": "python rust 2026"})
 
@@ -201,6 +220,7 @@ class TestSearchThenFetch:
 # ===========================================================================
 # 2. web_search 단위 테스트
 # ===========================================================================
+
 
 class TestWebSearch:
     """Tests for the web_search tool including error handling and URL cleanup."""
@@ -251,9 +271,16 @@ class TestWebSearch:
     @pytest.mark.asyncio
     async def test_empty_content(self):
         """Tavily가 content 없는 결과 반환 시 처리."""
-        with _patch_tavily([
-            {"title": "Empty", "url": "https://example.com", "content": "", "score": 0.5},
-        ]):
+        with _patch_tavily(
+            [
+                {
+                    "title": "Empty",
+                    "url": "https://example.com",
+                    "content": "",
+                    "score": 0.5,
+                },
+            ]
+        ):
             server = _make_server()
             result = await _call_tool(server, "mcp_web__search", {"query": "empty content test"})
 
@@ -264,6 +291,7 @@ class TestWebSearch:
 # ===========================================================================
 # 3. web_fetch 단위 테스트
 # ===========================================================================
+
 
 class TestWebFetch:
     """Tests for the web_fetch tool including SSRF, status codes, and content types."""
@@ -278,7 +306,9 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/success"})
+            result = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://example.com/success"}
+            )
 
         assert result["status"] == 200
         assert result["title"] == "Hello"
@@ -290,7 +320,9 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(SSRFError("Blocked: private IP")):
-            result = await _call_tool(server, "mcp_web__fetch", {"url": "http://169.254.169.254/metadata"})
+            result = await _call_tool(
+                server, "mcp_web__fetch", {"url": "http://169.254.169.254/metadata"}
+            )
 
         assert result["blocked"] is True
         assert "private" in result["error"].lower()
@@ -307,7 +339,9 @@ class TestWebFetch:
         with _patch_fetch_error(
             httpx.HTTPStatusError("Forbidden", request=MagicMock(), response=mock_response)
         ):
-            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/secret"})
+            result = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://example.com/secret"}
+            )
 
         assert "403" in result["error"]
 
@@ -349,11 +383,15 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "mcp_web__fetch", {
-                "url": "https://example.com/long",
-                "start_index": 0,
-                "max_length": 5000,
-            })
+            result = await _call_tool(
+                server,
+                "mcp_web__fetch",
+                {
+                    "url": "https://example.com/long",
+                    "start_index": 0,
+                    "max_length": 5000,
+                },
+            )
 
         # session_file saved → pagination reset to full content
         assert "session_file" in result
@@ -367,8 +405,9 @@ class TestWebFetch:
     @pytest.mark.asyncio
     async def test_pagination_metadata_without_session(self):
         """_build_result의 raw pagination 로직 검증 (session 저장 전)."""
-        from src.tools.web.fetch import _build_result
         import time
+
+        from src.tools.web.fetch import _build_result
 
         text = "X" * 10000
         result_json, full_text = _build_result(
@@ -393,7 +432,9 @@ class TestWebFetch:
         assert result["remaining"] > 0
         assert result["next_start_index"] is not None
         # Invariant: start_index + length + remaining == total_length
-        assert result["start_index"] + result["length"] + result["remaining"] == result["total_length"]
+        assert (
+            result["start_index"] + result["length"] + result["remaining"] == result["total_length"]
+        )
 
     @pytest.mark.asyncio
     async def test_json_content_type(self, tmp_path):
@@ -412,7 +453,9 @@ class TestWebFetch:
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://api.example.com/data"})
+            result = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://api.example.com/data"}
+            )
 
         assert result["content_type"] == "application/json"
         assert "session_file" in result
@@ -426,7 +469,9 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(ConnectionError("DNS resolution failed")):
-            result = await _call_tool(server, "mcp_web__fetch", {"url": "https://nonexistent.invalid"})
+            result = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://nonexistent.invalid"}
+            )
 
         assert "dns" in result["error"].lower()
 
@@ -434,6 +479,7 @@ class TestWebFetch:
 # ===========================================================================
 # 4. 캐시 동작
 # ===========================================================================
+
 
 class TestCaching:
     """캐시 테스트 — autouse _disable_cache를 오버라이드하여 캐시 활성화."""
@@ -444,9 +490,16 @@ class TestCaching:
         mock_search_settings, _ = _disable_cache
         mock_search_settings.CACHE_ENABLED = True
 
-        sr = _build_search_response([
-            {"title": "Cached", "url": "https://example.com/cached", "content": "Cached text.", "score": 0.9},
-        ])
+        sr = _build_search_response(
+            [
+                {
+                    "title": "Cached",
+                    "url": "https://example.com/cached",
+                    "content": "Cached text.",
+                    "score": 0.9,
+                },
+            ]
+        )
 
         mock_fn = AsyncMock(return_value=sr)
         with patch("src.tools.web.search._search_tavily", mock_fn):
@@ -471,8 +524,12 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/cache-test"})
-            second = await _call_tool(server, "mcp_web__fetch", {"url": "https://example.com/cache-test"})
+            first = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://example.com/cache-test"}
+            )
+            second = await _call_tool(
+                server, "mcp_web__fetch", {"url": "https://example.com/cache-test"}
+            )
 
         assert first["cached"] is False
         assert second["cached"] is True
@@ -494,22 +551,30 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            page1 = await _call_tool(server, "mcp_web__fetch", {
-                "url": "https://example.com/paginated",
-                "max_length": 5000,
-                "start_index": 0,
-            })
+            page1 = await _call_tool(
+                server,
+                "mcp_web__fetch",
+                {
+                    "url": "https://example.com/paginated",
+                    "max_length": 5000,
+                    "start_index": 0,
+                },
+            )
 
             # session_file 저장으로 pagination 리셋됨
             assert page1["session_file"] is not None
             assert page1["remaining"] == 0
 
             # 같은 URL 두 번째 호출: raw cache에서 가져옴
-            page2 = await _call_tool(server, "mcp_web__fetch", {
-                "url": "https://example.com/paginated",
-                "max_length": 5000,
-                "start_index": 0,
-            })
+            page2 = await _call_tool(
+                server,
+                "mcp_web__fetch",
+                {
+                    "url": "https://example.com/paginated",
+                    "max_length": 5000,
+                    "start_index": 0,
+                },
+            )
 
         assert page2["cached"] is True
         # Only one actual HTTP fetch
@@ -527,14 +592,22 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "mcp_web__fetch", {
-                "url": "https://example.com/auth",
-                "headers": {"Authorization": "Bearer tok"},
-            })
-            second = await _call_tool(server, "mcp_web__fetch", {
-                "url": "https://example.com/auth",
-                "headers": {"Authorization": "Bearer tok"},
-            })
+            first = await _call_tool(
+                server,
+                "mcp_web__fetch",
+                {
+                    "url": "https://example.com/auth",
+                    "headers": {"Authorization": "Bearer tok"},
+                },
+            )
+            second = await _call_tool(
+                server,
+                "mcp_web__fetch",
+                {
+                    "url": "https://example.com/auth",
+                    "headers": {"Authorization": "Bearer tok"},
+                },
+            )
 
         assert first["cached"] is False
         assert second["cached"] is False
@@ -545,6 +618,7 @@ class TestCaching:
 # 5. Firecrawl 폴백 통합
 # ===========================================================================
 
+
 class TestFirecrawlFallback:
     """Firecrawl fallback이 3곳에서 올바르게 동작하는지 검증."""
 
@@ -552,6 +626,7 @@ class TestFirecrawlFallback:
     def _firecrawl_result():
         """Build a mock Firecrawl ExtractedContent result for testing."""
         from src.tools.web.fetch import ExtractedContent
+
         return ExtractedContent(
             title="Firecrawl Title",
             text="# Content from Firecrawl",
@@ -563,9 +638,15 @@ class TestFirecrawlFallback:
         """네트워크 에러 시 Firecrawl fallback 동작."""
         server = _make_server()
 
-        with _patch_fetch_error(httpx.ConnectError("Connection refused")), \
-             patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
-             patch("src.tools.web.fetch.settings") as mock_s:
+        with (
+            _patch_fetch_error(httpx.ConnectError("Connection refused")),
+            patch(
+                "src.tools.web.fetch.fetch_firecrawl",
+                new_callable=AsyncMock,
+                return_value=self._firecrawl_result(),
+            ),
+            patch("src.tools.web.fetch.settings") as mock_s,
+        ):
             mock_s.FILESYSTEM_CWD = str(tmp_path)
             mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
@@ -607,9 +688,15 @@ class TestFirecrawlFallback:
         )
         server = _make_server()
 
-        with _patch_fetch(resp), \
-             patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
-             patch("src.tools.web.fetch.settings") as mock_s:
+        with (
+            _patch_fetch(resp),
+            patch(
+                "src.tools.web.fetch.fetch_firecrawl",
+                new_callable=AsyncMock,
+                return_value=self._firecrawl_result(),
+            ),
+            patch("src.tools.web.fetch.settings") as mock_s,
+        ):
             mock_s.FILESYSTEM_CWD = str(tmp_path)
             mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
@@ -646,6 +733,7 @@ class TestFirecrawlFallback:
 # ===========================================================================
 # 6. Chain metadata 검증
 # ===========================================================================
+
 
 class TestChainMetadata:
     """web_search tool의 chain 메타데이터 구조 검증."""

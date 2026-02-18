@@ -5,19 +5,20 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from app.models import LLMResultType, Message
-from app.schemas.open_responses import MessageRole
+
 # TOOL_SCHEMA_MAP removed — use inline schema dicts in tests
 from app.config import settings
-from app.services.prompts.compaction import COMPACTION_PREFIX
+from app.models import LLMResultType, Message
+from app.schemas.open_responses import MessageRole
 from app.services.agent_service import (
     AgentService,
     _strip_tool_call_narration,
     _strip_tool_messages,
 )
-from app.services.providers.skill import SkillProvider
-from app.services.error import LLMErrorClassifier
 from app.services.compaction.settings import CompactionSettings
+from app.services.error import LLMErrorClassifier
+from app.services.prompts.compaction import COMPACTION_PREFIX
+from app.services.providers.skill import SkillProvider
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # ---------------------------------------------------------------------------
@@ -107,8 +108,22 @@ class TestIsContextOverflowError:
 class TestPreparePromptAndTools:
     """Tests for the unified prompt + tool resolution method."""
 
-    _BASH_SCHEMA = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
-    _ASK_SCHEMA = {"type": "function", "function": {"name": "ask_question", "description": "Ask", "parameters": {"type": "object"}}}
+    _BASH_SCHEMA = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run",
+            "parameters": {"type": "object"},
+        },
+    }
+    _ASK_SCHEMA = {
+        "type": "function",
+        "function": {
+            "name": "ask_question",
+            "description": "Ask",
+            "parameters": {"type": "object"},
+        },
+    }
 
     def test_prompt_without_instructions(self):
         """Verify prompt includes identity but omits instructions tag when none given."""
@@ -147,7 +162,14 @@ class TestPreparePromptAndTools:
     def test_periodic_task_included_with_web_search(self):
         """When client provides web_search, periodic_task tools are included."""
         svc = _create_service()
-        web_search_schema = {"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {"type": "object"}}}
+        web_search_schema = {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search",
+                "parameters": {"type": "object"},
+            },
+        }
         _, tools = svc._prepare_prompt_and_tools(
             client_tool_schemas=[web_search_schema],
         )
@@ -178,7 +200,16 @@ class TestPreparePromptAndTools:
 
     def test_mcp_tools_activate_skills(self):
         """Verify MCP tools count as client tools for skill activation."""
-        mcp = [{"type": "function", "function": {"name": "web_search", "description": "Search", "parameters": {"type": "object"}}}]
+        mcp = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "web_search",
+                    "description": "Search",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ]
         svc = _create_service(mcp_tools=mcp)
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
@@ -217,7 +248,13 @@ class TestCallLlm:
         """Verify LLM is bound with tools before invocation when tools are provided."""
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("hi")
-        _dummy_schema = {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}}}}
+        _dummy_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
         result = await svc._call_llm([MagicMock()], tools=[_dummy_schema])
         svc.llm.bind_tools.assert_called_once()
         assert result.content == "hi"
@@ -652,7 +689,7 @@ class TestStripToolCallNarration:
         ]
         result = _strip_tool_call_narration(messages)
         assert result[0] is messages[0]  # HumanMessage unchanged
-        assert result[1].content == ""   # narration stripped
+        assert result[1].content == ""  # narration stripped
         assert result[1].tool_calls == messages[1].tool_calls
         assert result[2] is messages[2]  # ToolMessage unchanged
         assert result[3] is messages[3]  # text-only AI unchanged
@@ -664,7 +701,10 @@ class TestToolMessageFallback:
     def test_strip_tool_messages_marks_changed(self):
         """AI tool call + ToolMessage are converted and marked as changed."""
         src = [
-            AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}]),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}],
+            ),
             ToolMessage(content="Error: failed", tool_call_id="call_1"),
             HumanMessage(content="next"),
         ]
@@ -707,7 +747,14 @@ class TestToolMessageFallback:
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
         svc._maybe_proactive_compact = AsyncMock(return_value=None)
 
-        bash_schema = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
+        bash_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run",
+                "parameters": {"type": "object"},
+            },
+        }
         resp = await svc._invoke_with_recovery(
             new_messages=[],
             session_id=sid,
@@ -720,7 +767,9 @@ class TestToolMessageFallback:
         assert calls[0][1] != []
         assert calls[1][1] == []
         assert calls[2][1] == []
-        assert any(isinstance(m, HumanMessage) and "[Tool result]:" in m.content for m in calls[2][0])
+        assert any(
+            isinstance(m, HumanMessage) and "[Tool result]:" in m.content for m in calls[2][0]
+        )
         assert not any(isinstance(m, ToolMessage) for m in calls[2][0])
 
     @pytest.mark.asyncio
@@ -753,7 +802,14 @@ class TestToolMessageFallback:
 
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
 
-        bash_schema = {"type": "function", "function": {"name": "bash", "description": "Run", "parameters": {"type": "object"}}}
+        bash_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run",
+                "parameters": {"type": "object"},
+            },
+        }
         with patch("app.services.agent_service.asyncio.sleep", new=AsyncMock()) as sleep_mock:
             resp = await svc._invoke_with_recovery(
                 new_messages=[],
@@ -761,7 +817,10 @@ class TestToolMessageFallback:
                 client_tool_schemas=[bash_schema],
             )
 
-        assert LLMErrorClassifier.is_thought_signature(Exception("Thought signature is not valid")) is True
+        assert (
+            LLMErrorClassifier.is_thought_signature(Exception("Thought signature is not valid"))
+            is True
+        )
         assert resp.content == "ok"
         assert len(calls) == 2  # initial tools-bound + immediate no-tools fallback
         sleep_mock.assert_not_awaited()
@@ -1009,13 +1068,21 @@ class TestActualUsageBasedCompaction:
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a1",
-                usage={"input_tokens": 80_000, "output_tokens": 50, "total_tokens": 80_050},
+                usage={
+                    "input_tokens": 80_000,
+                    "output_tokens": 50,
+                    "total_tokens": 80_050,
+                },
             ),
             Message(role=MessageRole.USER, content="q2"),
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a2",
-                usage={"input_tokens": 80_000, "output_tokens": 50, "total_tokens": 80_050},
+                usage={
+                    "input_tokens": 80_000,
+                    "output_tokens": 50,
+                    "total_tokens": 80_050,
+                },
             ),
         ]
 
@@ -1048,7 +1115,11 @@ class TestActualUsageBasedCompaction:
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a1",
-                usage={"input_tokens": 30_000, "output_tokens": 50, "total_tokens": 30_050},
+                usage={
+                    "input_tokens": 30_000,
+                    "output_tokens": 50,
+                    "total_tokens": 30_050,
+                },
             ),
         ]
 
@@ -1281,6 +1352,7 @@ class TestPlatformMessageToLc:
         record = {"role": "system", "content": "You are helpful."}
         msg = AgentService._platform_message_to_lc(record)
         from langchain_core.messages import SystemMessage as SM
+
         assert isinstance(msg, SM)
 
     def test_function_call_with_dict_arguments(self):
@@ -1387,9 +1459,7 @@ class TestRehydrateSession:
 
         svc = _create_service()
         svc._platform_client = AsyncMock()
-        svc._platform_client.get = AsyncMock(
-            side_effect=httpx.ConnectError("Connection refused")
-        )
+        svc._platform_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
 
         result = await svc._rehydrate_session("s1")
         assert result is None

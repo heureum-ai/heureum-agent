@@ -2,26 +2,19 @@
 
 """Tests for model fallback."""
 
-import asyncio
-import time
-
 import pytest
-
 from app.services.model_fallback import (
     AllModelsFailedError,
     AuthProfileManager,
     ErrorAction,
-    FallbackResult,
     ModelCandidate,
     MultiProviderLLM,
-    calculate_billing_cooldown_ms,
     calculate_cooldown_ms,
     classify_error,
     is_failover_error,
     resolve_candidates,
     run_with_model_fallback,
 )
-
 
 # ---------------------------------------------------------------------------
 # is_failover_error

@@ -140,9 +140,7 @@ class SystemPromptBuilder:
         if stripped.startswith("<tool_guide"):
             self._tool_guides.append(stripped)
         else:
-            self._tool_guides.append(
-                f'<tool_guide name="{name}">\n{stripped}\n</tool_guide>'
-            )
+            self._tool_guides.append(f'<tool_guide name="{name}">\n{stripped}\n</tool_guide>')
         return self
 
     def add_tool_guides(self, guides: List[str]) -> "SystemPromptBuilder":
@@ -188,9 +186,7 @@ class SystemPromptBuilder:
             parts.append(f"\n<session_state>\n{inner}\n</session_state>")
 
         if self._instructions:
-            parts.append(
-                f"\n<instructions>\n{self._instructions}\n</instructions>"
-            )
+            parts.append(f"\n<instructions>\n{self._instructions}\n</instructions>")
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         parts.append(f"\n<current_date>{today}</current_date>")

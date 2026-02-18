@@ -108,9 +108,7 @@ class PlanSkill:
         if write_tool_fn is not None:
             self._write_tool_fn = write_tool_fn
 
-    async def execute(
-        self, name: str, arguments: Dict[str, Any], session_id: str
-    ) -> str:
+    async def execute(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
         action = arguments.get("action", "")
         if action == "create":
             return await self._create(
@@ -140,9 +138,7 @@ class PlanSkill:
         ts = datetime.now(timezone.utc).strftime("%H%M%S")
         return f"TODO-{slug}-{ts}.md"
 
-    async def _create(
-        self, session_id: str, task: str, steps: List[str]
-    ) -> str:
+    async def _create(self, session_id: str, task: str, steps: List[str]) -> str:
         if not task:
             return "Error: task description is required"
         if not steps:
@@ -266,14 +262,16 @@ class PlanSkill:
         if in_progress:
             idx, step = in_progress[0]
             lines.append("")
-            lines.append(f"## Current step (BLOCKED)")
+            lines.append("## Current step (BLOCKED)")
             lines.append(f"  ⟳ Step {idx}: {step.description}")
             lines.append("")
             lines.append("Action required — pick ONE:")
-            lines.append(f"  1. Try a DIFFERENT approach to complete this step.")
-            lines.append(f"  2. Mark it failed if truly impossible:")
-            lines.append(f'     manage_todo(action="update_step", step_index={idx}, '
-                         f'status="failed", result="<reason>")')
+            lines.append("  1. Try a DIFFERENT approach to complete this step.")
+            lines.append("  2. Mark it failed if truly impossible:")
+            lines.append(
+                f'     manage_todo(action="update_step", step_index={idx}, '
+                f'status="failed", result="<reason>")'
+            )
 
         # -- Remaining steps (pending) --
         if pending:
@@ -284,9 +282,7 @@ class PlanSkill:
             if in_progress:
                 next_idx, next_step = pending[0]
                 lines.append("")
-                lines.append(
-                    f"After resolving the current step, continue to step {next_idx}."
-                )
+                lines.append(f"After resolving the current step, continue to step {next_idx}.")
             else:
                 next_idx, next_step = pending[0]
                 lines.append("")
@@ -408,11 +404,11 @@ class PlanSkill:
         elif in_progress_idx is not None:
             lines.append(
                 f"\nStep {in_progress_idx} is in_progress. "
-                "Call manage_todo(action=\"update_step\") to set this step to "
-                "\"completed\" or \"failed\" before responding with text to the user. "
+                'Call manage_todo(action="update_step") to set this step to '
+                '"completed" or "failed" before responding with text to the user. '
                 f"If the step cannot be completed, mark it as failed: "
-                f"manage_todo(action=\"update_step\", step_index={in_progress_idx}, "
-                f"status=\"failed\", result=\"reason\")."
+                f'manage_todo(action="update_step", step_index={in_progress_idx}, '
+                f'status="failed", result="reason").'
             )
             if first_pending is not None:
                 lines.append(
@@ -420,13 +416,11 @@ class PlanSkill:
                     "Keep any intermediate text to one short sentence at most."
                 )
             else:
-                lines.append(
-                    "Then provide a final summary of all completed work."
-                )
+                lines.append("Then provide a final summary of all completed work.")
         elif first_pending is not None:
             lines.append(
-                f"\nCall manage_todo(action=\"update_step\", "
-                f"step_index={first_pending}, status=\"in_progress\") to start the next step."
+                f'\nCall manage_todo(action="update_step", '
+                f'step_index={first_pending}, status="in_progress") to start the next step.'
             )
         else:
             completed = sum(1 for s in todo.steps if s.status == "completed")
@@ -478,11 +472,18 @@ class PlanSkill:
 
     async def _write_todo_file(self, session_id: str, todo: SessionTodo) -> None:
         if not self._write_tool_fn:
-            logger.warning("No write tool configured; skipping TODO file write for %s", todo.filename)
+            logger.warning(
+                "No write tool configured; skipping TODO file write for %s",
+                todo.filename,
+            )
             return
         content = self.render_markdown(todo)
         try:
-            await self._write_tool_fn("mcp_filesystem__write", {"path": todo.filename, "content": content}, session_id=session_id)
+            await self._write_tool_fn(
+                "mcp_filesystem__write",
+                {"path": todo.filename, "content": content},
+                session_id=session_id,
+            )
         except Exception as e:
             logger.warning("Failed to write %s: %s", todo.filename, e)
 
@@ -490,9 +491,12 @@ class PlanSkill:
     def _format_state(todo: SessionTodo) -> str:
         lines = [f"TODO Plan: {todo.task}", ""]
         for i, step in enumerate(todo.steps):
-            icon = {"pending": "○", "in_progress": "⟳", "completed": "✓", "failed": "✗"}.get(
-                step.status, "○"
-            )
+            icon = {
+                "pending": "○",
+                "in_progress": "⟳",
+                "completed": "✓",
+                "failed": "✗",
+            }.get(step.status, "○")
             result_part = f" — {step.result}" if step.result else ""
             lines.append(f"  {icon} {i}. {step.description}{result_part}")
         completed = sum(1 for s in todo.steps if s.status == "completed")

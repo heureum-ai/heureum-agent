@@ -6,10 +6,8 @@ import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
-
 from src.common.session_context import SessionContext
 from src.tools.web.fetch import _make_session_path, _maybe_save_to_session
-
 
 # ---------------------------------------------------------------------------
 # _make_session_path
@@ -83,11 +81,13 @@ class TestMaybeSaveToSession:
         mock_client = AsyncMock()
         mock_get_client.return_value = mock_client
 
-        result_json = json.dumps({
-            "text": "Hello World content",
-            "url": "https://example.com/article",
-            "title": "Hello",
-        })
+        result_json = json.dumps(
+            {
+                "text": "Hello World content",
+                "url": "https://example.com/article",
+                "title": "Hello",
+            }
+        )
         out = await _maybe_save_to_session(result_json, "https://example.com/article", session_ctx)
         data = json.loads(out)
 
@@ -101,10 +101,12 @@ class TestMaybeSaveToSession:
         mock_client.write_file.side_effect = RuntimeError("API down")
         mock_get_client.return_value = mock_client
 
-        result_json = json.dumps({
-            "text": "content",
-            "url": "https://example.com",
-        })
+        result_json = json.dumps(
+            {
+                "text": "content",
+                "url": "https://example.com",
+            }
+        )
         out = await _maybe_save_to_session(result_json, "https://example.com", session_ctx)
         # Should return original without session_file (non-fatal)
         data = json.loads(out)
@@ -119,13 +121,17 @@ class TestMaybeSaveToSession:
         full_content = "Full content " * 1000
         truncated_content = "Truncated..."
 
-        result_json = json.dumps({
-            "text": truncated_content,
-            "url": "https://example.com/article",
-            "title": "Hello",
-        })
+        result_json = json.dumps(
+            {
+                "text": truncated_content,
+                "url": "https://example.com/article",
+                "title": "Hello",
+            }
+        )
         out = await _maybe_save_to_session(
-            result_json, "https://example.com/article", session_ctx,
+            result_json,
+            "https://example.com/article",
+            session_ctx,
             full_text=full_content,
         )
         data = json.loads(out)
@@ -141,12 +147,16 @@ class TestMaybeSaveToSession:
         with patch("src.tools.web.fetch.settings") as mock_settings:
             mock_settings.FILESYSTEM_CWD = str(tmp_path)
             full_content = "Full local content " * 500
-            result_json = json.dumps({
-                "text": "truncated",
-                "url": "https://example.com/local",
-            })
+            result_json = json.dumps(
+                {
+                    "text": "truncated",
+                    "url": "https://example.com/local",
+                }
+            )
             out = await _maybe_save_to_session(
-                result_json, "https://example.com/local", None,
+                result_json,
+                "https://example.com/local",
+                None,
                 full_text=full_content,
             )
             data = json.loads(out)

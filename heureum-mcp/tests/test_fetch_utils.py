@@ -1,21 +1,17 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """Tests for web fetch content extraction utilities (html2text-based)."""
+
 import json
 
-import pytest
-
 from src.tools.web.fetch import (
-    ExtractedContent,
-    ExtractMode,
-    html_to_markdown,
-    html_to_text,
-    extract_content,
     _extract_html,
     _extract_json,
     _fallback_html,
+    extract_content,
+    html_to_markdown,
+    html_to_text,
 )
-
 
 # ---------------------------------------------------------------------------
 # html_to_markdown

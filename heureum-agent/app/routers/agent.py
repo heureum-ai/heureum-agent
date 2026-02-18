@@ -7,8 +7,8 @@ High-level loop:
   user input -> LLM response -> (optional) tool execution -> LLM response -> ...
 """
 
-import atexit
 import asyncio
+import atexit
 import json
 import logging
 import time
@@ -36,14 +36,21 @@ from app.schemas.open_responses import (
     ResponseStatus,
     Usage,
 )
-from app.services.agent_service import AgentService, JudgeResult, build_tool_context, judge_response
+from app.services.agent_service import (
+    AgentService,
+    JudgeResult,
+    build_tool_context,
+    judge_response,
+)
 from app.services.loop_detection import clear_session_loop_state
 from app.services.providers.mcp import MCPClient
 from app.services.providers.skill import SkillProvider
 from app.services.providers.tool import ToolChainRegistry
+from app.services.subagent import get_registry as get_subagent_registry
 from app.services.tool_hooks import hook_runner
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
+from langchain_core.messages import HumanMessage as _HM
 
 logger = logging.getLogger(__name__)
 
@@ -111,8 +118,7 @@ def _cleanup_stale_locks() -> None:
 
     # GC completed subagent registry entries and their deferred state
     try:
-        from app.services.subagent import get_registry
-        get_registry().sweep_stale()
+        get_subagent_registry().sweep_stale()
     except Exception:
         pass
 
@@ -159,7 +165,9 @@ async def _ensure_initialized() -> None:
         _initialized = True
 
 
-async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = "") -> str:
+async def _execute_tool(
+    name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = ""
+) -> str:
     """Dispatch tool execution by name."""
     # Skill-owned tools
     if skill_provider.get_skill_for_tool(name) is not None:
@@ -206,7 +214,11 @@ def _parse_input(request: ResponseRequest) -> List[Message]:
     for item in request.input:
         if isinstance(item, FunctionToolResult):
             messages.append(
-                Message(role=MessageRole.TOOL, content=item.output, tool_call_id=item.call_id),
+                Message(
+                    role=MessageRole.TOOL,
+                    content=item.output,
+                    tool_call_id=item.call_id,
+                ),
             )
         elif isinstance(item, FunctionToolCall):
             # Handled separately by _parse_tool_call_echoes when needed.
@@ -272,7 +284,10 @@ def _text_output(
 
 
 def _tool_call_output(
-    name: str, arguments: dict, call_id: str, display_name: str | None = None,
+    name: str,
+    arguments: dict,
+    call_id: str,
+    display_name: str | None = None,
 ) -> FunctionToolCall:
     """Build a function_call output item."""
     return FunctionToolCall(
@@ -302,8 +317,7 @@ def _build_response(
     tool_history = extra_metadata.pop("tool_history", None)
     if tool_history:
         meta["tool_history"] = [
-            item.model_dump() if hasattr(item, "model_dump") else item
-            for item in tool_history
+            item.model_dump() if hasattr(item, "model_dump") else item for item in tool_history
         ]
     meta.update({k: v for k, v in extra_metadata.items() if v is not None})
 
@@ -320,7 +334,9 @@ def _build_response(
     )
 
 
-async def _safe_execute_tool(tc: ToolCallInfo, session_id: str = "", cwd: str = "") -> tuple[ToolCallInfo, str]:
+async def _safe_execute_tool(
+    tc: ToolCallInfo, session_id: str = "", cwd: str = ""
+) -> tuple[ToolCallInfo, str]:
     """Execute a single tool call and convert failures to readable tool output."""
     context = {"session_id": session_id, "tool_call_id": tc.id}
 
@@ -353,7 +369,9 @@ async def _execute_tool_calls(
     if not tool_calls:
         return []
 
-    results = await asyncio.gather(*[_safe_execute_tool(tc, session_id=session_id, cwd=cwd) for tc in tool_calls])
+    results = await asyncio.gather(
+        *[_safe_execute_tool(tc, session_id=session_id, cwd=cwd) for tc in tool_calls]
+    )
 
     tool_results: List[Message] = []
     for tc, result_str in results:
@@ -386,9 +404,7 @@ def _make_tool_result_message(tc: ToolCallInfo, result_str: str) -> Message:
     )
 
 
-def _append_tool_output_items(
-    tc: ToolCallInfo, result_str: str, all_output_items: list
-) -> None:
+def _append_tool_output_items(tc: ToolCallInfo, result_str: str, all_output_items: list) -> None:
     """Append FunctionToolCall + FunctionToolResult output items."""
     all_output_items.append(_tool_call_output(tc.name, tc.args, tc.id))
     all_output_items.append(
@@ -442,7 +458,10 @@ async def _execute_tool_calls_pipelined(
 
     # Map asyncio.Task -> (ToolCallInfo, hop_depth)
     pending: Dict[asyncio.Task, Tuple[ToolCallInfo, int]] = {
-        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id, cwd=cwd)): (tc, 0)
+        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id, cwd=cwd)): (
+            tc,
+            0,
+        )
         for tc in tool_calls
     }
 
@@ -465,7 +484,9 @@ async def _execute_tool_calls_pipelined(
             # the source tool, implicitly authorizing its chain steps.
             if hop_depth < max_depth:
                 follow_ups = chain_registry.build_per_result(
-                    tc_done, msg, session_id=session_id,
+                    tc_done,
+                    msg,
+                    session_id=session_id,
                 )
                 for fu in follow_ups:
                     pending[
@@ -506,7 +527,9 @@ async def _handle_chained_calls(
 
         # Chain follow-ups bypass approval — the source tool's approval
         # implicitly authorizes all steps in the chain.
-        chain_results = await _execute_tool_calls(current, all_output_items, session_id=session_id, cwd=cwd)
+        chain_results = await _execute_tool_calls(
+            current, all_output_items, session_id=session_id, cwd=cwd
+        )
         await agent_service.append_tool_interaction(
             session_id,
             [],
@@ -546,7 +569,9 @@ async def _handle_approval_continuation(
         ApprovalChoice.ALLOW_ONCE.decision,
         ApprovalChoice.ALWAYS_ALLOW.decision,
     ):
-        tool_results = await _execute_tool_calls(pending_tcs, all_output_items, session_id=session_id, cwd=cwd)
+        tool_results = await _execute_tool_calls(
+            pending_tcs, all_output_items, session_id=session_id, cwd=cwd
+        )
         tool_call_count += len(tool_results)
     else:
         tool_results = [
@@ -644,7 +669,9 @@ def _prepare_messages_for_session(
     return [m for m in messages if (m.role, m.content) not in history_set]
 
 
-def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set[str], List[str], Dict[str, str]]:
+def _resolve_tools(
+    request: ResponseRequest,
+) -> Tuple[List[str], List[dict], Set[str], List[str], Dict[str, str]]:
     """Resolve tool names, schemas, client tool names, guides, and display names.
 
     Returns:
@@ -660,7 +687,9 @@ def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set
         for t in request.tools:
             client_tool_names.add(t.function.name)
             tool_names.append(t.function.name)
-            client_tool_schemas.append(t.model_dump(exclude_none=True, exclude={"guide", "display_name"}))
+            client_tool_schemas.append(
+                t.model_dump(exclude_none=True, exclude={"guide", "display_name"})
+            )
             if t.guide:
                 client_tool_prompts.append(t.guide)
             if t.display_name:
@@ -680,7 +709,13 @@ def _resolve_tools(request: ResponseRequest) -> Tuple[List[str], List[dict], Set
     # Skill display names
     display_names.update(skill_provider.display_names)
 
-    return tool_names, client_tool_schemas, client_tool_names, client_tool_prompts, display_names
+    return (
+        tool_names,
+        client_tool_schemas,
+        client_tool_names,
+        client_tool_prompts,
+        display_names,
+    )
 
 
 @dataclass
@@ -702,9 +737,22 @@ class _LoopContext:
     cwd: str = ""
 
 
+def is_tool_error(output: str) -> bool:
+    """Detect tool execution failure from output string."""
+    if not output:
+        return False
+    return (
+        "Error executing tool '" in output
+        or "[EMPTY_RESULT]" in output
+        or output.startswith("Error:")
+        or output.startswith("Error calling ")
+    )
+
+
 @dataclass
 class _ToolCallRecord:
     """A single tool call with its success/failure status."""
+
     name: str
     succeeded: bool
 
@@ -729,11 +777,7 @@ class _LoopStateBuilder:
                 call_names[item.call_id] = item.name
             elif isinstance(item, FunctionToolResult) and item.call_id:
                 output = item.output or ""
-                failed = (
-                    "Error executing tool '" in output
-                    or "[EMPTY_RESULT]" in output
-                    or output.startswith("Error:")
-                )
+                failed = is_tool_error(output)
                 result_status[item.call_id] = not failed
 
         # Collect in order, take last N
@@ -882,13 +926,15 @@ class _AgentLoopRunner:
         prompts = skill_provider.get_state_prompts(self.ctx.session_id)
         if prompts is None:
             prompts = []
-        prompts.append(_LoopStateBuilder.build(
-            iteration=iteration,
-            max_iterations=settings.MAX_AGENT_ITERATIONS,
-            tool_call_count=self.ctx.tool_call_count,
-            output_items=self.ctx.output_items,
-            total_usage=self.ctx.total_usage,
-        ))
+        prompts.append(
+            _LoopStateBuilder.build(
+                iteration=iteration,
+                max_iterations=settings.MAX_AGENT_ITERATIONS,
+                tool_call_count=self.ctx.tool_call_count,
+                output_items=self.ctx.output_items,
+                total_usage=self.ctx.total_usage,
+            )
+        )
         return prompts or None
 
     async def _run_tool_iterations(self) -> ResponseObject:
@@ -918,14 +964,20 @@ class _AgentLoopRunner:
                         # Still unfinished (e.g. plan steps) — inject guidance
                         abandoned_text = result.text or ""
                         agent_service._append_to_history(
-                            self.ctx.session_id, self.ctx.messages, abandoned_text,
+                            self.ctx.session_id,
+                            self.ctx.messages,
+                            abandoned_text,
                             usage=result.usage.model_dump() if result.usage else {},
                         )
                         guidance = skill_provider.build_retry_guidance(
-                            self.ctx.session_id, abandoned_text,
+                            self.ctx.session_id,
+                            abandoned_text,
                         )
                         self.ctx.messages = [
-                            Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                            Message(
+                                role=MessageRole.USER,
+                                content=guidance or "Continue the plan.",
+                            ),
                         ]
                         continue
 
@@ -933,7 +985,9 @@ class _AgentLoopRunner:
                     # Re-run LLM so it can synthesize the sub-agent results.
                     abandoned_text = result.text or ""
                     agent_service._append_to_history(
-                        self.ctx.session_id, self.ctx.messages, abandoned_text,
+                        self.ctx.session_id,
+                        self.ctx.messages,
+                        abandoned_text,
                         usage=result.usage.model_dump() if result.usage else {},
                     )
                     self.ctx.messages = [
@@ -963,7 +1017,9 @@ class _AgentLoopRunner:
                         self.ctx.eval_retry_count += 1
                         failed_text = result.text or ""
                         agent_service._append_to_history(
-                            self.ctx.session_id, self.ctx.messages, failed_text,
+                            self.ctx.session_id,
+                            self.ctx.messages,
+                            failed_text,
                             usage=result.usage.model_dump() if result.usage else {},
                         )
                         user_query = _extract_last_user_query(self.ctx.session_id)
@@ -999,7 +1055,9 @@ class _AgentLoopRunner:
                 if result.assistant_lc_message:
                     text = agent_service._extract_text(result.assistant_lc_message.content)
                 agent_service._append_to_history(
-                    self.ctx.session_id, self.ctx.messages, text or "Task completed.",
+                    self.ctx.session_id,
+                    self.ctx.messages,
+                    text or "Task completed.",
                     usage=result.usage.model_dump() if result.usage else {},
                 )
                 return _build_response(
@@ -1036,10 +1094,13 @@ class _AgentLoopRunner:
             tool_history=self.ctx.output_items or None,
         )
 
-    async def _handle_tool_call_iteration(self, result: Any, iteration: int) -> ResponseObject | None:
+    async def _handle_tool_call_iteration(
+        self, result: Any, iteration: int
+    ) -> ResponseObject | None:
         all_tool_calls = result.tool_calls or []
         client_calls, server_calls = mcp_client.classify_tool_calls(
-            all_tool_calls, self.ctx.session_id,
+            all_tool_calls,
+            self.ctx.session_id,
             client_tool_names=self.ctx.client_tool_names,
         )
 
@@ -1063,7 +1124,14 @@ class _AgentLoopRunner:
                 assistant_lc_message=result.assistant_lc_message,
             )
             return _build_response(
-                [_tool_call_output("tool_approval", info["question"], info["approval_call_id"], display_name=info["display_name"])],
+                [
+                    _tool_call_output(
+                        "tool_approval",
+                        info["question"],
+                        info["approval_call_id"],
+                        display_name=info["display_name"],
+                    )
+                ],
                 ResponseStatus.INCOMPLETE,
                 self.ctx.session_id,
                 self.ctx.created_at,
@@ -1077,7 +1145,9 @@ class _AgentLoopRunner:
         # Pipelined execution: run server tools and follow chain steps
         # as results arrive (FIRST_COMPLETED), instead of waiting for all.
         pipeline_results, deferred_approval = await _execute_tool_calls_pipelined(
-            server_calls, self.ctx.output_items, session_id=self.ctx.session_id,
+            server_calls,
+            self.ctx.output_items,
+            session_id=self.ctx.session_id,
             cwd=self.ctx.cwd,
         )
         self.ctx.tool_call_count += len(pipeline_results) + len(client_calls)
@@ -1139,16 +1209,18 @@ class _AgentLoopRunner:
         """Async generator yielding SSE-formatted event strings."""
         response_id = f"resp_{uuid.uuid4().hex}"
 
-        yield _sse_event({
-            "type": "response.created",
-            "response": {
-                "id": response_id,
-                "status": "in_progress",
-                "model": self.ctx.model,
-                "created_at": self.ctx.created_at,
-                "metadata": {"session_id": self.ctx.session_id},
-            },
-        })
+        yield _sse_event(
+            {
+                "type": "response.created",
+                "response": {
+                    "id": response_id,
+                    "status": "in_progress",
+                    "model": self.ctx.model,
+                    "created_at": self.ctx.created_at,
+                    "metadata": {"session_id": self.ctx.session_id},
+                },
+            }
+        )
 
         try:
             if not self.ctx.tool_names:
@@ -1165,43 +1237,66 @@ class _AgentLoopRunner:
                             item_data: Dict[str, Any] = {
                                 "call_id": item.call_id,
                                 "name": item.name,
-                                "arguments": item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments),
+                                "arguments": (
+                                    item.arguments
+                                    if isinstance(item.arguments, str)
+                                    else json.dumps(item.arguments)
+                                ),
                             }
                             dn = self.ctx.display_names.get(item.name)
                             if dn:
                                 item_data["display_name"] = dn
-                            yield _sse_event({
-                                "type": "response.function_call.done",
-                                "item": item_data,
-                            })
+                            yield _sse_event(
+                                {
+                                    "type": "response.function_call.done",
+                                    "item": item_data,
+                                }
+                            )
                         elif isinstance(item, FunctionToolResult):
-                            yield _sse_event({
-                                "type": "response.tool_result.done",
-                                "call_id": item.call_id,
-                                "output": item.output,
-                                "status": "completed",
-                            })
+                            yield _sse_event(
+                                {
+                                    "type": "response.tool_result.done",
+                                    "call_id": item.call_id,
+                                    "output": item.output,
+                                    "status": (
+                                        "failed"
+                                        if is_tool_error(item.output or "")
+                                        else "completed"
+                                    ),
+                                }
+                            )
 
                     if approval_response:
-                        evt = "response.completed" if approval_response.status == ResponseStatus.COMPLETED else "response.incomplete"
-                        yield _sse_event({
-                            "type": evt,
-                            "response": approval_response.model_dump(mode="json"),
-                        })
+                        evt = (
+                            "response.completed"
+                            if approval_response.status == ResponseStatus.COMPLETED
+                            else "response.incomplete"
+                        )
+                        yield _sse_event(
+                            {
+                                "type": evt,
+                                "response": approval_response.model_dump(mode="json"),
+                            }
+                        )
                     else:
                         async for event in self._stream_tool_iterations():
                             yield event
         except Exception as e:
             logger.exception("Streaming agent loop error")
             error_response = _build_response(
-                [], ResponseStatus.FAILED, self.ctx.session_id,
-                self.ctx.created_at, self.ctx.model,
+                [],
+                ResponseStatus.FAILED,
+                self.ctx.session_id,
+                self.ctx.created_at,
+                self.ctx.model,
                 error=ErrorObject(type=ErrorType.SERVER_ERROR, message=str(e)),
             )
-            yield _sse_event({
-                "type": "response.failed",
-                "response": error_response.model_dump(mode="json"),
-            })
+            yield _sse_event(
+                {
+                    "type": "response.failed",
+                    "response": error_response.model_dump(mode="json"),
+                }
+            )
 
         yield _sse_done()
 
@@ -1240,21 +1335,35 @@ class _AgentLoopRunner:
         if accumulated:
             self.ctx.total_usage = self.ctx.total_usage.add(usage)
             agent_service._append_to_history(
-                self.ctx.session_id, self.ctx.messages, full_text,
-                usage=usage.model_dump(), assistant_lc_message=accumulated,
+                self.ctx.session_id,
+                self.ctx.messages,
+                full_text,
+                usage=usage.model_dump(),
+                assistant_lc_message=accumulated,
             )
 
-        yield _sse_event({"type": "response.output_text.done", "text": full_text, "usage": usage.model_dump()})
+        yield _sse_event(
+            {
+                "type": "response.output_text.done",
+                "text": full_text,
+                "usage": usage.model_dump(),
+            }
+        )
 
         response = _build_response(
-            [_text_output(full_text)], ResponseStatus.COMPLETED,
-            self.ctx.session_id, self.ctx.created_at, self.ctx.model,
+            [_text_output(full_text)],
+            ResponseStatus.COMPLETED,
+            self.ctx.session_id,
+            self.ctx.created_at,
+            self.ctx.model,
             usage=self.ctx.total_usage,
         )
-        yield _sse_event({
-            "type": "response.completed",
-            "response": response.model_dump(mode="json"),
-        })
+        yield _sse_event(
+            {
+                "type": "response.completed",
+                "response": response.model_dump(mode="json"),
+            }
+        )
 
     async def _stream_tool_iterations(self):
         """Stream the tool iteration loop, yielding SSE events."""
@@ -1265,7 +1374,9 @@ class _AgentLoopRunner:
 
             accumulated = None
 
-            async for tag, value in self._stream_llm_and_accumulate(use_tools=True, iteration=iteration):
+            async for tag, value in self._stream_llm_and_accumulate(
+                use_tools=True, iteration=iteration
+            ):
                 if tag == "delta":
                     yield _sse_event({"type": "response.output_text.delta", "delta": value})
                 elif tag == "done":
@@ -1281,7 +1392,12 @@ class _AgentLoopRunner:
                 # TEXT result — check if any skill has unfinished work
                 if skill_provider.has_unfinished_work(self.ctx.session_id):
                     # Wait for async skill work (e.g. sub-agents) to complete
-                    yield _sse_event({"type": "response.output_text.abandoned", "reason": "awaiting_subagents"})
+                    yield _sse_event(
+                        {
+                            "type": "response.output_text.abandoned",
+                            "reason": "awaiting_subagents",
+                        }
+                    )
                     await skill_provider.await_pending(self.ctx.session_id)
 
                     # After awaiting, check again
@@ -1289,23 +1405,38 @@ class _AgentLoopRunner:
                         # Still unfinished (e.g. plan steps) — inject guidance
                         partial_text = agent_service._extract_text(accumulated.content)
                         agent_service._append_to_history(
-                            self.ctx.session_id, self.ctx.messages, partial_text,
-                            usage=usage.model_dump(), assistant_lc_message=accumulated,
+                            self.ctx.session_id,
+                            self.ctx.messages,
+                            partial_text,
+                            usage=usage.model_dump(),
+                            assistant_lc_message=accumulated,
                         )
                         guidance = skill_provider.build_retry_guidance(
-                            self.ctx.session_id, partial_text,
+                            self.ctx.session_id,
+                            partial_text,
                         )
                         self.ctx.messages = [
-                            Message(role=MessageRole.USER, content=guidance or "Continue the plan."),
+                            Message(
+                                role=MessageRole.USER,
+                                content=guidance or "Continue the plan.",
+                            ),
                         ]
-                        yield _sse_event({"type": "response.output_text.abandoned", "reason": "unfinished_skill"})
+                        yield _sse_event(
+                            {
+                                "type": "response.output_text.abandoned",
+                                "reason": "unfinished_skill",
+                            }
+                        )
                         continue
 
                     # Sub-agents completed — results are now in history.
                     partial_text = agent_service._extract_text(accumulated.content)
                     agent_service._append_to_history(
-                        self.ctx.session_id, self.ctx.messages, partial_text,
-                        usage=usage.model_dump(), assistant_lc_message=accumulated,
+                        self.ctx.session_id,
+                        self.ctx.messages,
+                        partial_text,
+                        usage=usage.model_dump(),
+                        assistant_lc_message=accumulated,
                     )
                     self.ctx.messages = [
                         Message(
@@ -1334,8 +1465,11 @@ class _AgentLoopRunner:
                     if not judge_result.passed:
                         self.ctx.eval_retry_count += 1
                         agent_service._append_to_history(
-                            self.ctx.session_id, self.ctx.messages, full_text,
-                            usage=usage.model_dump(), assistant_lc_message=accumulated,
+                            self.ctx.session_id,
+                            self.ctx.messages,
+                            full_text,
+                            usage=usage.model_dump(),
+                            assistant_lc_message=accumulated,
                         )
                         user_query = _extract_last_user_query(self.ctx.session_id)
                         guidance = judge_result.guidance or "The previous response was inadequate."
@@ -1348,25 +1482,45 @@ class _AgentLoopRunner:
                         self.ctx.messages = [
                             Message(role=MessageRole.USER, content=retry_msg),
                         ]
-                        yield _sse_event({"type": "response.output_text.abandoned", "reason": "judge_failed"})
+                        yield _sse_event(
+                            {
+                                "type": "response.output_text.abandoned",
+                                "reason": "judge_failed",
+                            }
+                        )
                         continue
 
                 agent_service._append_to_history(
-                    self.ctx.session_id, self.ctx.messages, full_text,
-                    usage=usage.model_dump(), assistant_lc_message=accumulated,
+                    self.ctx.session_id,
+                    self.ctx.messages,
+                    full_text,
+                    usage=usage.model_dump(),
+                    assistant_lc_message=accumulated,
                 )
-                yield _sse_event({"type": "response.output_text.done", "text": full_text, "usage": usage.model_dump()})
+                yield _sse_event(
+                    {
+                        "type": "response.output_text.done",
+                        "text": full_text,
+                        "usage": usage.model_dump(),
+                    }
+                )
                 response = _build_response(
-                    [_text_output(full_text)], ResponseStatus.COMPLETED,
-                    self.ctx.session_id, self.ctx.created_at, self.ctx.model,
-                    usage=self.ctx.total_usage, iterations=iteration,
+                    [_text_output(full_text)],
+                    ResponseStatus.COMPLETED,
+                    self.ctx.session_id,
+                    self.ctx.created_at,
+                    self.ctx.model,
+                    usage=self.ctx.total_usage,
+                    iterations=iteration,
                     tool_call_count=self.ctx.tool_call_count,
                     tool_history=self.ctx.output_items or None,
                 )
-                yield _sse_event({
-                    "type": "response.completed",
-                    "response": response.model_dump(mode="json"),
-                })
+                yield _sse_event(
+                    {
+                        "type": "response.completed",
+                        "response": response.model_dump(mode="json"),
+                    }
+                )
                 return
 
             # TOOL_CALL: discard narration text that was streamed alongside
@@ -1378,21 +1532,35 @@ class _AgentLoopRunner:
             if iteration > 1 and skill_provider.should_force_text_only(self.ctx.session_id):
                 full_text = agent_service._extract_text(accumulated.content) or "Task completed."
                 agent_service._append_to_history(
-                    self.ctx.session_id, self.ctx.messages, full_text,
+                    self.ctx.session_id,
+                    self.ctx.messages,
+                    full_text,
                     usage=usage.model_dump(),
                 )
-                yield _sse_event({"type": "response.output_text.done", "text": full_text, "usage": usage.model_dump()})
+                yield _sse_event(
+                    {
+                        "type": "response.output_text.done",
+                        "text": full_text,
+                        "usage": usage.model_dump(),
+                    }
+                )
                 response = _build_response(
-                    [_text_output(full_text)], ResponseStatus.COMPLETED,
-                    self.ctx.session_id, self.ctx.created_at, self.ctx.model,
-                    usage=self.ctx.total_usage, iterations=iteration,
+                    [_text_output(full_text)],
+                    ResponseStatus.COMPLETED,
+                    self.ctx.session_id,
+                    self.ctx.created_at,
+                    self.ctx.model,
+                    usage=self.ctx.total_usage,
+                    iterations=iteration,
                     tool_call_count=self.ctx.tool_call_count,
                     tool_history=self.ctx.output_items or None,
                 )
-                yield _sse_event({
-                    "type": "response.completed",
-                    "response": response.model_dump(mode="json"),
-                })
+                yield _sse_event(
+                    {
+                        "type": "response.completed",
+                        "response": response.model_dump(mode="json"),
+                    }
+                )
                 return
 
             tool_calls_info = [
@@ -1405,16 +1573,20 @@ class _AgentLoopRunner:
                 item_data: Dict[str, Any] = {
                     "call_id": tc.id,
                     "name": tc.name,
-                    "arguments": json.dumps(tc.args) if isinstance(tc.args, dict) else str(tc.args),
+                    "arguments": (
+                        json.dumps(tc.args) if isinstance(tc.args, dict) else str(tc.args)
+                    ),
                 }
                 dn = self.ctx.display_names.get(tc.name)
                 if dn:
                     item_data["display_name"] = dn
-                yield _sse_event({
-                    "type": "response.function_call.done",
-                    "item": item_data,
-                    "usage": usage_dump,
-                })
+                yield _sse_event(
+                    {
+                        "type": "response.function_call.done",
+                        "item": item_data,
+                        "usage": usage_dump,
+                    }
+                )
 
             # Build LLMResult for _handle_tool_call_iteration
             result_obj = LLMResult(
@@ -1443,22 +1615,32 @@ class _AgentLoopRunner:
                     item_data: Dict[str, Any] = {
                         "call_id": item.call_id,
                         "name": item.name,
-                        "arguments": item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments),
+                        "arguments": (
+                            item.arguments
+                            if isinstance(item.arguments, str)
+                            else json.dumps(item.arguments)
+                        ),
                     }
                     dn = self.ctx.display_names.get(item.name)
                     if dn:
                         item_data["display_name"] = dn
-                    yield _sse_event({
-                        "type": "response.function_call.done",
-                        "item": item_data,
-                    })
+                    yield _sse_event(
+                        {
+                            "type": "response.function_call.done",
+                            "item": item_data,
+                        }
+                    )
                 elif isinstance(item, FunctionToolResult):
-                    yield _sse_event({
-                        "type": "response.tool_result.done",
-                        "call_id": item.call_id,
-                        "output": item.output,
-                        "status": "completed",
-                    })
+                    yield _sse_event(
+                        {
+                            "type": "response.tool_result.done",
+                            "call_id": item.call_id,
+                            "output": item.output,
+                            "status": (
+                                "failed" if is_tool_error(item.output or "") else "completed"
+                            ),
+                        }
+                    )
 
             # Emit live skill state only when manage_todo was executed
             # this iteration (avoids re-emitting stale TODO from previous turns).
@@ -1469,38 +1651,52 @@ class _AgentLoopRunner:
             if _todo_updated:
                 _live_state = skill_provider.get_live_state(self.ctx.session_id)
                 if _live_state:
-                    yield _sse_event({
-                        "type": "response.todo.updated",
-                        "todo": _live_state,
-                    })
+                    yield _sse_event(
+                        {
+                            "type": "response.todo.updated",
+                            "todo": _live_state,
+                        }
+                    )
 
             if response:
-                evt = "response.completed" if response.status == ResponseStatus.COMPLETED else "response.incomplete"
-                yield _sse_event({
-                    "type": evt,
-                    "response": response.model_dump(mode="json"),
-                })
+                evt = (
+                    "response.completed"
+                    if response.status == ResponseStatus.COMPLETED
+                    else "response.incomplete"
+                )
+                yield _sse_event(
+                    {
+                        "type": evt,
+                        "response": response.model_dump(mode="json"),
+                    }
+                )
                 return
 
             self.ctx.messages = []
 
         # Max iterations reached
         response = _build_response(
-            [_text_output(
-                f"Reached maximum iterations ({settings.MAX_AGENT_ITERATIONS}).",
-                status=ItemStatus.INCOMPLETE,
-            )],
-            ResponseStatus.INCOMPLETE, self.ctx.session_id,
-            self.ctx.created_at, self.ctx.model,
+            [
+                _text_output(
+                    f"Reached maximum iterations ({settings.MAX_AGENT_ITERATIONS}).",
+                    status=ItemStatus.INCOMPLETE,
+                )
+            ],
+            ResponseStatus.INCOMPLETE,
+            self.ctx.session_id,
+            self.ctx.created_at,
+            self.ctx.model,
             usage=self.ctx.total_usage,
             iterations=settings.MAX_AGENT_ITERATIONS,
             tool_call_count=self.ctx.tool_call_count,
             tool_history=self.ctx.output_items or None,
         )
-        yield _sse_event({
-            "type": "response.incomplete",
-            "response": response.model_dump(mode="json"),
-        })
+        yield _sse_event(
+            {
+                "type": "response.incomplete",
+                "response": response.model_dump(mode="json"),
+            }
+        )
 
 
 @router.post("/responses", response_model=ResponseObject)
@@ -1525,7 +1721,13 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             error=ErrorObject(type=ErrorType.INVALID_REQUEST, message="No input messages"),
         )
 
-    tool_names, client_tool_schemas, client_tool_names, client_tool_prompts, display_names = _resolve_tools(request)
+    (
+        tool_names,
+        client_tool_schemas,
+        client_tool_names,
+        client_tool_prompts,
+        display_names,
+    ) = _resolve_tools(request)
 
     # Handle pending approval BEFORE _prepare_messages_for_session, because
     # the approval answer arrives as a tool-role message that
@@ -1547,17 +1749,20 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             # chain SSE events to be silently dropped.
             _defer_approval_to_stream = True
         else:
-            approval_early, _, approval_tc_count, approval_usage = (
-                await _handle_approval_continuation(
-                    session_id,
-                    raw_messages,
-                    approval_output_items,
-                    created_at,
-                    model or "default",
-                    Usage.zero(),
-                    0,
-                    cwd=cwd,
-                )
+            (
+                approval_early,
+                _,
+                approval_tc_count,
+                approval_usage,
+            ) = await _handle_approval_continuation(
+                session_id,
+                raw_messages,
+                approval_output_items,
+                created_at,
+                model or "default",
+                Usage.zero(),
+                0,
+                cwd=cwd,
             )
             if approval_early:
                 return approval_early
@@ -1639,10 +1844,8 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
 @router.get("/subagent/status/{session_id}")
 async def subagent_status(session_id: str) -> dict:
     """Return sub-agent run status for the given parent session."""
-    from app.services.subagent import get_registry
-
     now = time.time()
-    records = get_registry().list_by_parent(session_id)
+    records = get_subagent_registry().list_by_parent(session_id)
     return {
         "children": [
             {
@@ -1653,7 +1856,11 @@ async def subagent_status(session_id: str) -> dict:
                 "result_summary": r.result_summary[:500] if r.result_summary else None,
                 "current_iteration": r.current_iteration,
                 "progress": [
-                    {"tool_name": s.tool_name, "detail": s.detail[:100], "status": s.status}
+                    {
+                        "tool_name": s.tool_name,
+                        "detail": s.detail[:100],
+                        "status": s.status,
+                    }
                     for s in list(r.progress_log)
                 ],
             }
@@ -1673,8 +1880,6 @@ async def generate_title(request: dict) -> dict:
         f"{m['role'].capitalize()}: {m['text']}" for m in messages if m.get("text")
     )
 
-    from langchain_core.messages import HumanMessage as _HM
-
     prompt = _HM(
         content=(
             "Generate a very short title (max 6 words) for this conversation. "
@@ -1685,7 +1890,7 @@ async def generate_title(request: dict) -> dict:
 
     try:
         result = await agent_service.llm.ainvoke([prompt])
-        title = result.content.strip().strip('"\'')
+        title = result.content.strip().strip("\"'")
         # Truncate if too long
         if len(title) > 60:
             title = title[:57] + "..."

@@ -158,24 +158,62 @@ class ToolHookRunner:
 # Mutation classification
 # ---------------------------------------------------------------------------
 
-_ALWAYS_MUTATING_TOOLS = frozenset({
-    "write", "edit", "create", "delete", "remove", "rename",
-    "file_write", "file_delete", "file_rename", "file_move",
-    "browser_click", "browser_type", "browser_submit",
-    "bash", "shell", "terminal",
-})
+_ALWAYS_MUTATING_TOOLS = frozenset(
+    {
+        "write",
+        "edit",
+        "create",
+        "delete",
+        "remove",
+        "rename",
+        "file_write",
+        "file_delete",
+        "file_rename",
+        "file_move",
+        "browser_click",
+        "browser_type",
+        "browser_submit",
+        "bash",
+        "shell",
+        "terminal",
+    }
+)
 
-_READ_ONLY_TOOLS = frozenset({
-    "read", "search", "grep", "glob", "find", "ls", "list",
-    "file_read", "file_search", "file_list",
-    "browser_navigate", "browser_get_content", "browser_screenshot",
-    "web_search", "web_fetch",
-})
+_READ_ONLY_TOOLS = frozenset(
+    {
+        "read",
+        "search",
+        "grep",
+        "glob",
+        "find",
+        "ls",
+        "list",
+        "file_read",
+        "file_search",
+        "file_list",
+        "browser_navigate",
+        "browser_get_content",
+        "browser_screenshot",
+        "web_search",
+        "web_fetch",
+    }
+)
 
-_MUTATING_ACTIONS = frozenset({
-    "create", "update", "delete", "write", "edit", "send",
-    "post", "put", "patch", "execute", "run",
-})
+_MUTATING_ACTIONS = frozenset(
+    {
+        "create",
+        "update",
+        "delete",
+        "write",
+        "edit",
+        "send",
+        "post",
+        "put",
+        "patch",
+        "execute",
+        "run",
+    }
+)
 
 
 def is_mutating_tool_call(tool_name: str, params: Optional[Dict[str, Any]] = None) -> bool:
@@ -242,8 +280,9 @@ class LoopDetectionHook(ToolHook):
         if not session_id:
             return BeforeHookResult()
 
-        # Record the call
-        record_tool_call(session_id, tool_name, params, config=self._config)
+        # Record the call and store reference in context for after_tool_call
+        record = record_tool_call(session_id, tool_name, params, config=self._config)
+        context["_loop_record"] = record
 
         # Run detection
         detection = detect_tool_call_loop(session_id, config=self._config)
@@ -274,13 +313,10 @@ class LoopDetectionHook(ToolHook):
         if not session_id:
             return
 
-        from app.services.loop_detection import get_session_loop_state
-
-        state = get_session_loop_state(session_id)
-        if state.records:
-            last_record = state.records[-1]
+        record = context.get("_loop_record")
+        if record is not None:
             outcome = error if error else (result or "")
-            record_tool_outcome(last_record, outcome)
+            record_tool_outcome(record, outcome)
 
 
 class MutationTrackingHook(ToolHook):

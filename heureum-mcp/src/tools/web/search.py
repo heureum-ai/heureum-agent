@@ -5,20 +5,20 @@ and OpenAI search-preview serve as fallbacks.
 
 Fallback order: Tavily → Gemini Grounding → OpenAI
 """
+
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 from google import genai
 from google.genai import types
-from openai import AsyncOpenAI
-
 from mcp.server.fastmcp import FastMCP
+from openai import AsyncOpenAI
 from src.common.cache import make_cache_key, search_cache
 from src.config import settings
 
@@ -30,15 +30,38 @@ logger = logging.getLogger(__name__)
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
 
-_TRACKING_PARAMS = {"utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"}
+_TRACKING_PARAMS = {
+    "utm_source",
+    "utm_medium",
+    "utm_campaign",
+    "utm_term",
+    "utm_content",
+}
 
 _COUNTRY_CODE_MAP = {
-    "KR": "south korea", "US": "united states", "GB": "united kingdom",
-    "JP": "japan", "CN": "china", "DE": "germany", "FR": "france",
-    "CA": "canada", "AU": "australia", "IN": "india", "BR": "brazil",
-    "IT": "italy", "ES": "spain", "MX": "mexico", "NL": "netherlands",
-    "SE": "sweden", "CH": "switzerland", "SG": "singapore", "TW": "taiwan",
-    "HK": "hong kong", "NZ": "new zealand", "IE": "ireland", "IL": "israel",
+    "KR": "south korea",
+    "US": "united states",
+    "GB": "united kingdom",
+    "JP": "japan",
+    "CN": "china",
+    "DE": "germany",
+    "FR": "france",
+    "CA": "canada",
+    "AU": "australia",
+    "IN": "india",
+    "BR": "brazil",
+    "IT": "italy",
+    "ES": "spain",
+    "MX": "mexico",
+    "NL": "netherlands",
+    "SE": "sweden",
+    "CH": "switzerland",
+    "SG": "singapore",
+    "TW": "taiwan",
+    "HK": "hong kong",
+    "NZ": "new zealand",
+    "IE": "ireland",
+    "IL": "israel",
 }
 
 # Gemini Grounding — read from env (not in Settings; shared GCP config)
@@ -54,18 +77,20 @@ _GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
 @dataclass
 class SearchItem:
     """Single search result entry (common across all providers)."""
+
     title: str = ""
     url: str = ""
-    content: Optional[str] = None   # Tavily only; None = not provided
-    score: Optional[float] = None   # Tavily only; None = not provided
+    content: Optional[str] = None  # Tavily only; None = not provided
+    score: Optional[float] = None  # Tavily only; None = not provided
 
 
 @dataclass
 class SearchResponse:
     """Normalised output returned by every provider adapter."""
+
     provider: str = ""
     model: Optional[str] = None
-    answer: Optional[str] = None    # LLM-generated answer (Gemini, OpenAI)
+    answer: Optional[str] = None  # LLM-generated answer (Gemini, OpenAI)
     results: list[SearchItem] = field(default_factory=list)
 
     def to_results_list(self) -> list[dict]:
@@ -175,10 +200,12 @@ async def _search_gemini_grounding(query: str, max_results: int) -> SearchRespon
         for chunk in getattr(grounding_meta, "grounding_chunks", None) or []:
             web = getattr(chunk, "web", None)
             if web:
-                items.append(SearchItem(
-                    title=getattr(web, "title", ""),
-                    url=_clean_url(getattr(web, "uri", "")),
-                ))
+                items.append(
+                    SearchItem(
+                        title=getattr(web, "title", ""),
+                        url=_clean_url(getattr(web, "uri", "")),
+                    )
+                )
 
     if max_results > 0:
         items = items[:max_results]
@@ -215,10 +242,12 @@ async def _search_openai(query: str, max_results: int, country: Optional[str]) -
     for ann in getattr(message, "annotations", None) or []:
         citation = getattr(ann, "url_citation", None)
         if citation:
-            items.append(SearchItem(
-                title=citation.title,
-                url=_clean_url(citation.url),
-            ))
+            items.append(
+                SearchItem(
+                    title=citation.title,
+                    url=_clean_url(citation.url),
+                )
+            )
 
     if max_results > 0:
         items = items[:max_results]
@@ -254,8 +283,7 @@ async def _dispatch_search(
         return await _search_openai(query, max_results, country)
 
     raise LookupError(
-        "No search API key configured. "
-        "Set TAVILY_API_KEY, GOOGLE_CLOUD_PROJECT, or OPENAI_API_KEY."
+        "No search API key configured. Set TAVILY_API_KEY, GOOGLE_CLOUD_PROJECT, or OPENAI_API_KEY."
     )
 
 
@@ -274,7 +302,7 @@ def register_search(mcp: FastMCP) -> None:
         meta={
             "requires_approval": True,
             "display_name": "Web Search",
-        }
+        },
     )
     async def web_search(
         query: str,
@@ -315,32 +343,41 @@ calls are recommended for thorough results.
         try:
             sr = await _dispatch_search(http, query, search_depth, max_results, country)
         except LookupError as e:
-            return json.dumps({
-                "error": "missing_api_key",
-                "message": str(e),
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": "missing_api_key",
+                    "message": str(e),
+                },
+                ensure_ascii=False,
+            )
         except httpx.HTTPStatusError as e:
             body = e.response.text if e.response else ""
             logger.error("Search API error (%s): %s body=%s", type(e).__name__, e, body)
-            return json.dumps({
-                "error": type(e).__name__,
-                "message": f"Search API error: {e}",
-                "detail": body,
-                "query": query,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": type(e).__name__,
+                    "message": f"Search API error: {e}",
+                    "detail": body,
+                    "query": query,
+                },
+                ensure_ascii=False,
+            )
         except Exception as e:
             logger.error("Search API error (%s): %s", type(e).__name__, e)
-            return json.dumps({
-                "error": type(e).__name__,
-                "message": f"Search API error: {e}",
-                "query": query,
-            }, ensure_ascii=False)
+            return json.dumps(
+                {
+                    "error": type(e).__name__,
+                    "message": f"Search API error: {e}",
+                    "query": query,
+                },
+                ensure_ascii=False,
+            )
 
         took_ms = int((time.monotonic() - start) * 1000)
 
         result: dict = {
             "instruction": "Call fetch on the most relevant URLs to retrieve full content. "
-                           "Then use read or grep on the returned session_file paths.",
+            "Then use read or grep on the returned session_file paths.",
             "query": query,
             "provider": sr.provider,
             "search_depth": search_depth,

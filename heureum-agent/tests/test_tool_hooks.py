@@ -3,7 +3,7 @@
 """Tests for tool hooks."""
 
 import pytest
-
+from app.services.loop_detection import ToolLoopDetectionConfig
 from app.services.tool_hooks import (
     BeforeHookResult,
     LoopDetectionHook,
@@ -13,13 +13,13 @@ from app.services.tool_hooks import (
     is_mutating_tool_call,
     is_same_mutation,
 )
-from app.services.loop_detection import ToolLoopDetectionConfig
 
 
 @pytest.fixture(autouse=True)
 def _clean_loop_state():
     yield
     from app.services.loop_detection import _session_states
+
     _session_states.clear()
 
 
@@ -187,7 +187,9 @@ class TestLoopDetectionHook:
         # But detection runs before result is recorded, so check streak
         # The records have result_hash from after_tool_call
         # Circuit breaker at 5 — we have 7 records with same result
-        assert result.blocked is True or True  # Detection may or may not fire depending on result hashes
+        assert (
+            result.blocked is True or True
+        )  # Detection may or may not fire depending on result hashes
 
     @pytest.mark.asyncio
     async def test_warning_passes(self):
@@ -219,6 +221,7 @@ class TestLoopDetectionHook:
         await hook.after_tool_call("read", {"path": "/a"}, "file content", None, ctx)
 
         from app.services.loop_detection import get_session_loop_state
+
         state = get_session_loop_state("test-outcome")
         assert state.records[-1].result_hash is not None
 

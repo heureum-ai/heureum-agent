@@ -2,8 +2,7 @@
 
 """Tests for _LoopStateBuilder and _ToolCallRecord in agent.py."""
 
-import pytest
-from app.routers.agent import _LoopStateBuilder, _ToolCallRecord
+from app.routers.agent import _LoopStateBuilder
 from app.schemas.open_responses import (
     FunctionToolCall,
     FunctionToolResult,
@@ -74,7 +73,10 @@ class TestExtractRecentTools:
     def test_empty_result_detected(self):
         items = [
             _make_tool_call("grep", "c1"),
-            _make_tool_result("c1", "[EMPTY_RESULT] grep returned no output. Consider retrying with different parameters."),
+            _make_tool_result(
+                "c1",
+                "[EMPTY_RESULT] grep returned no output. Consider retrying with different parameters.",
+            ),
         ]
         records = _LoopStateBuilder._extract_recent_tools(items)
         assert records[0].succeeded is False

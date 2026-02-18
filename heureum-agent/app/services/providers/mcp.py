@@ -16,10 +16,10 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import ApprovalChoice, settings
-from app.services.prompts.base import NO_OUTPUT
-from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
 from app.models import Message, ToolCallInfo
 from app.schemas.open_responses import MessageRole
+from app.services.prompts.base import NO_OUTPUT
+from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -231,7 +231,9 @@ class MCPClient:
         self._cache_timestamp = now
         return self._available_tools
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = "") -> str:
+    async def call_tool(
+        self, name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = ""
+    ) -> str:
         """Call a tool on its MCP server and return the result as text.
 
         Args:
@@ -250,7 +252,10 @@ class MCPClient:
 
         meta = None
         if session_id:
-            meta = {"session_id": session_id, "platform_api_url": settings.PLATFORM_API_URL}
+            meta = {
+                "session_id": session_id,
+                "platform_api_url": settings.PLATFORM_API_URL,
+            }
             if cwd:
                 meta["cwd"] = cwd
 
@@ -324,7 +329,9 @@ class MCPClient:
         return tool_name in pending
 
     def classify_tool_calls(
-        self, tool_calls: List[ToolCallInfo], session_id: str,
+        self,
+        tool_calls: List[ToolCallInfo],
+        session_id: str,
         client_tool_names: Set[str] | None = None,
     ) -> Tuple[List[ToolCallInfo], List[ToolCallInfo]]:
         """2-way classification: (client_calls, server_calls).
@@ -399,11 +406,16 @@ class MCPClient:
             return None
 
         filtered = [
-            m for m in messages
+            m
+            for m in messages
             if not (m.role == MessageRole.TOOL and m.tool_call_id == pending["approval_call_id"])
         ]
 
-        choice = ApprovalChoice(answer) if answer in ApprovalChoice._value2member_map_ else ApprovalChoice.DENY
+        choice = (
+            ApprovalChoice(answer)
+            if answer in ApprovalChoice._value2member_map_
+            else ApprovalChoice.DENY
+        )
         decision = choice.decision
 
         if choice is ApprovalChoice.ALWAYS_ALLOW:
@@ -439,17 +451,18 @@ class MCPClient:
             question = f"Allow {tc.name}({json.dumps(tc.args, ensure_ascii=False)})?"
         else:
             lines = [
-                f"  - {tc.name}({json.dumps(tc.args, ensure_ascii=False)})"
-                for tc in tool_calls
+                f"  - {tc.name}({json.dumps(tc.args, ensure_ascii=False)})" for tc in tool_calls
             ]
             question = "Allow the following tool executions?\n" + "\n".join(lines)
         tool_name = tool_calls[0].name if tool_calls else "unknown"
-        return {"question": question, "choices": ApprovalChoice.options(), "tool_name": tool_name}
+        return {
+            "question": question,
+            "choices": ApprovalChoice.options(),
+            "tool_name": tool_name,
+        }
 
     @staticmethod
-    def _extract_approval_answer(
-        messages: List[Message], approval_call_id: str
-    ) -> Optional[str]:
+    def _extract_approval_answer(messages: List[Message], approval_call_id: str) -> Optional[str]:
         """Find the approval answer in incoming messages by matching call_id.
 
         # TODO: "User chose: " / "User input: " prefix stripping is
@@ -461,9 +474,9 @@ class MCPClient:
             if msg.role == MessageRole.TOOL and msg.tool_call_id == approval_call_id:
                 content = msg.content or ""
                 if content.startswith("User chose: "):
-                    return content[len("User chose: "):]
+                    return content[len("User chose: ") :]
                 if content.startswith("User input: "):
-                    return content[len("User input: "):]
+                    return content[len("User input: ") :]
                 return content
         return None
 

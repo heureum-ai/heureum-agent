@@ -6,10 +6,8 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
 from app.schemas.open_responses import FunctionToolCall, FunctionToolResult, ItemStatus
 from app.services.agent_service import (
-    JudgeResult,
     _parse_judge_response,
     build_tool_context,
     judge_response,
@@ -76,7 +74,11 @@ class TestBuildToolContext:
             items.append(_make_tool_call("tool", f"c{i}"))
             items.append(_make_tool_result(f"c{i}", "ok"))
         result = build_tool_context(items, limit=5)
-        lines = [l for l in result.strip().split("\n") if l.startswith(("1.", "2.", "3.", "4.", "5.", "6."))]
+        lines = [
+            line
+            for line in result.strip().split("\n")
+            if line.startswith(("1.", "2.", "3.", "4.", "5.", "6."))
+        ]
         assert len(lines) == 5
 
     def test_long_args_truncated(self):
@@ -91,7 +93,10 @@ class TestBuildToolContext:
     def test_empty_result_detected_as_failure(self):
         items = [
             _make_tool_call("read_file", "c1"),
-            _make_tool_result("c1", "[EMPTY_RESULT] read_file returned no output. Consider retrying with different parameters."),
+            _make_tool_result(
+                "c1",
+                "[EMPTY_RESULT] read_file returned no output. Consider retrying with different parameters.",
+            ),
         ]
         result = build_tool_context(items)
         assert "FAILED" in result
@@ -105,7 +110,9 @@ class TestParseJudgeResponse:
         assert result.guidance is None
 
     def test_fail_response(self):
-        mock = MagicMock(content='{"pass": false, "guidance": "Try using a different search query"}')
+        mock = MagicMock(
+            content='{"pass": false, "guidance": "Try using a different search query"}'
+        )
         result = _parse_judge_response(mock)
         assert result.passed is False
         assert result.guidance == "Try using a different search query"
@@ -138,7 +145,12 @@ class TestJudgeResponse:
         llm = AsyncMock()
         llm.ainvoke.return_value = MagicMock(content='{"pass": true, "guidance": null}')
 
-        result = await judge_response(llm, "search for AI news", "Here are the results...", "Tools used:\n1. web_search -> ok")
+        result = await judge_response(
+            llm,
+            "search for AI news",
+            "Here are the results...",
+            "Tools used:\n1. web_search -> ok",
+        )
         assert result.passed is True
 
     @pytest.mark.asyncio

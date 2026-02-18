@@ -2,8 +2,8 @@
 
 """Filesystem server standalone entry point."""
 
-from src.servers import create_server
 from src.config import settings
+from src.servers import create_server
 
 mcp = create_server("filesystem")
 

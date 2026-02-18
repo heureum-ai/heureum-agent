@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from app.config import settings
-from app.models import LLMResult, LLMResultType, Message
+from app.models import LLMResultType, Message
 from app.schemas.open_responses import MessageRole
 from app.services.agent_service import AgentService
 from langchain_core.messages import SystemMessage
@@ -128,10 +128,7 @@ class SubagentRegistry:
 
     def list_by_parent(self, parent_session_id: str) -> List[SubagentRunRecord]:
         """Return all runs (active and completed) for a parent session."""
-        return [
-            r for r in self._runs.values()
-            if r.parent_session_id == parent_session_id
-        ]
+        return [r for r in self._runs.values() if r.parent_session_id == parent_session_id]
 
     def cleanup(self, child_session_id: str) -> None:
         self._runs.pop(child_session_id, None)
@@ -268,7 +265,7 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
     return SpawnResult(
         status="accepted",
         child_session_id=child_session_id,
-        message=f"Sub-agent spawned. It will report back when done.",
+        message="Sub-agent spawned. It will report back when done.",
     )
 
 
@@ -334,41 +331,93 @@ def _build_subagent_instructions(task: str, tool_names: List[str]) -> str:
     return "\n".join(lines)
 
 
+class _FilteredSkillProvider:
+    """SkillProvider wrapper that restricts tools to an allowlist."""
+
+    def __init__(self, base, allowed_tools: Set[str]) -> None:
+        self._base = base
+        self._allowed = allowed_tools
+
+    def get_all_tool_schemas(self):
+        return [
+            s
+            for s in self._base.get_all_tool_schemas()
+            if s.get("function", {}).get("name") in self._allowed
+        ]
+
+    async def execute_tool(self, name, arguments, session_id):
+        if name not in self._allowed:
+            raise KeyError(f"Tool '{name}' not allowed for this sub-agent")
+        return await self._base.execute_tool(name, arguments, session_id)
+
+    def get_skill_for_tool(self, tool_name):
+        if tool_name not in self._allowed:
+            return None
+        return self._base.get_skill_for_tool(tool_name)
+
+    def get_all_guide_prompts(self):
+        return self._base.get_all_guide_prompts()
+
+    def get_state_prompts(self, session_id):
+        return self._base.get_state_prompts(session_id)
+
+    def clear_session(self, session_id):
+        self._base.clear_session(session_id)
+
+    async def await_pending(self, session_id, timeout=300.0):
+        await self._base.await_pending(session_id, timeout)
+
+
 def _resolve_child_tools(
     request: SpawnRequest,
 ) -> tuple:
     """Resolve MCP tools and skill_provider for the child agent.
 
     Inherits from the global parent agent_service, optionally filtered
-    by request.tools whitelist.
+    by request.tools whitelist.  Approval-required tools are always
+    excluded because sub-agents cannot perform interactive approval.
 
     Returns:
         (mcp_tools, skill_provider, tool_names) — ready for AgentService init.
     """
     # Lazy: circular dep + must read current (patchable) module attributes
-    from app.routers.agent import agent_service, skill_provider as global_skill_provider
+    from app.routers.agent import (
+        agent_service,
+        mcp_client,
+    )
+    from app.routers.agent import skill_provider as global_skill_provider
 
     parent_mcp_tools = agent_service.mcp_tools or []
     child_skill_provider = global_skill_provider
 
+    # Approval-required tools cannot be used by sub-agents (no interactive approval)
+    approval_required = getattr(mcp_client, "_approval_required_tools", set())
+
     if request.tools:
-        # Filter MCP tools to whitelist
+        # Filter MCP tools to whitelist, excluding approval-required
         allowed = set(request.tools)
         child_mcp_tools = [
-            t for t in parent_mcp_tools
+            t
+            for t in parent_mcp_tools
             if t.get("function", {}).get("name") in allowed
+            and t.get("function", {}).get("name") not in approval_required
         ]
+        # Wrap skill provider with allowlist filter
+        if global_skill_provider:
+            child_skill_provider = _FilteredSkillProvider(global_skill_provider, allowed)
     else:
-        child_mcp_tools = list(parent_mcp_tools)
+        child_mcp_tools = [
+            t
+            for t in parent_mcp_tools
+            if t.get("function", {}).get("name") not in approval_required
+        ]
 
     # Collect tool names for the instructions
-    tool_names = [
-        t.get("function", {}).get("name", "?") for t in child_mcp_tools
-    ]
+    tool_names = [t.get("function", {}).get("name", "?") for t in child_mcp_tools]
     if child_skill_provider:
         for schema in child_skill_provider.get_all_tool_schemas():
             name = schema.get("function", {}).get("name")
-            if name and (not request.tools or name in request.tools):
+            if name:
                 tool_names.append(name)
 
     return child_mcp_tools, child_skill_provider, tool_names
@@ -537,7 +586,9 @@ async def await_active_subagents(
         await asyncio.wait(tasks, timeout=timeout)
     except Exception:
         logger.warning(
-            "Error awaiting sub-agents for parent %s", parent_session_id, exc_info=True,
+            "Error awaiting sub-agents for parent %s",
+            parent_session_id,
+            exc_info=True,
         )
 
     return active
@@ -553,10 +604,7 @@ async def _announce_completion(
     Retries with exponential backoff if the parent session is locked.
     """
     msg = SystemMessage(
-        content=(
-            f"[Sub-agent completed] Task: {record.task[:200]}\n"
-            f"Result: {summary[:500]}"
-        )
+        content=(f"[Sub-agent completed] Task: {record.task[:200]}\nResult: {summary[:500]}")
     )
 
     for attempt in range(max_retries):
@@ -581,7 +629,7 @@ async def _announce_completion(
                 )
                 return
         except Exception as e:
-            delay = (2 ** attempt)
+            delay = 2**attempt
             logger.warning(
                 "Failed to announce sub-agent completion (attempt %d/%d): %s. Retrying in %ds.",
                 attempt + 1,

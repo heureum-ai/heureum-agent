@@ -23,14 +23,23 @@ SID = "test_session"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 async def _create_plan(skill: PlanSkill, steps: list[str], sid: str = SID):
     """Create a plan with given steps."""
-    await skill.execute("manage_todo", {
-        "action": "create", "task": "Test task", "steps": steps,
-    }, sid)
+    await skill.execute(
+        "manage_todo",
+        {
+            "action": "create",
+            "task": "Test task",
+            "steps": steps,
+        },
+        sid,
+    )
 
 
-async def _update_step(skill: PlanSkill, index: int, status: str, sid: str = SID, result: str | None = None):
+async def _update_step(
+    skill: PlanSkill, index: int, status: str, sid: str = SID, result: str | None = None
+):
     args = {"action": "update_step", "step_index": index, "status": status}
     if result is not None:
         args["result"] = result
@@ -40,6 +49,7 @@ async def _update_step(skill: PlanSkill, index: int, status: str, sid: str = SID
 # ---------------------------------------------------------------------------
 # TestIntermediateDirective — core tests for verbosity control
 # ---------------------------------------------------------------------------
+
 
 class TestIntermediateDirective:
     """Intermediate steps must instruct the LLM to proceed immediately,
@@ -115,6 +125,7 @@ class TestIntermediateDirective:
 # ---------------------------------------------------------------------------
 # TestDirectiveStructure — structural validation
 # ---------------------------------------------------------------------------
+
 
 class TestDirectiveStructure:
     """Verify that get_state_prompt has correct XML structure."""

@@ -5,6 +5,7 @@ Simple TTL cache using stdlib dict + time.monotonic.
 
 No external dependencies required.
 """
+
 from __future__ import annotations
 
 import copy
@@ -93,6 +94,7 @@ def make_cache_key(*parts: str) -> str:
 def _create_caches() -> tuple[TTLCache, TTLCache, TTLCache]:
     """Create cache instances using configured settings (lazy import to avoid circular deps)."""
     from src.config import settings
+
     return (
         TTLCache(ttl=settings.CACHE_TTL, max_size=settings.CACHE_MAX_SIZE),
         TTLCache(ttl=settings.CACHE_TTL, max_size=settings.CACHE_MAX_SIZE),

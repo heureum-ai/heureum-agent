@@ -11,7 +11,6 @@ import logging
 from typing import Any, Dict
 
 import httpx
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -50,9 +49,7 @@ class NotificationSkill:
     name = "notification_task"
     tool_schemas = [NOTIFY_USER_TOOL_SCHEMA]
 
-    async def execute(
-        self, name: str, arguments: Dict[str, Any], session_id: str
-    ) -> str:
+    async def execute(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
         title = arguments.get("title", "")
         body = arguments.get("body", "")
 

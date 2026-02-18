@@ -29,7 +29,11 @@ from app.models import Message
 from app.schemas.open_responses import MessageRole
 from app.services.compaction.repair import repair_tool_use_result_pairing
 from app.services.compaction.settings import CompactionSettings
-from app.services.compaction.tokens import estimate_message_tokens, estimate_messages_tokens, estimate_tokens
+from app.services.compaction.tokens import (
+    estimate_message_tokens,
+    estimate_messages_tokens,
+    estimate_tokens,
+)
 from app.services.prompts.compaction import (
     COMPACTION_MERGE_INSTRUCTIONS,
     COMPACTION_PREFIX,
@@ -41,7 +45,6 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
-
 
 
 def _messages_to_text(
@@ -86,10 +89,20 @@ def _messages_to_text(
             if msg.tool_calls:
                 tc_strs: List[str] = []
                 for tc in msg.tool_calls:
-                    name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                    name = (
+                        tc.get("name", "unknown")
+                        if isinstance(tc, dict)
+                        else getattr(tc, "name", "unknown")
+                    )
                     args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
                     try:
-                        pairs = ", ".join(f"{k}={json.dumps(v, ensure_ascii=False)}" for k, v in args.items()) if isinstance(args, dict) else json.dumps(args, ensure_ascii=False)
+                        pairs = (
+                            ", ".join(
+                                f"{k}={json.dumps(v, ensure_ascii=False)}" for k, v in args.items()
+                            )
+                            if isinstance(args, dict)
+                            else json.dumps(args, ensure_ascii=False)
+                        )
                     except (TypeError, ValueError):
                         pairs = str(args)
                     tc_strs.append(f"{name}({pairs})")

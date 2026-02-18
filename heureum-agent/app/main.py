@@ -13,7 +13,13 @@ from typing import AsyncGenerator, Set
 
 from app.config import settings
 from app.routers import agent
-from app.routers.agent import create_response, generate_title, subagent_status
+from app.routers.agent import (
+    agent_service,
+    create_response,
+    generate_title,
+    mcp_client,
+    subagent_status,
+)
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -59,9 +65,7 @@ class GracefulShutdown:
         """Wait for active tasks to complete, then cancel remaining."""
         if self.active_tasks:
             logger.info("Draining %d active task(s)...", len(self.active_tasks))
-            done, pending = await asyncio.wait(
-                self.active_tasks, timeout=timeout
-            )
+            done, pending = await asyncio.wait(self.active_tasks, timeout=timeout)
             for task in pending:
                 task.cancel()
                 try:
@@ -91,8 +95,6 @@ shutdown = GracefulShutdown()
 async def _on_shutdown() -> None:
     """Cleanup on application shutdown."""
     try:
-        from app.routers.agent import agent_service, mcp_client
-
         await agent_service.aclose()
         await mcp_client.close()
     except Exception:

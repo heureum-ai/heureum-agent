@@ -65,7 +65,10 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
     delete_tool = DeleteTool(cwd)
 
     # ── bash ────────────────────────────────────────────────
-    @mcp.tool(name="mcp_filesystem__bash", meta={"requires_approval": True, "display_name": "Bash"})
+    @mcp.tool(
+        name="mcp_filesystem__bash",
+        meta={"requires_approval": True, "display_name": "Bash"},
+    )
     async def _bash(
         command: str,
         timeout: Optional[int] = None,
@@ -118,7 +121,9 @@ truncated to 2000 lines or 50 KB; use offset/limit for large files.
             result = await local_tool.execute("", path, offset, limit)
         elif session_ctx:
             client = get_platform_client(session_ctx)
-            platform_tool = _make_platform_tool(ReadTool, ReadToolOptions, PlatformReadOperations, client)
+            platform_tool = _make_platform_tool(
+                ReadTool, ReadToolOptions, PlatformReadOperations, client
+            )
             result = await platform_tool.execute("", path, offset, limit)
         else:
             result = await read_tool.execute("", path, offset, limit)
@@ -126,7 +131,10 @@ truncated to 2000 lines or 50 KB; use offset/limit for large files.
         return "\n".join(texts)
 
     # ── write ───────────────────────────────────────────────
-    @mcp.tool(name="mcp_filesystem__write", meta={"requires_approval": True, "display_name": "Write"})
+    @mcp.tool(
+        name="mcp_filesystem__write",
+        meta={"requires_approval": True, "display_name": "Write"},
+    )
     async def _write(
         path: str,
         content: str,
@@ -148,14 +156,19 @@ the user's local filesystem, prefer 'write' instead.
             result = await local_tool.execute("", path, content)
         elif session_ctx:
             client = get_platform_client(session_ctx)
-            platform_tool = _make_platform_tool(WriteTool, WriteToolOptions, PlatformWriteOperations, client)
+            platform_tool = _make_platform_tool(
+                WriteTool, WriteToolOptions, PlatformWriteOperations, client
+            )
             result = await platform_tool.execute("", path, content)
         else:
             result = await write_tool.execute("", path, content)
         return result.content[0]["text"]
 
     # ── edit ────────────────────────────────────────────────
-    @mcp.tool(name="mcp_filesystem__edit", meta={"requires_approval": True, "display_name": "Edit"})
+    @mcp.tool(
+        name="mcp_filesystem__edit",
+        meta={"requires_approval": True, "display_name": "Edit"},
+    )
     async def _edit(
         path: str,
         old_text: str,
@@ -179,7 +192,9 @@ prefer 'edit' instead.
             result = await local_tool.execute("", path, old_text, new_text)
         elif session_ctx:
             client = get_platform_client(session_ctx)
-            platform_tool = _make_platform_tool(EditTool, EditToolOptions, PlatformEditOperations, client)
+            platform_tool = _make_platform_tool(
+                EditTool, EditToolOptions, PlatformEditOperations, client
+            )
             result = await platform_tool.execute("", path, old_text, new_text)
         else:
             result = await edit_tool.execute("", path, old_text, new_text)
@@ -216,7 +231,9 @@ For the user's local files, prefer 'grep' instead.
         session_ctx = extract_session_context(ctx) if ctx else None
         if session_ctx and session_ctx.cwd:
             local_tool = GrepTool(session_ctx.cwd)
-            result = await local_tool.execute("", pattern, path, glob, ignore_case, True, context, limit)
+            result = await local_tool.execute(
+                "", pattern, path, glob, ignore_case, True, context, limit
+            )
             return result.content[0]["text"]
         elif session_ctx:
             client = get_platform_client(session_ctx)
@@ -254,7 +271,14 @@ For the user's local files, prefer 'grep' instead.
                         with open(tmp_file, "w", encoding="utf-8") as f:
                             f.write(content)
                 result = await grep_tool.execute(
-                    "", pattern, tmp_dir, glob, ignore_case, True, context, limit,
+                    "",
+                    pattern,
+                    tmp_dir,
+                    glob,
+                    ignore_case,
+                    True,
+                    context,
+                    limit,
                 )
                 return result.content[0]["text"]
             finally:
@@ -287,7 +311,9 @@ For the user's local filesystem, prefer 'find' instead.
             result = await local_tool.execute("", pattern, path, limit)
         elif session_ctx:
             client = get_platform_client(session_ctx)
-            platform_tool = _make_platform_tool(FindTool, FindToolOptions, PlatformFindOperations, client)
+            platform_tool = _make_platform_tool(
+                FindTool, FindToolOptions, PlatformFindOperations, client
+            )
             result = await platform_tool.execute("", pattern, path, limit)
         else:
             result = await find_tool.execute("", pattern, path, limit)
@@ -323,7 +349,10 @@ directories, prefer 'ls' instead.
         return result.content[0]["text"]
 
     # ── delete ───────────────────────────────────────────────
-    @mcp.tool(name="mcp_filesystem__delete", meta={"requires_approval": True, "display_name": "Delete"})
+    @mcp.tool(
+        name="mcp_filesystem__delete",
+        meta={"requires_approval": True, "display_name": "Delete"},
+    )
     async def _delete(
         path: str,
         ctx: Context = None,
@@ -340,7 +369,9 @@ server-side files only.
             result = await local_tool.execute("", path)
         elif session_ctx:
             client = get_platform_client(session_ctx)
-            platform_tool = _make_platform_tool(DeleteTool, DeleteToolOptions, PlatformDeleteOperations, client)
+            platform_tool = _make_platform_tool(
+                DeleteTool, DeleteToolOptions, PlatformDeleteOperations, client
+            )
             result = await platform_tool.execute("", path)
         else:
             result = await delete_tool.execute("", path)

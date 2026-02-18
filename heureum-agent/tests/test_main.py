@@ -7,9 +7,8 @@ Tests for main application.
 import asyncio
 
 import pytest
-from fastapi.testclient import TestClient
-
 from app.main import GracefulShutdown, app
+from fastapi.testclient import TestClient
 
 client = TestClient(app)
 

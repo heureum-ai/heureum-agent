@@ -5,13 +5,11 @@
 from unittest.mock import MagicMock
 
 import pytest
-
 from src.common.session_context import (
     SessionContext,
     extract_session_context,
     get_platform_client,
 )
-
 
 # ---------------------------------------------------------------------------
 # extract_session_context

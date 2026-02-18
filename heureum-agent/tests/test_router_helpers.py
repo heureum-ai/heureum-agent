@@ -5,18 +5,17 @@
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import patch, MagicMock
-from uuid import UUID
+from unittest.mock import MagicMock, patch
 
+import app.routers.agent as agent_module
 import pytest
 from app.config import settings
-from app.models import Message, ToolCallInfo
-import app.routers.agent as agent_module
+from app.models import ToolCallInfo
 from app.routers.agent import (
     _AgentLoopRunner,
     _build_response,
-    _extract_session_id,
     _execute_tool_calls_pipelined,
+    _extract_session_id,
     _LoopContext,
     _parse_input,
     _text_output,
@@ -315,7 +314,9 @@ class TestPipelinedChainDepth:
     async def test_depth_is_tracked_per_chain_hop(self, monkeypatch):
         """All sibling root calls should get first-hop follow-ups."""
 
-        async def _fake_safe(tc: ToolCallInfo, session_id: str = "", cwd: str = "") -> tuple[ToolCallInfo, str]:
+        async def _fake_safe(
+            tc: ToolCallInfo, session_id: str = "", cwd: str = ""
+        ) -> tuple[ToolCallInfo, str]:
             delays = {"start_a": 0.01, "start_b": 0.02, "start_c": 0.03}
             await asyncio.sleep(delays.get(tc.name, 0))
             return tc, '{"ok": true}'
@@ -363,7 +364,11 @@ class TestStreamRetries:
             yield ("done", _FakeAccum())
 
         monkeypatch.setattr(agent_module.skill_provider, "has_unfinished_work", lambda _sid: True)
-        monkeypatch.setattr(agent_module.skill_provider, "build_retry_guidance", lambda _sid, _t: "Continue")
+        monkeypatch.setattr(
+            agent_module.skill_provider,
+            "build_retry_guidance",
+            lambda _sid, _t: "Continue",
+        )
         monkeypatch.setattr(agent_module.agent_service, "_append_to_history", lambda *a, **k: None)
         monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
 
@@ -401,7 +406,7 @@ def _parse_sse_events(raw_events):
     parsed = []
     for raw in raw_events:
         if raw.startswith("data: "):
-            payload = raw[len("data: "):].rstrip("\n")
+            payload = raw[len("data: ") :].rstrip("\n")
             if payload == "[DONE]":
                 continue
             parsed.append(json.loads(payload))
@@ -425,9 +430,7 @@ class TestToolCallNarrationFiltering:
     @staticmethod
     def _tool_accum(text="", tool_calls=None):
         if tool_calls is None:
-            tool_calls = [
-                {"name": "mcp_web__search", "args": {"query": "test"}, "id": "call_1"}
-            ]
+            tool_calls = [{"name": "mcp_web__search", "args": {"query": "test"}, "id": "call_1"}]
         return SimpleNamespace(content=text, tool_calls=tool_calls, usage_metadata={})
 
     @staticmethod
@@ -446,22 +449,34 @@ class TestToolCallNarrationFiltering:
 
     def _apply_common_patches(self, monkeypatch):
         monkeypatch.setattr(
-            agent_module.skill_provider, "has_unfinished_work", lambda _sid: False,
+            agent_module.skill_provider,
+            "has_unfinished_work",
+            lambda _sid: False,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider, "should_force_text_only", lambda _sid: False,
+            agent_module.skill_provider,
+            "should_force_text_only",
+            lambda _sid: False,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider, "clear_completed_plans", lambda _sid: None,
+            agent_module.skill_provider,
+            "clear_completed_plans",
+            lambda _sid: None,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider, "get_state_prompts", lambda _sid: [],
+            agent_module.skill_provider,
+            "get_state_prompts",
+            lambda _sid: [],
         )
         monkeypatch.setattr(
-            agent_module.agent_service, "_append_to_history", lambda *a, **k: None,
+            agent_module.agent_service,
+            "_append_to_history",
+            lambda *a, **k: None,
         )
         monkeypatch.setattr(
-            agent_module.agent_service, "append_tool_interaction", _async_noop,
+            agent_module.agent_service,
+            "append_tool_interaction",
+            _async_noop,
         )
         monkeypatch.setattr(agent_module.settings, "ENABLE_SELF_EVALUATION", False)
 
@@ -524,7 +539,8 @@ class TestToolCallNarrationFiltering:
         runner = _AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
-            runner, "_handle_tool_call_iteration",
+            runner,
+            "_handle_tool_call_iteration",
             lambda *_a, **_k: _async_noop(),
         )
 
@@ -566,7 +582,8 @@ class TestToolCallNarrationFiltering:
         runner = _AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
-            runner, "_handle_tool_call_iteration",
+            runner,
+            "_handle_tool_call_iteration",
             lambda *_a, **_k: _async_noop(),
         )
 
@@ -613,7 +630,8 @@ class TestToolCallNarrationFiltering:
         runner = _AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
-            runner, "_handle_tool_call_iteration",
+            runner,
+            "_handle_tool_call_iteration",
             lambda *_a, **_k: _async_noop(),
         )
 

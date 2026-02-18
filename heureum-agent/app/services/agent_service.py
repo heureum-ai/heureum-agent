@@ -24,10 +24,11 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-
 from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
 from app.schemas.open_responses import (
+    FunctionToolCall,
+    FunctionToolResult,
     InputTokenDetails,
     MessageRole,
     OutputTokenDetails,
@@ -41,10 +42,22 @@ from app.services.compaction import (
 from app.services.compaction.summarizer import compact_history
 from app.services.compaction.tokens import estimate_messages_tokens
 from app.services.error import LLMErrorClassifier
+from app.services.model_fallback import (
+    MultiProviderLLM,
+    is_failover_error,
+    resolve_candidates,
+    run_with_model_fallback,
+)
 from app.services.prompts.base import build_system_prompt
 from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.prompts.evaluation import JUDGE_SYSTEM_PROMPT, JUDGE_USER_TEMPLATE
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
@@ -54,12 +67,14 @@ logger = logging.getLogger(__name__)
 # Browser tools whose results contain page DOM that becomes stale when
 # the agent navigates to a new page.  Only the most recent page snapshot
 # matters; older ones are replaced with a short summary to save tokens.
-_BROWSER_PAGE_TOOLS = frozenset({
-    "browser_navigate",
-    "browser_click",
-    "browser_get_content",
-    "browser_new_tab",
-})
+_BROWSER_PAGE_TOOLS = frozenset(
+    {
+        "browser_navigate",
+        "browser_click",
+        "browser_get_content",
+        "browser_new_tab",
+    }
+)
 
 # Regex to extract the first Page/URL line from a browser tool result.
 _PAGE_HEADER_RE = re.compile(
@@ -121,7 +136,7 @@ def _invalidate_stale_browser_results(lc_history: list) -> int:
             if content.startswith("[Tool result:"):
                 # Strip prefix to check the actual tool output
                 bracket_end = content.find("]")
-                body = content[bracket_end + 1:].lstrip() if bracket_end > 0 else content
+                body = content[bracket_end + 1 :].lstrip() if bracket_end > 0 else content
                 if _is_browser_page_content(body):
                     if not seen_latest:
                         seen_latest = True
@@ -198,18 +213,16 @@ def _strip_tool_call_narration(lc_messages: list) -> list:
     """
     result: list = []
     for msg in lc_messages:
-        if (
-            isinstance(msg, AIMessage)
-            and getattr(msg, "tool_calls", None)
-            and msg.content
-        ):
-            result.append(AIMessage(
-                content="",
-                tool_calls=msg.tool_calls,
-                response_metadata=getattr(msg, "response_metadata", {}),
-                usage_metadata=getattr(msg, "usage_metadata", None),
-                additional_kwargs=getattr(msg, "additional_kwargs", {}),
-            ))
+        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and msg.content:
+            result.append(
+                AIMessage(
+                    content="",
+                    tool_calls=msg.tool_calls,
+                    response_metadata=getattr(msg, "response_metadata", {}),
+                    usage_metadata=getattr(msg, "usage_metadata", None),
+                    additional_kwargs=getattr(msg, "additional_kwargs", {}),
+                )
+            )
         else:
             result.append(msg)
     return result
@@ -227,9 +240,7 @@ def _strip_tool_messages(lc_messages: list) -> tuple[list, bool]:
     changed = False
     for msg in lc_messages:
         if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            summary = ", ".join(
-                f"{tc['name']}({tc.get('args', {})})" for tc in msg.tool_calls
-            )
+            summary = ", ".join(f"{tc['name']}({tc.get('args', {})})" for tc in msg.tool_calls)
             clean.append(AIMessage(content=f"[Called: {summary}]"))
             changed = True
         elif isinstance(msg, ToolMessage):
@@ -240,7 +251,9 @@ def _strip_tool_messages(lc_messages: list) -> tuple[list, bool]:
     return clean, changed
 
 
-def _normalize_usage_metadata(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, int]]:
+def _normalize_usage_metadata(
+    usage: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, int]]:
     """Normalize usage dict to LangChain ``usage_metadata`` shape."""
     if not usage:
         return None
@@ -270,9 +283,7 @@ class _SessionMessageView(MutableMapping[str, List[Message]]):
         return [self._service._to_app_message(m) for m in lc_history]
 
     def __setitem__(self, session_id: str, history: List[Message]) -> None:
-        self._service._lc_sessions[session_id] = [
-            self._service._to_lc_message(m) for m in history
-        ]
+        self._service._lc_sessions[session_id] = [self._service._to_lc_message(m) for m in history]
 
     def __delitem__(self, session_id: str) -> None:
         del self._service._lc_sessions[session_id]
@@ -328,6 +339,17 @@ class AgentService:
         self.mcp_tools = mcp_tools
         self.skill_provider = skill_provider
         self.llm = create_llm()
+
+        # Model fallback infrastructure
+        self._fallback_candidates = resolve_candidates(
+            primary_spec=settings.get_model_fallback_primary(),
+            fallback_chain=settings.get_model_fallback_chain(),
+        )
+        self._multi_provider = MultiProviderLLM()
+        # Pre-seed primary candidate with self.llm so fallback reuses it
+        if self._fallback_candidates:
+            self._multi_provider._cache[self._fallback_candidates[0].spec] = self.llm
+
         self._platform_client = httpx.AsyncClient(
             base_url=settings.PLATFORM_API_URL,
             timeout=httpx.Timeout(10.0, connect=3.0),
@@ -553,12 +575,16 @@ class AgentService:
                     self._lc_sessions[session_id] = rehydrated
                     self._session_last_access[session_id] = time.time()
                     logger.info(
-                        "Rehydrated session %s (%d messages)", session_id, len(rehydrated),
+                        "Rehydrated session %s (%d messages)",
+                        session_id,
+                        len(rehydrated),
                     )
                     return session_id, self._lc_sessions[session_id]
             except Exception:
                 logger.warning(
-                    "Failed to rehydrate session %s, starting fresh", session_id, exc_info=True,
+                    "Failed to rehydrate session %s, starting fresh",
+                    session_id,
+                    exc_info=True,
                 )
 
         new_session_id = session_id or str(uuid.uuid4())
@@ -605,7 +631,8 @@ class AgentService:
             for sid, _ in evictable[:to_evict]:
                 self._evict_session(sid)
             logger.info(
-                "Evicted %d session(s) over settings.MAX_SESSIONS limit", min(to_evict, len(evictable))
+                "Evicted %d session(s) over settings.MAX_SESSIONS limit",
+                min(to_evict, len(evictable)),
             )
 
     async def _ensure_session(
@@ -662,8 +689,8 @@ class AgentService:
             text = AgentService._extract_text(msg.content)
             if text.startswith("[Tool result:"):
                 close = text.find("]")
-                label = text[len("[Tool result:"):close].strip() if close > 0 else None
-                body = text[close + 1:].lstrip() if close > 0 else text
+                label = text[len("[Tool result:") : close].strip() if close > 0 else None
+                body = text[close + 1 :].lstrip() if close > 0 else text
                 return Message(
                     role=MessageRole.TOOL,
                     content=body,
@@ -1025,11 +1052,13 @@ class AgentService:
 
         # The kept tail is the last N messages from the original LC history.
         if kept_tail_len > 0 and kept_tail_len <= original_len:
-            lc_result.extend(original_lc[original_len - kept_tail_len:])
+            lc_result.extend(original_lc[original_len - kept_tail_len :])
         else:
             # Fallback: convert all non-summary messages
             for msg in history:
-                if not (msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX)):
+                if not (
+                    msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX)
+                ):
                     lc_result.append(self._to_lc_message(msg))
 
         self._lc_sessions[session_id] = lc_result
@@ -1088,7 +1117,12 @@ class AgentService:
                     before_tokens,
                     after_tokens,
                 )
-                return history, settings.MAX_OVERFLOW_RETRIES, True, truncation_attempted
+                return (
+                    history,
+                    settings.MAX_OVERFLOW_RETRIES,
+                    True,
+                    truncation_attempted,
+                )
             return history, overflow_retries + 1, True, truncation_attempted
 
         if truncation_attempted:
@@ -1244,7 +1278,11 @@ class AgentService:
                         raise
                     continue
 
-                if LLMErrorClassifier.is_retryable(e) and not LLMErrorClassifier.is_thought_signature(e) and llm_retries < settings.MAX_LLM_RETRIES:
+                if (
+                    LLMErrorClassifier.is_retryable(e)
+                    and not LLMErrorClassifier.is_thought_signature(e)
+                    and llm_retries < settings.MAX_LLM_RETRIES
+                ):
                     llm_retries += 1
                     delay = settings.LLM_RETRY_BASE_DELAY * (2 ** (llm_retries - 1))
                     logger.warning(
@@ -1260,7 +1298,8 @@ class AgentService:
                 # Fallback 1: retry without tools (same history).
                 if tools:
                     logger.warning(
-                        "LLM call failed with tools bound; retrying without tools: %s", e,
+                        "LLM call failed with tools bound; retrying without tools: %s",
+                        e,
                     )
                     try:
                         self._log_pre_llm_history(
@@ -1289,6 +1328,26 @@ class AgentService:
                         return await self._call_llm(clean, [])
                     except Exception as clean_err:
                         logger.warning("Clean-context fallback also failed: %s", clean_err)
+
+                # Fallback 3: model failover to alternative providers
+                if len(self._fallback_candidates) > 1:
+                    if is_failover_error(e):
+                        logger.warning("Trying model fallback after primary failure: %s", e)
+
+                        async def _call_fn(llm):
+                            if tools:
+                                return await llm.bind_tools(tools).ainvoke(lc_messages)
+                            return await llm.ainvoke(lc_messages)
+
+                        try:
+                            fb_result = await run_with_model_fallback(
+                                candidates=self._fallback_candidates[1:],
+                                call_fn=_call_fn,
+                                multi_provider=self._multi_provider,
+                            )
+                            return fb_result.value
+                        except Exception as fb_err:
+                            logger.warning("All model fallbacks failed: %s", fb_err)
 
                 raise
 
@@ -1628,14 +1687,14 @@ def build_tool_context(output_items: list, limit: int = 10) -> str:
     Pairs FunctionToolCall with FunctionToolResult to show tool name,
     arguments summary, and success/failure status.
     """
-    from app.schemas.open_responses import FunctionToolCall, FunctionToolResult
-
     call_info: dict[str, tuple[str, str]] = {}
     result_info: dict[str, str] = {}
 
     for item in output_items:
         if isinstance(item, FunctionToolCall) and item.call_id:
-            args_str = item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments)
+            args_str = (
+                item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments)
+            )
             if len(args_str) > 80:
                 args_str = args_str[:77] + "..."
             call_info[item.call_id] = (item.name, args_str)

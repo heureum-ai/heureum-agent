@@ -12,7 +12,6 @@ import logging
 from typing import Any, Dict
 
 import httpx
-
 from app.config import settings
 
 logger = logging.getLogger(__name__)
@@ -89,9 +88,7 @@ class PeriodicTaskSkill:
     name = "periodic_task"
     tool_schemas = [MANAGE_PERIODIC_TASK_TOOL_SCHEMA]
 
-    async def execute(
-        self, name: str, arguments: Dict[str, Any], session_id: str
-    ) -> str:
+    async def execute(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
         action = arguments.get("action", "")
         if action == "register":
             return await self._register(session_id, arguments)
@@ -135,19 +132,21 @@ class PeriodicTaskSkill:
                 )
                 if resp.status_code in (200, 201):
                     data = resp.json()
-                    return json.dumps({
-                        "success": True,
-                        "task": {
-                            "id": data["id"],
-                            "title": data["title"],
-                            "description": data.get("description", ""),
-                            "schedule_display": _format_schedule(data.get("schedule", {})),
-                            "timezone_name": data.get("timezone_name", "Asia/Seoul"),
-                            "next_run_at": data.get("next_run_at"),
-                            "status": data["status"],
-                            "notify_on_success": data.get("notify_on_success", True),
-                        },
-                    })
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "task": {
+                                "id": data["id"],
+                                "title": data["title"],
+                                "description": data.get("description", ""),
+                                "schedule_display": _format_schedule(data.get("schedule", {})),
+                                "timezone_name": data.get("timezone_name", "Asia/Seoul"),
+                                "next_run_at": data.get("next_run_at"),
+                                "status": data["status"],
+                                "notify_on_success": data.get("notify_on_success", True),
+                            },
+                        }
+                    )
                 return f"Error registering periodic task: {resp.text}"
         except Exception as e:
             logger.warning("Failed to register periodic task: %s", e)
@@ -162,22 +161,24 @@ class PeriodicTaskSkill:
                 )
                 if resp.status_code == 200:
                     tasks = resp.json()
-                    return json.dumps({
-                        "success": True,
-                        "tasks": [
-                            {
-                                "id": t["id"],
-                                "title": t["title"],
-                                "status": t["status"],
-                                "schedule_display": _format_schedule(t.get("schedule", {})),
-                                "next_run_at": t.get("next_run_at"),
-                                "total_runs": t["total_runs"],
-                                "total_successes": t["total_successes"],
-                                "total_failures": t["total_failures"],
-                            }
-                            for t in tasks
-                        ],
-                    })
+                    return json.dumps(
+                        {
+                            "success": True,
+                            "tasks": [
+                                {
+                                    "id": t["id"],
+                                    "title": t["title"],
+                                    "status": t["status"],
+                                    "schedule_display": _format_schedule(t.get("schedule", {})),
+                                    "next_run_at": t.get("next_run_at"),
+                                    "total_runs": t["total_runs"],
+                                    "total_successes": t["total_successes"],
+                                    "total_failures": t["total_failures"],
+                                }
+                                for t in tasks
+                            ],
+                        }
+                    )
                 return f"Error listing periodic tasks: {resp.text}"
         except Exception as e:
             logger.warning("Failed to list periodic tasks: %s", e)
@@ -229,7 +230,11 @@ def _format_schedule(schedule: dict) -> str:
         hour = c.get("hour", "*")
         minute = c.get("minute", 0)
         dow = c.get("day_of_week", "*")
-        time_str = f"{hour}:{str(minute).zfill(2)}" if hour != "*" else f"every hour at :{str(minute).zfill(2)}"
+        time_str = (
+            f"{hour}:{str(minute).zfill(2)}"
+            if hour != "*"
+            else f"every hour at :{str(minute).zfill(2)}"
+        )
         if dow == "*":
             return f"Every day at {time_str}"
         elif dow == "1-5":

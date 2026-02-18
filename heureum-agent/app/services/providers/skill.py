@@ -115,7 +115,14 @@ def _load_skill_meta(skill: Any) -> SkillMeta:
     if os.path.isfile(md_path):
         meta = parse_skill_md(md_path)
     else:
-        meta = SkillMeta(name=skill.name, description="", body="", server_tools=[], client_tools=[], depends_on=[])
+        meta = SkillMeta(
+            name=skill.name,
+            description="",
+            body="",
+            server_tools=[],
+            client_tools=[],
+            depends_on=[],
+        )
 
     skill._skill_meta_cache = meta
     return meta
@@ -197,7 +204,10 @@ class SkillProvider:
             if skill is None:
                 continue
             if not hasattr(skill, "name") or not hasattr(skill, "tool_schemas"):
-                logger.warning("Skill in %s missing 'name' or 'tool_schemas', skipping", module_name)
+                logger.warning(
+                    "Skill in %s missing 'name' or 'tool_schemas', skipping",
+                    module_name,
+                )
                 continue
 
             self._skills[skill.name] = skill
@@ -404,7 +414,11 @@ class SkillProvider:
                 return {
                     "task": state.task,
                     "steps": [
-                        {"description": s.description, "status": s.status, "result": s.result}
+                        {
+                            "description": s.description,
+                            "status": s.status,
+                            "result": s.result,
+                        }
                         for s in state.steps
                     ],
                 }

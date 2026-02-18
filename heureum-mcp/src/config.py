@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """MCP Server configuration."""
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 

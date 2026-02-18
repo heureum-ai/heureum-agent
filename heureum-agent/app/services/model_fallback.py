@@ -10,13 +10,14 @@ Provides:
   - Multi-provider LLM instance cache
 """
 
-import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Coroutine, Dict, Generic, List, Optional, TypeVar
 
+from app.config import settings
 from app.services.error import LLMErrorClassifier
 
 logger = logging.getLogger(__name__)
@@ -100,8 +101,8 @@ class ModelCandidate:
     """A provider/model pair for fallback."""
 
     provider: str  # "google", "openai", "anthropic"
-    model: str     # full model name
-    spec: str      # original "provider/model" string
+    model: str  # full model name
+    spec: str  # original "provider/model" string
 
     def __eq__(self, other):
         if not isinstance(other, ModelCandidate):
@@ -161,7 +162,7 @@ def calculate_cooldown_ms(
 def calculate_billing_cooldown_ms(
     error_count: int,
     base_seconds: int = 18000,  # 5 hours
-    max_seconds: int = 86400,   # 24 hours
+    max_seconds: int = 86400,  # 24 hours
 ) -> float:
     """Calculate billing error cooldown: 5h × 2^(n-1), capped at 24h."""
     if error_count <= 0:
@@ -338,8 +339,6 @@ class MultiProviderLLM:
 
     def _create_llm(self, candidate: ModelCandidate, **kwargs) -> Any:
         """Create a new LLM instance for a candidate."""
-        from app.config import settings
-
         if candidate.provider == "google":
             from langchain_google_genai import ChatGoogleGenerativeAI
 
@@ -352,7 +351,6 @@ class MultiProviderLLM:
                     max_output_tokens=settings.AGENT_MAX_TOKENS,
                     thinking_budget=thinking_budget,
                 )
-            import os
             if settings.GOOGLE_APPLICATION_CREDENTIALS:
                 os.environ.setdefault(
                     "GOOGLE_APPLICATION_CREDENTIALS",
@@ -383,9 +381,7 @@ class MultiProviderLLM:
             try:
                 from langchain_anthropic import ChatAnthropic
             except ImportError:
-                logger.warning(
-                    "langchain-anthropic not installed; cannot create Anthropic LLM"
-                )
+                logger.warning("langchain-anthropic not installed; cannot create Anthropic LLM")
                 raise ImportError("langchain-anthropic is required for Anthropic provider")
 
             return ChatAnthropic(
@@ -442,10 +438,10 @@ async def run_with_model_fallback(
             if is_primary and pm.should_probe_primary(candidate.provider):
                 logger.info("Probing primary provider %s", candidate.provider)
             else:
-                logger.debug(
-                    "Skipping %s (in cooldown)", candidate.spec
+                logger.debug("Skipping %s (in cooldown)", candidate.spec)
+                attempts.append(
+                    FallbackAttempt(candidate=candidate, error=Exception("in cooldown"))
                 )
-                attempts.append(FallbackAttempt(candidate=candidate, error=Exception("in cooldown")))
                 continue
 
         try:

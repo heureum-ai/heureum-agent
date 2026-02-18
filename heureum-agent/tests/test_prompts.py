@@ -3,19 +3,19 @@
 """Unit tests for app.services.prompts.base module."""
 
 from app.config import settings
-from app.services.prompts.base import HARD_CLEAR_PLACEHOLDER
-from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.prompts.base import (
     AGENT_IDENTITY_PROMPT,
+    HARD_CLEAR_PLACEHOLDER,
     SystemPromptBuilder,
     build_system_prompt,
 )
+from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.providers.skill import SkillProvider
-
 
 # ---------------------------------------------------------------------------
 # TestBuildSystemPrompt
 # ---------------------------------------------------------------------------
+
 
 class TestBuildSystemPrompt:
     """Tests for build_system_prompt() backwards-compatible wrapper."""
@@ -27,7 +27,13 @@ class TestBuildSystemPrompt:
 
     def test_default_includes_all_sections(self):
         result = build_system_prompt()
-        for tag in ["<safety>", "<response_style>", "<tool_usage>", "<conversation>", "<language>"]:
+        for tag in [
+            "<safety>",
+            "<response_style>",
+            "<tool_usage>",
+            "<conversation>",
+            "<language>",
+        ]:
             assert tag in result, f"Missing section: {tag}"
 
     def test_no_client_tools_no_client_guides(self):
@@ -144,6 +150,7 @@ class TestBuildSystemPrompt:
 # TestSystemPromptBuilder
 # ---------------------------------------------------------------------------
 
+
 class TestSystemPromptBuilder:
     """Tests for SystemPromptBuilder class."""
 
@@ -165,7 +172,7 @@ class TestSystemPromptBuilder:
         result = builder.build()
         assert '<tool_guide name="real">' in result
         # Should NOT double-wrap
-        assert result.count('<tool_guide name=') == 1
+        assert result.count("<tool_guide name=") == 1
 
     def test_add_tool_guides_batch(self):
         builder = SystemPromptBuilder()
@@ -187,10 +194,12 @@ class TestSystemPromptBuilder:
 
     def test_add_state_prompts_batch(self):
         builder = SystemPromptBuilder()
-        builder.add_state_prompts([
-            "<current_todo>Step 1</current_todo>",
-            "<previous_attempts>Attempt 1</previous_attempts>",
-        ])
+        builder.add_state_prompts(
+            [
+                "<current_todo>Step 1</current_todo>",
+                "<previous_attempts>Attempt 1</previous_attempts>",
+            ]
+        )
         result = builder.build()
         assert "<current_todo>" in result
         assert "<previous_attempts>" in result
@@ -232,6 +241,7 @@ class TestSystemPromptBuilder:
 # ---------------------------------------------------------------------------
 # TestPromptConstants
 # ---------------------------------------------------------------------------
+
 
 class TestPromptConstants:
     """Tests for module-level prompt constants."""

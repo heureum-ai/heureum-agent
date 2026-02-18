@@ -31,6 +31,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from .truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,7 +87,7 @@ class PlatformFileClient:
         """
         prefix = self._cwd + "/"
         if absolute_path.startswith(prefix):
-            return absolute_path[len(prefix):]
+            return absolute_path[len(prefix) :]
         if absolute_path == self._cwd:
             return ""
         # Already relative or rooted elsewhere — return as-is.
@@ -105,9 +107,7 @@ class PlatformFileClient:
         )
         if resp.status_code == 200:
             return resp.json().get("content", "")
-        raise FileNotFoundError(
-            f"File not found: {session_path} ({resp.status_code})"
-        )
+        raise FileNotFoundError(f"File not found: {session_path} ({resp.status_code})")
 
     async def write_file(self, session_path: str, content: str) -> None:
         """Write (create/overwrite) a file via Platform API.
@@ -369,7 +369,7 @@ class PlatformLsOperations:
             file_path: str = f.get("path", "")
             # Strip prefix to get relative name
             if prefix and file_path.startswith(prefix):
-                relative = file_path[len(prefix):]
+                relative = file_path[len(prefix) :]
             else:
                 relative = file_path
 
@@ -477,22 +477,18 @@ class PlatformDeleteOperations:
 # GrepOperations  (grep.py)
 # ---------------------------------------------------------------------------
 
-from .truncate import DEFAULT_MAX_BYTES, GREP_MAX_LINE_LENGTH
-
 
 async def _generate_grep_keywords(query: str) -> list[str] | None:
     """Call Gemini to convert a search query into grep keywords."""
-    from src.config import settings
     import json as _json
+
+    from src.config import settings
 
     if not settings.GEMINI_API_KEY:
         return None
 
     try:
-        url = (
-            f"{settings.GEMINI_API_BASE_URL}/models/"
-            f"{settings.GEMINI_GREP_MODEL}:generateContent"
-        )
+        url = f"{settings.GEMINI_API_BASE_URL}/models/{settings.GEMINI_GREP_MODEL}:generateContent"
         prompt = (
             "Given the following search query, output a JSON array of grep "
             "keywords to find relevant content in a saved web page. "
@@ -582,7 +578,8 @@ class PlatformGrepOperations:
         # Filter by glob pattern
         if glob_pattern:
             all_files = [
-                f for f in all_files
+                f
+                for f in all_files
                 if fnmatch.fnmatch(f.get("path", ""), glob_pattern)
                 or fnmatch.fnmatch(os.path.basename(f.get("path", "")), glob_pattern)
             ]
@@ -616,18 +613,12 @@ class PlatformGrepOperations:
                             ctx_text = self._truncate_line(lines[ctx_idx])
                             ctx_num = ctx_idx + 1
                             if ctx_idx == line_idx:
-                                output_lines.append(
-                                    f"{file_path}:{ctx_num}: {ctx_text}"
-                                )
+                                output_lines.append(f"{file_path}:{ctx_num}: {ctx_text}")
                             else:
-                                output_lines.append(
-                                    f"{file_path}-{ctx_num}- {ctx_text}"
-                                )
+                                output_lines.append(f"{file_path}-{ctx_num}- {ctx_text}")
                     else:
                         truncated = self._truncate_line(line_text)
-                        output_lines.append(
-                            f"{file_path}:{line_num}: {truncated}"
-                        )
+                        output_lines.append(f"{file_path}:{line_num}: {truncated}")
 
         if not output_lines:
             return "No matches found."

@@ -5,16 +5,14 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
 import app.routers.agent as exp_module
-from app.main import app
-from app.models import AgentResponse, LLMResult, LLMResultType, ToolCallInfo
-from app.schemas.open_responses import Usage
+import pytest
 from app.config import ApprovalChoice
+from app.main import app
+from app.models import LLMResult, LLMResultType, ToolCallInfo
+from app.schemas.open_responses import Usage
 from app.services.providers.mcp import MCPClient
-
+from httpx import ASGITransport, AsyncClient
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -37,6 +35,7 @@ def _patch_module(monkeypatch):
 
     # Mock chain_registry (no-op: no chain rules registered)
     from app.services.providers.tool import ToolChainRegistry
+
     mock_chain_registry = ToolChainRegistry()
     monkeypatch.setattr(exp_module, "chain_registry", mock_chain_registry)
 
@@ -317,17 +316,31 @@ class TestResponseStructure:
     async def test_response_has_required_fields(self, client, mock_svc):
         """The response JSON contains all required top-level fields."""
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="Hi",
+            session_id="s1",
+            usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         data = resp.json()
-        for field in ("id", "object", "created_at", "model", "status", "output", "usage"):
+        for field in (
+            "id",
+            "object",
+            "created_at",
+            "model",
+            "status",
+            "output",
+            "usage",
+        ):
             assert field in data, f"Missing field: {field}"
 
     async def test_response_object_literal(self, client, mock_svc):
         """The 'object' field is always the literal string 'response'."""
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="Hi",
+            session_id="s1",
+            usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         data = resp.json()
@@ -336,7 +349,10 @@ class TestResponseStructure:
     async def test_usage_structure(self, client, mock_svc):
         """The usage object contains input_tokens, output_tokens, and total_tokens."""
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="Hi", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="Hi",
+            session_id="s1",
+            usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         usage = resp.json()["usage"]
@@ -435,10 +451,17 @@ class TestToolApproval:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_1", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_1",
-                     "output": ApprovalChoice.ALLOW_ONCE},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_1",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_1",
+                        "output": ApprovalChoice.ALLOW_ONCE,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -447,7 +470,9 @@ class TestToolApproval:
         data = resp.json()
 
         assert data["status"] == "completed"
-        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"}, session_id="s1", cwd="")
+        mock_mcp.call_tool.assert_called_once_with(
+            "web_search", {"query": "test"}, session_id="s1", cwd=""
+        )
         # Pending state was cleaned up
         assert "s1" not in mock_mcp._pending_tool_calls
         # NOT auto-approved for future calls
@@ -464,17 +489,27 @@ class TestToolApproval:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "ok"
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="done", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="done",
+            session_id="s1",
+            usage=Usage.zero(),
         )
 
         resp = await client.post(
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_2", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_2",
-                     "output": ApprovalChoice.ALWAYS_ALLOW},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_2",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_2",
+                        "output": ApprovalChoice.ALWAYS_ALLOW,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -492,17 +527,27 @@ class TestToolApproval:
             "input_messages": [],
         }
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="I cannot search", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="I cannot search",
+            session_id="s1",
+            usage=Usage.zero(),
         )
 
         resp = await client.post(
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_3", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_3",
-                     "output": ApprovalChoice.DENY},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_3",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_3",
+                        "output": ApprovalChoice.DENY,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -532,7 +577,10 @@ class TestToolApproval:
                 usage=Usage.zero(),
             ),
             LLMResult(
-                type=LLMResultType.TEXT, text="auto result", session_id="s1", usage=Usage.zero(),
+                type=LLMResultType.TEXT,
+                text="auto result",
+                session_id="s1",
+                usage=Usage.zero(),
             ),
         ]
         mock_mcp.is_server_tool.return_value = True
@@ -572,11 +620,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_new_tab", "args": {"url": "https://coupang.com"}, "id": "call_1"},
+                    {
+                        "name": "browser_new_tab",
+                        "args": {"url": "https://coupang.com"},
+                        "id": "call_1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content='{"url":"https://coupang.com"}',
-                    tool_call_id="call_1", tool_name="browser_new_tab"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"url":"https://coupang.com"}',
+                tool_call_id="call_1",
+                tool_name="browser_new_tab",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
@@ -593,15 +649,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "Open coupang"}]},
-                    {"type": "function_call", "name": "browser_new_tab",
-                     "call_id": "call_1", "arguments": '{"url":"https://coupang.com"}'},
-                    {"type": "function_call_output", "call_id": "call_1",
-                     "output": "Successfully opened https://coupang.com"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "Open coupang"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_new_tab",
+                        "call_id": "call_1",
+                        "arguments": '{"url":"https://coupang.com"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "Successfully opened https://coupang.com",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -612,14 +687,14 @@ class TestClientToolContinuation:
         # (not the duplicate user message)
         call_args = mock_svc.process_messages_with_tools.call_args
         messages_arg = call_args.kwargs.get("messages", call_args[0][0] if call_args[0] else None)
-        assert messages_arg == [], (
-            f"Expected empty messages but got {messages_arg}"
-        )
+        assert messages_arg == [], f"Expected empty messages but got {messages_arg}"
 
         # Verify placeholder in history was replaced with actual result
         assert existing_history[2].content == "Successfully opened https://coupang.com"
 
-    async def test_continuation_with_failed_tool_gets_llm_response(self, client, mock_svc, mock_mcp):
+    async def test_continuation_with_failed_tool_gets_llm_response(
+        self, client, mock_svc, mock_mcp
+    ):
         """When a client tool fails, the LLM should see the error and respond."""
         from app.models import Message
         from app.schemas.open_responses import MessageRole
@@ -630,11 +705,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_click", "args": {"selector": "#btn"}, "id": "call_c1"},
+                    {
+                        "name": "browser_click",
+                        "args": {"selector": "#btn"},
+                        "id": "call_c1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content='{"selector":"#btn"}',
-                    tool_call_id="call_c1", tool_name="browser_click"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"selector":"#btn"}',
+                tool_call_id="call_c1",
+                tool_name="browser_click",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
@@ -649,15 +732,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "Click the button"}]},
-                    {"type": "function_call", "name": "browser_click",
-                     "call_id": "call_c1", "arguments": '{"selector":"#btn"}'},
-                    {"type": "function_call_output", "call_id": "call_c1",
-                     "output": "Error: Element not found"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "Click the button"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_click",
+                        "call_id": "call_c1",
+                        "arguments": '{"selector":"#btn"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_c1",
+                        "output": "Error: Element not found",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -676,7 +778,6 @@ class TestClientToolContinuation:
         """When session is lost (empty history), echo recovery must produce
         [UserMessage, AIMessage{tool_calls}, ToolMessage] — NOT
         [AIMessage, UserMessage, ToolMessage] which violates the OpenAI API."""
-        from app.models import Message
         from app.schemas.open_responses import MessageRole
 
         # Empty session = echo recovery branch
@@ -693,15 +794,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "쿠팡 열어줘"}]},
-                    {"type": "function_call", "name": "browser_navigate",
-                     "call_id": "call_nav1", "arguments": '{"url":"https://coupang.com"}'},
-                    {"type": "function_call_output", "call_id": "call_nav1",
-                     "output": "Error: browser extension not connected"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "쿠팡 열어줘"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_navigate",
+                        "call_id": "call_nav1",
+                        "arguments": '{"url":"https://coupang.com"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_nav1",
+                        "output": "Error: browser extension not connected",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s2"},
             },
         )
@@ -731,11 +851,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_new_tab", "args": {"url": "https://coupang.com"}, "id": "call_1"},
+                    {
+                        "name": "browser_new_tab",
+                        "args": {"url": "https://coupang.com"},
+                        "id": "call_1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content="Error: extension not connected",
-                    tool_call_id="call_1", tool_name="browser_new_tab"),
+            Message(
+                role=MessageRole.TOOL,
+                content="Error: extension not connected",
+                tool_call_id="call_1",
+                tool_name="browser_new_tab",
+            ),
             Message(role=MessageRole.ASSISTANT, content="확장 프로그램을 설치해 주세요."),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
@@ -752,15 +880,40 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "쿠팡 열어줘"}]},
-                    {"type": "message", "role": "assistant", "status": "completed",
-                     "content": [{"type": "output_text", "text": "확장 프로그램을 설치해 주세요."}]},
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "연결했어"}]},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "쿠팡 열어줘"}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "확장 프로그램을 설치해 주세요.",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "연결했어"}],
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -775,7 +928,10 @@ class TestClientToolContinuation:
         assert messages_arg[0].content == "연결했어"
 
     async def test_continuation_keeps_tool_path_without_forced_cutoff(
-        self, client, mock_svc, mock_mcp,
+        self,
+        client,
+        mock_svc,
+        mock_mcp,
     ):
         """Consecutive continuations should keep the tool-enabled path.
 
@@ -788,30 +944,70 @@ class TestClientToolContinuation:
         existing_history = [
             Message(role=MessageRole.USER, content="검색해줘"),
             Message(
-                role=MessageRole.ASSISTANT, content="",
-                tool_calls=[{"name": "browser_click", "args": {"selector": ".btn"}, "id": "call_r1"}],
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[
+                    {
+                        "name": "browser_click",
+                        "args": {"selector": ".btn"},
+                        "id": "call_r1",
+                    }
+                ],
             ),
-            Message(role=MessageRole.TOOL, content='{"selector":".btn"}',
-                    tool_call_id="call_r1", tool_name="browser_click"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"selector":".btn"}',
+                tool_call_id="call_r1",
+                tool_name="browser_click",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
         mock_svc.process_messages_with_tools.side_effect = [
-            LLMResult(type=LLMResultType.TEXT, text="Retrying...", session_id="s1", usage=Usage.zero()),
-            LLMResult(type=LLMResultType.TEXT, text="Still trying...", session_id="s1", usage=Usage.zero()),
+            LLMResult(
+                type=LLMResultType.TEXT,
+                text="Retrying...",
+                session_id="s1",
+                usage=Usage.zero(),
+            ),
+            LLMResult(
+                type=LLMResultType.TEXT,
+                text="Still trying...",
+                session_id="s1",
+                usage=Usage.zero(),
+            ),
         ]
 
         continuation_payload = {
             "input": [
-                {"type": "message", "role": "user", "status": "completed",
-                 "content": [{"type": "input_text", "text": "검색해줘"}]},
-                {"type": "function_call", "name": "browser_click",
-                 "call_id": "call_r1", "arguments": '{"selector":".btn"}'},
-                {"type": "function_call_output", "call_id": "call_r1",
-                 "output": "Error: Element not found"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "검색해줘"}],
+                },
+                {
+                    "type": "function_call",
+                    "name": "browser_click",
+                    "call_id": "call_r1",
+                    "arguments": '{"selector":".btn"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_r1",
+                    "output": "Error: Element not found",
+                },
             ],
-            "tools": [{"type": "function", "function": {"name": "ask_question",
-                       "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "description": "Ask",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
             "metadata": {"session_id": "s1"},
         }
 

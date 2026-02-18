@@ -8,7 +8,6 @@ from app.models import Message, ToolCallInfo
 from app.schemas.open_responses import MessageRole
 from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
 
-
 # ---------------------------------------------------------------------------
 # 1. Single-step chains (migrated from test_mcp_client.py)
 # ---------------------------------------------------------------------------
@@ -22,16 +21,22 @@ class TestBuildSingleStep:
             ChainRule(
                 source="web_search",
                 steps=[
-                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
+                    ChainStep(
+                        target="web_fetch",
+                        extract="results[*].url",
+                        arg_mapping={"url": "$value"},
+                    ),
                 ],
             )
         )
-        search_result = json.dumps({
-            "results": [
-                {"url": "https://example.com/1", "title": "One"},
-                {"url": "https://example.com/2", "title": "Two"},
-            ]
-        })
+        search_result = json.dumps(
+            {
+                "results": [
+                    {"url": "https://example.com/1", "title": "One"},
+                    {"url": "https://example.com/2", "title": "Two"},
+                ]
+            }
+        )
         executed = [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")]
         results = [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")]
 
@@ -54,7 +59,13 @@ class TestBuildSingleStep:
         registry.register(
             ChainRule(
                 source="web_search",
-                steps=[ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"})],
+                steps=[
+                    ChainStep(
+                        target="web_fetch",
+                        extract="results[*].url",
+                        arg_mapping={"url": "$value"},
+                    )
+                ],
             )
         )
         executed = [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")]
@@ -75,8 +86,16 @@ class TestBuildMultiStep:
             ChainRule(
                 source="web_search",
                 steps=[
-                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
-                    ChainStep(target="summarize", extract="content", arg_mapping={"text": "$value"}),
+                    ChainStep(
+                        target="web_fetch",
+                        extract="results[*].url",
+                        arg_mapping={"url": "$value"},
+                    ),
+                    ChainStep(
+                        target="summarize",
+                        extract="content",
+                        arg_mapping={"text": "$value"},
+                    ),
                 ],
             )
         )
@@ -108,7 +127,13 @@ class TestBuildMultiStep:
         fetch_result = json.dumps({"content": "Hello world"})
         step1 = registry.build(
             step0,
-            [Message(role=MessageRole.TOOL, content=fetch_result, tool_call_id=step0[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=fetch_result,
+                    tool_call_id=step0[0].id,
+                )
+            ],
             session_id="s1",
         )
 
@@ -122,19 +147,37 @@ class TestBuildMultiStep:
         # Step 0
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
-            [Message(role=MessageRole.TOOL, content=json.dumps({"results": [{"url": "https://x.com"}]}), tool_call_id="c1")],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"results": [{"url": "https://x.com"}]}),
+                    tool_call_id="c1",
+                )
+            ],
             session_id="s1",
         )
         # Step 1
         step1 = registry.build(
             step0,
-            [Message(role=MessageRole.TOOL, content=json.dumps({"content": "Hi"}), tool_call_id=step0[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"content": "Hi"}),
+                    tool_call_id=step0[0].id,
+                )
+            ],
             session_id="s1",
         )
         # Step 2: after summarize, no more steps
         step2 = registry.build(
             step1,
-            [Message(role=MessageRole.TOOL, content=json.dumps({"summary": "Brief"}), tool_call_id=step1[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"summary": "Brief"}),
+                    tool_call_id=step1[0].id,
+                )
+            ],
             session_id="s1",
         )
 
@@ -145,7 +188,13 @@ class TestBuildMultiStep:
 
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
-            [Message(role=MessageRole.TOOL, content=json.dumps({"results": [{"url": "https://x.com"}]}), tool_call_id="c1")],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"results": [{"url": "https://x.com"}]}),
+                    tool_call_id="c1",
+                )
+            ],
             session_id="s1",
         )
         assert len(step0) == 1
@@ -155,7 +204,13 @@ class TestBuildMultiStep:
         # After clear, step[1] should NOT fire
         chained = registry.build(
             step0,
-            [Message(role=MessageRole.TOOL, content=json.dumps({"content": "Hi"}), tool_call_id=step0[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"content": "Hi"}),
+                    tool_call_id=step0[0].id,
+                )
+            ],
             session_id="s1",
         )
         assert chained == []
@@ -169,17 +224,27 @@ class TestBuildMultiStep:
 class TestRegistration:
     def test_register_and_clear(self):
         registry = ToolChainRegistry()
-        registry.register(ChainRule(source="a", steps=[ChainStep(target="b", extract="x", arg_mapping={})]))
+        registry.register(
+            ChainRule(source="a", steps=[ChainStep(target="b", extract="x", arg_mapping={})])
+        )
         assert "a" in registry.rules
         registry.clear()
         assert registry.rules == {}
 
     def test_register_many(self):
         registry = ToolChainRegistry()
-        registry.register_many([
-            ChainRule(source="a", steps=[ChainStep(target="b", extract="x", arg_mapping={})]),
-            ChainRule(source="c", steps=[ChainStep(target="d", extract="y", arg_mapping={})]),
-        ])
+        registry.register_many(
+            [
+                ChainRule(
+                    source="a",
+                    steps=[ChainStep(target="b", extract="x", arg_mapping={})],
+                ),
+                ChainRule(
+                    source="c",
+                    steps=[ChainStep(target="d", extract="y", arg_mapping={})],
+                ),
+            ]
+        )
         assert "a" in registry.rules
         assert "c" in registry.rules
 
@@ -221,7 +286,11 @@ class TestBuildPerResult:
             ChainRule(
                 source="web_search",
                 steps=[
-                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
+                    ChainStep(
+                        target="web_fetch",
+                        extract="results[*].url",
+                        arg_mapping={"url": "$value"},
+                    ),
                 ],
             )
         )
@@ -245,8 +314,16 @@ class TestBuildPerResult:
             ChainRule(
                 source="web_search",
                 steps=[
-                    ChainStep(target="web_fetch", extract="results[*].url", arg_mapping={"url": "$value"}),
-                    ChainStep(target="summarize", extract="content", arg_mapping={"text": "$value"}),
+                    ChainStep(
+                        target="web_fetch",
+                        extract="results[*].url",
+                        arg_mapping={"url": "$value"},
+                    ),
+                    ChainStep(
+                        target="summarize",
+                        extract="content",
+                        arg_mapping={"text": "$value"},
+                    ),
                 ],
             )
         )
@@ -303,7 +380,10 @@ class TestBuildCaching:
         parse_cache: dict = {}
         path_cache: dict = {}
         chained = registry.build_per_result(
-            tc, result_msg, _parse_cache=parse_cache, _path_cache=path_cache,
+            tc,
+            result_msg,
+            _parse_cache=parse_cache,
+            _path_cache=path_cache,
         )
 
         # Both rules should produce results
@@ -338,7 +418,10 @@ class TestBuildCaching:
         parse_cache: dict = {}
         path_cache: dict = {}
         chained = registry.build_per_result(
-            tc, result_msg, _parse_cache=parse_cache, _path_cache=path_cache,
+            tc,
+            result_msg,
+            _parse_cache=parse_cache,
+            _path_cache=path_cache,
         )
 
         # 2 rules x 2 items = 4 chained calls
@@ -361,7 +444,11 @@ class TestPlaceholderResolution:
             extract="$root",
             arg_mapping={"path": "$value.session_file", "mode": "$value.extract_mode"},
         )
-        data = {"session_file": "/session/web_fetch/example.md", "extract_mode": "markdown", "title": "Example"}
+        data = {
+            "session_file": "/session/web_fetch/example.md",
+            "extract_mode": "markdown",
+            "title": "Example",
+        }
         result = ToolChainRegistry._extract_chain_args_from_data(data, step)
         assert len(result) == 1
         assert result[0]["path"] == "/session/web_fetch/example.md"
@@ -386,11 +473,16 @@ class TestPlaceholderResolution:
         step = ChainStep(
             target="grep",
             extract="$root",
-            arg_mapping={"pattern": "$source_args.query", "path": "$value.session_file"},
+            arg_mapping={
+                "pattern": "$source_args.query",
+                "path": "$value.session_file",
+            },
         )
         data = {"session_file": "/session/file.md", "title": "Page Title"}
         source_args = {"query": "python async 2026", "max_results": 5}
-        result = ToolChainRegistry._extract_chain_args_from_data(data, step, source_args=source_args)
+        result = ToolChainRegistry._extract_chain_args_from_data(
+            data, step, source_args=source_args
+        )
         assert len(result) == 1
         assert result[0]["pattern"] == "python async 2026"
         assert result[0]["path"] == "/session/file.md"
@@ -400,7 +492,9 @@ class TestPlaceholderResolution:
         step = ChainStep(target="t", extract="$root", arg_mapping={"ctx": "$source_args"})
         data = {"x": 1}
         source_args = {"query": "test", "depth": "basic"}
-        result = ToolChainRegistry._extract_chain_args_from_data(data, step, source_args=source_args)
+        result = ToolChainRegistry._extract_chain_args_from_data(
+            data, step, source_args=source_args
+        )
         assert result[0]["ctx"] == {"query": "test", "depth": "basic"}
 
     def test_source_args_missing_field_skips_step(self):
@@ -408,7 +502,9 @@ class TestPlaceholderResolution:
         step = ChainStep(target="t", extract="$root", arg_mapping={"x": "$source_args.nonexistent"})
         data = {"y": 1}
         source_args = {"query": "q"}
-        result = ToolChainRegistry._extract_chain_args_from_data(data, step, source_args=source_args)
+        result = ToolChainRegistry._extract_chain_args_from_data(
+            data, step, source_args=source_args
+        )
         assert result == []
 
     def test_source_args_none_skips_step(self):
@@ -462,9 +558,7 @@ class TestSourceArgsPropagation:
         registry = self._make_registry()
 
         # Step 0: web_search triggers web_fetch
-        search_result = json.dumps({
-            "results": [{"url": "https://example.com/article"}]
-        })
+        search_result = json.dumps({"results": [{"url": "https://example.com/article"}]})
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "python async 2026"}, id="c1")],
             [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")],
@@ -475,14 +569,22 @@ class TestSourceArgsPropagation:
         assert step0[0].args == {"url": "https://example.com/article"}
 
         # Step 1: web_fetch result triggers grep with $source_args.query
-        fetch_result = json.dumps({
-            "session_file": "/session/web_fetch/example.com/article-ab12.md",
-            "title": "Python Async Guide",
-            "status": 200,
-        })
+        fetch_result = json.dumps(
+            {
+                "session_file": "/session/web_fetch/example.com/article-ab12.md",
+                "title": "Python Async Guide",
+                "status": 200,
+            }
+        )
         step1 = registry.build(
             step0,
-            [Message(role=MessageRole.TOOL, content=fetch_result, tool_call_id=step0[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=fetch_result,
+                    tool_call_id=step0[0].id,
+                )
+            ],
             session_id="s1",
         )
         assert len(step1) == 1
@@ -507,14 +609,26 @@ class TestSourceArgsPropagation:
 
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "test"}, id="c1")],
-            [Message(role=MessageRole.TOOL, content=json.dumps({"results": [{"url": "https://x.com"}]}), tool_call_id="c1")],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"results": [{"url": "https://x.com"}]}),
+                    tool_call_id="c1",
+                )
+            ],
             session_id="s1",
         )
         registry.clear_session("s1")
 
         step1 = registry.build(
             step0,
-            [Message(role=MessageRole.TOOL, content=json.dumps({"session_file": "/f", "title": "T"}), tool_call_id=step0[0].id)],
+            [
+                Message(
+                    role=MessageRole.TOOL,
+                    content=json.dumps({"session_file": "/f", "title": "T"}),
+                    tool_call_id=step0[0].id,
+                )
+            ],
             session_id="s1",
         )
         assert step1 == []
