@@ -63,14 +63,6 @@ variable names, library names) in English regardless of conversation language.
 Use tools when they add value you cannot produce from memory alone.
 When a tool call fails, try an alternative approach before retrying.
 
-Prefer dedicated tools over bash:
-  - To search for files → use find
-  - To search file contents → use grep
-  - To read files → use read
-  - To edit files → use edit
-  - To write files → use write
-  - Reserve bash for system commands that have no dedicated tool.
-
 Call multiple tools in a single response when they are independent
 of each other, so they run in parallel. Only sequence calls when a
 later call depends on an earlier result.
