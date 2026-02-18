@@ -306,6 +306,11 @@ export interface StreamEventTodoUpdated {
   todo: TodoState;
 }
 
+export interface StreamEventTextAbandoned {
+  type: 'response.output_text.abandoned';
+  reason: string;
+}
+
 export type StreamEvent =
   | StreamEventCreated
   | StreamEventTextDelta
@@ -315,7 +320,8 @@ export type StreamEvent =
   | StreamEventCompleted
   | StreamEventIncomplete
   | StreamEventFailed
-  | StreamEventTodoUpdated;
+  | StreamEventTodoUpdated
+  | StreamEventTextAbandoned;
 
 // Periodic task types
 export interface PeriodicTask {

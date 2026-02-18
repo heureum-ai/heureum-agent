@@ -648,6 +648,12 @@ export default function ChatPage() {
           case 'response.todo.updated':
             useChatStore.getState().updateOrAddTodo(event.todo);
             break;
+          case 'response.output_text.abandoned':
+            // Server is retrying (skill unfinished / judge failed).
+            // Discard the streamed text — tool calls, questions, and TODO
+            // progress are already committed via their own event handlers.
+            clearStreamingText();
+            break;
         }
       });
 
