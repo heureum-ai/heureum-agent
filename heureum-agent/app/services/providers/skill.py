@@ -38,6 +38,7 @@ class SkillMeta:
     body: str
     server_tools: List[str]
     client_tools: List[str]
+    depends_on: List[str]
 
 
 def parse_skill_md(path: str) -> SkillMeta:
@@ -62,6 +63,7 @@ def parse_skill_md(path: str) -> SkillMeta:
     body = text  # fallback: entire file is the body
     server_tools: List[str] = []
     client_tools: List[str] = []
+    depends_on: List[str] = []
 
     parts = text.split("---", 2)
     if len(parts) >= 3:
@@ -82,6 +84,8 @@ def parse_skill_md(path: str) -> SkillMeta:
                 server_tools = [t.strip() for t in value.split(",") if t.strip()]
             elif key == "client_tools":
                 client_tools = [t.strip() for t in value.split(",") if t.strip()]
+            elif key == "depends_on":
+                depends_on = [t.strip() for t in value.split(",") if t.strip()]
 
     return SkillMeta(
         name=name,
@@ -89,6 +93,7 @@ def parse_skill_md(path: str) -> SkillMeta:
         body=body,
         server_tools=server_tools,
         client_tools=client_tools,
+        depends_on=depends_on,
     )
 
 
@@ -110,7 +115,7 @@ def _load_skill_meta(skill: Any) -> SkillMeta:
     if os.path.isfile(md_path):
         meta = parse_skill_md(md_path)
     else:
-        meta = SkillMeta(name=skill.name, description="", body="", server_tools=[], client_tools=[])
+        meta = SkillMeta(name=skill.name, description="", body="", server_tools=[], client_tools=[], depends_on=[])
 
     skill._skill_meta_cache = meta
     return meta
@@ -289,28 +294,60 @@ class SkillProvider:
             return True
         return bool(set(meta.client_tools) & client_tool_names)
 
+    def _resolve_with_deps(self, active_skills: List[Any]) -> List[Any]:
+        """Expand active skill list to include ``depends_on`` skills.
+
+        Recursively walks each active skill's dependency chain and returns
+        the union of active + dependency skills (duplicates removed, insertion
+        order preserved).  Circular references are safe — the ``visited`` set
+        prevents infinite recursion.
+        """
+        result_names: set[str] = set()
+        result: list[Any] = []
+
+        def _add(skill: Any) -> None:
+            if skill.name in result_names:
+                return
+            result_names.add(skill.name)
+            result.append(skill)
+            meta = _load_skill_meta(skill)
+            for dep_name in meta.depends_on:
+                dep = self._skills.get(dep_name)
+                if dep is not None:
+                    _add(dep)
+
+        for s in active_skills:
+            _add(s)
+        return result
+
     def get_active_tool_schemas(self, client_tool_names: Set[str]) -> List[Dict[str, Any]]:
         """Return tool schemas only for skills whose client_tools are satisfied.
 
+        Also includes tool schemas from dependency skills (``depends_on``).
         Strips ``display_name`` from each schema since it is not part of
         the LLM tool interface.
         """
+        active = [s for s in self._skills.values() if self._is_skill_active(s, client_tool_names)]
+        resolved = self._resolve_with_deps(active)
         schemas: List[Dict[str, Any]] = []
-        for skill in self._skills.values():
-            if self._is_skill_active(skill, client_tool_names):
-                for s in skill.tool_schemas:
-                    clean = {k: v for k, v in s.items() if k != "display_name"}
-                    schemas.append(clean)
+        for skill in resolved:
+            for s in skill.tool_schemas:
+                clean = {k: v for k, v in s.items() if k != "display_name"}
+                schemas.append(clean)
         return schemas
 
     def get_active_guide_prompts(self, client_tool_names: Set[str]) -> List[str]:
-        """Return guide prompts only for skills whose client_tools are satisfied."""
+        """Return guide prompts only for skills whose client_tools are satisfied.
+
+        Also includes guide prompts from dependency skills (``depends_on``).
+        """
+        active = [s for s in self._skills.values() if self._is_skill_active(s, client_tool_names)]
+        resolved = self._resolve_with_deps(active)
         prompts: List[str] = []
-        for skill in self._skills.values():
-            if self._is_skill_active(skill, client_tool_names):
-                body = _load_guide_prompt(skill)
-                if body:
-                    prompts.append(f'<tool_guide name="{skill.name}">\n{body}\n</tool_guide>')
+        for skill in resolved:
+            body = _load_guide_prompt(skill)
+            if body:
+                prompts.append(f'<tool_guide name="{skill.name}">\n{body}\n</tool_guide>')
         return prompts
 
     # ------------------------------------------------------------------
