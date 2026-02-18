@@ -315,7 +315,7 @@ class TestPipelinedChainDepth:
     async def test_depth_is_tracked_per_chain_hop(self, monkeypatch):
         """All sibling root calls should get first-hop follow-ups."""
 
-        async def _fake_safe(tc: ToolCallInfo, session_id: str = "") -> tuple[ToolCallInfo, str]:
+        async def _fake_safe(tc: ToolCallInfo, session_id: str = "", cwd: str = "") -> tuple[ToolCallInfo, str]:
             delays = {"start_a": 0.01, "start_b": 0.02, "start_c": 0.03}
             await asyncio.sleep(delays.get(tc.name, 0))
             return tc, '{"ok": true}'

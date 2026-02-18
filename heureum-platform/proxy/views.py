@@ -83,6 +83,8 @@ def proxy_to_agent(request: Request) -> Response:
         if "metadata" not in data or data["metadata"] is None:
             data["metadata"] = {}
         data["metadata"]["session_id"] = session_id
+        if session_obj.cwd:
+            data["metadata"]["cwd"] = session_obj.cwd
 
         # Create a Response object
         response_obj = ResponseModel.objects.create(

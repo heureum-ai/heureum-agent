@@ -71,17 +71,23 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         timeout: Optional[int] = None,
         ctx: Context = None,
     ) -> str:
-        """Execute a bash command in the working directory.
+        """Run a bash command on the server. Use this for server-side tasks \
+such as installing packages, running scripts, or processing files in \
+the server workspace. For commands on the user's local machine, \
+prefer 'bash' instead.
 
-        Returns stdout/stderr. Output is truncated to the last 2000 lines
-        or 50 KB (whichever is hit first).
+        Returns stdout/stderr, truncated to 2000 lines or 50 KB.
 
         Args:
             command: Bash command to execute.
             timeout: Optional timeout in seconds.
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = BashTool(session_ctx.cwd)
+            result = await local_tool.execute("", command, timeout)
+            return result.content[0]["text"]
+        elif session_ctx:
             return "Error: bash is not available in cloud session mode. Use read/write/edit to work with files."
         result = await bash_tool.execute("", command, timeout)
         return result.content[0]["text"]
@@ -94,11 +100,12 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         limit: Optional[int] = None,
         ctx: Context = None,
     ) -> str:
-        """Read the contents of a file.
+        """Read a file in the server workspace. Use this for server-side \
+files such as web fetch results (session_file paths) or generated outputs. \
+For the user's local files, prefer 'read' instead.
 
-        Supports text files and images (jpg, png, gif, webp).
-        Text output is truncated to 2000 lines or 50 KB.
-        Use offset/limit for large files.
+        Supports text and images (jpg, png, gif, webp). Text output is \
+truncated to 2000 lines or 50 KB; use offset/limit for large files.
 
         Args:
             path: File path (relative or absolute).
@@ -106,7 +113,10 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
             limit: Maximum number of lines to read.
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = ReadTool(session_ctx.cwd)
+            result = await local_tool.execute("", path, offset, limit)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(ReadTool, ReadToolOptions, PlatformReadOperations, client)
             result = await platform_tool.execute("", path, offset, limit)
@@ -122,17 +132,21 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         content: str,
         ctx: Context = None,
     ) -> str:
-        """Write content to a file, creating it if it doesn't exist.
+        """Write a file to the server workspace. Use this for server-generated \
+content such as reports, processed data, or documents. For writing to \
+the user's local filesystem, prefer 'write' instead.
 
-        Overwrites if the file already exists.
-        Automatically creates parent directories.
+        Creates parent directories automatically; overwrites existing files.
 
         Args:
             path: File path (relative or absolute).
             content: Text content to write.
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = WriteTool(session_ctx.cwd)
+            result = await local_tool.execute("", path, content)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(WriteTool, WriteToolOptions, PlatformWriteOperations, client)
             result = await platform_tool.execute("", path, content)
@@ -148,10 +162,11 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         new_text: str,
         ctx: Context = None,
     ) -> str:
-        """Edit a file by replacing exact text.
+        """Edit a file in the server workspace by replacing exact text. \
+Use this for server-side files only. For the user's local files, \
+prefer 'edit' instead.
 
-        The old_text must match exactly (including whitespace).
-        Use this for precise, surgical edits.
+        The old_text must match exactly including whitespace.
 
         Args:
             path: File path (relative or absolute).
@@ -159,7 +174,10 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
             new_text: New text to replace the old text with.
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = EditTool(session_ctx.cwd)
+            result = await local_tool.execute("", path, old_text, new_text)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(EditTool, EditToolOptions, PlatformEditOperations, client)
             result = await platform_tool.execute("", path, old_text, new_text)
@@ -178,7 +196,9 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         limit: Optional[int] = None,
         ctx: Context = None,
     ) -> str:
-        """Search file contents for a pattern.
+        """Search file contents in the server workspace. Use this to search \
+server-side files such as web fetch results or generated outputs. \
+For the user's local files, prefer 'grep' instead.
 
         Returns matching lines with file paths and line numbers.
 
@@ -194,7 +214,11 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         import tempfile
 
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = GrepTool(session_ctx.cwd)
+            result = await local_tool.execute("", pattern, path, glob, ignore_case, True, context, limit)
+            return result.content[0]["text"]
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             tmp_dir = tempfile.mkdtemp()
             try:
@@ -246,10 +270,11 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         limit: Optional[int] = None,
         ctx: Context = None,
     ) -> str:
-        """Search for files by glob pattern.
+        """Find files in the server workspace by glob pattern. Use this to \
+locate server-side files such as fetched web pages or generated outputs. \
+For the user's local filesystem, prefer 'find' instead.
 
-        Returns matching file paths relative to the search directory.
-        Respects .gitignore.
+        Returns matching paths relative to the search directory. Respects .gitignore.
 
         Args:
             pattern: Glob pattern, e.g. '*.ts', '**/*.json'.
@@ -257,7 +282,10 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
             limit: Maximum number of results (default: 1000).
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = FindTool(session_ctx.cwd)
+            result = await local_tool.execute("", pattern, path, limit)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(FindTool, FindToolOptions, PlatformFindOperations, client)
             result = await platform_tool.execute("", pattern, path, limit)
@@ -272,17 +300,21 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         limit: Optional[int] = None,
         ctx: Context = None,
     ) -> str:
-        """List directory contents.
+        """List directory contents in the server workspace. Use this to \
+browse server-side files and directories. For the user's local \
+directories, prefer 'ls' instead.
 
         Returns entries sorted alphabetically with '/' suffix for directories.
-        Includes dotfiles.
 
         Args:
             path: Directory to list (default: working directory).
             limit: Maximum number of entries (default: 500).
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = LsTool(session_ctx.cwd)
+            result = await local_tool.execute("", path, limit)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(LsTool, LsToolOptions, PlatformLsOperations, client)
             result = await platform_tool.execute("", path, limit)
@@ -296,13 +328,17 @@ def register_filesystem_tools(mcp: FastMCP) -> None:
         path: str,
         ctx: Context = None,
     ) -> str:
-        """Delete a file.
+        """Delete a file in the server workspace. Use this to remove \
+server-side files only.
 
         Args:
             path: File path (relative or absolute).
         """
         session_ctx = extract_session_context(ctx) if ctx else None
-        if session_ctx:
+        if session_ctx and session_ctx.cwd:
+            local_tool = DeleteTool(session_ctx.cwd)
+            result = await local_tool.execute("", path)
+        elif session_ctx:
             client = get_platform_client(session_ctx)
             platform_tool = _make_platform_tool(DeleteTool, DeleteToolOptions, PlatformDeleteOperations, client)
             result = await platform_tool.execute("", path)

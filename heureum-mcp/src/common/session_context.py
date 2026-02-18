@@ -29,6 +29,7 @@ class SessionContext:
 
     session_id: str
     platform_api_url: str
+    cwd: str = ""
 
 
 def extract_session_context(ctx) -> Optional[SessionContext]:
@@ -49,10 +50,12 @@ def extract_session_context(ctx) -> Optional[SessionContext]:
         meta = ctx.request_context.meta
         session_id = getattr(meta, "session_id", None)
         platform_api_url = getattr(meta, "platform_api_url", None)
+        cwd = getattr(meta, "cwd", "") or ""
         if session_id and platform_api_url:
             return SessionContext(
                 session_id=session_id,
                 platform_api_url=platform_api_url,
+                cwd=cwd,
             )
     except (AttributeError, ValueError):
         logger.debug("Session context extraction failed (no meta on ctx)", exc_info=True)

@@ -447,7 +447,7 @@ class TestToolApproval:
         data = resp.json()
 
         assert data["status"] == "completed"
-        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"}, session_id="s1")
+        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"}, session_id="s1", cwd="")
         # Pending state was cleaned up
         assert "s1" not in mock_mcp._pending_tool_calls
         # NOT auto-approved for future calls

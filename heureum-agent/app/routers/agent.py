@@ -149,7 +149,7 @@ async def _ensure_initialized() -> None:
         _initialized = True
 
 
-async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = "") -> str:
+async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = "") -> str:
     """Dispatch tool execution by name."""
     # Skill-owned tools
     if skill_provider.get_skill_for_tool(name) is not None:
@@ -157,7 +157,7 @@ async def _execute_tool(name: str, arguments: Dict[str, Any], session_id: str = 
 
     # MCP-discovered tools (filesystem, browser, etc.)
     if mcp_client.is_server_tool(name):
-        return await mcp_client.call_tool(name, arguments, session_id=session_id)
+        return await mcp_client.call_tool(name, arguments, session_id=session_id, cwd=cwd)
 
     raise NotImplementedError(f"Tool executor not implemented: {name}")
 
@@ -173,9 +173,10 @@ async def execute_tool_endpoint(request: dict) -> dict:
     name = request.get("name", "")
     arguments = request.get("arguments", {})
     session_id = request.get("session_id", "")
+    cwd = request.get("cwd", "")
 
     try:
-        result = await _execute_tool(name, arguments, session_id=session_id)
+        result = await _execute_tool(name, arguments, session_id=session_id, cwd=cwd)
         return {"output": result, "success": True}
     except NotImplementedError:
         return {"output": f"Error: unknown server tool '{name}'", "success": False}
@@ -236,6 +237,13 @@ def _extract_session_id(request: ResponseRequest) -> str:
         if sid:
             return sid
     return f"session_{uuid.uuid4().hex[:16]}"
+
+
+def _extract_cwd(request: ResponseRequest) -> str:
+    """Extract cwd from metadata (injected by platform proxy)."""
+    if request.metadata:
+        return request.metadata.get("cwd", "")
+    return ""
 
 
 def _text_output(
@@ -300,10 +308,10 @@ def _build_response(
     )
 
 
-async def _safe_execute_tool(tc: ToolCallInfo, session_id: str = "") -> tuple[ToolCallInfo, str]:
+async def _safe_execute_tool(tc: ToolCallInfo, session_id: str = "", cwd: str = "") -> tuple[ToolCallInfo, str]:
     """Execute a single tool call and convert failures to readable tool output."""
     try:
-        result = await _execute_tool(tc.name, tc.args, session_id=session_id)
+        result = await _execute_tool(tc.name, tc.args, session_id=session_id, cwd=cwd)
         if not result or (isinstance(result, str) and not result.strip()):
             return tc, f"[EMPTY_RESULT] {tc.name} returned no output. Consider retrying with different parameters."
         return tc, result
@@ -316,12 +324,13 @@ async def _execute_tool_calls(
     tool_calls: List[ToolCallInfo],
     all_output_items: list,
     session_id: str = "",
+    cwd: str = "",
 ) -> List[Message]:
     """Execute tool calls in parallel and append call/result items to history."""
     if not tool_calls:
         return []
 
-    results = await asyncio.gather(*[_safe_execute_tool(tc, session_id=session_id) for tc in tool_calls])
+    results = await asyncio.gather(*[_safe_execute_tool(tc, session_id=session_id, cwd=cwd) for tc in tool_calls])
 
     tool_results: List[Message] = []
     for tc, result_str in results:
@@ -374,6 +383,7 @@ async def _execute_tool_calls_pipelined(
     session_id: str,
     max_depth: int = 0,
     result_queue: Optional[asyncio.Queue] = None,
+    cwd: str = "",
 ) -> Tuple[List[Message], List[ToolCallInfo]]:
     """Execute tool calls with pipelined chain follow-ups.
 
@@ -409,7 +419,7 @@ async def _execute_tool_calls_pipelined(
 
     # Map asyncio.Task -> (ToolCallInfo, hop_depth)
     pending: Dict[asyncio.Task, Tuple[ToolCallInfo, int]] = {
-        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id)): (tc, 0)
+        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id, cwd=cwd)): (tc, 0)
         for tc in tool_calls
     }
 
@@ -436,7 +446,7 @@ async def _execute_tool_calls_pipelined(
                 )
                 for fu in follow_ups:
                     pending[
-                        asyncio.create_task(_safe_execute_tool(fu, session_id=session_id))
+                        asyncio.create_task(_safe_execute_tool(fu, session_id=session_id, cwd=cwd))
                     ] = (fu, hop_depth + 1)
 
     if result_queue is not None:
@@ -454,6 +464,7 @@ async def _handle_chained_calls(
     tool_call_count: int,
     all_output_items: list,
     iteration: int | None = None,
+    cwd: str = "",
 ) -> ResponseObject | None:
     """Execute or gate chained calls, looping through follow-up chains.
 
@@ -472,7 +483,7 @@ async def _handle_chained_calls(
 
         # Chain follow-ups bypass approval — the source tool's approval
         # implicitly authorizes all steps in the chain.
-        chain_results = await _execute_tool_calls(current, all_output_items, session_id=session_id)
+        chain_results = await _execute_tool_calls(current, all_output_items, session_id=session_id, cwd=cwd)
         await agent_service.append_tool_interaction(
             session_id,
             [],
@@ -494,6 +505,7 @@ async def _handle_approval_continuation(
     model: str,
     total_usage: Usage,
     tool_call_count: int,
+    cwd: str = "",
 ) -> tuple[ResponseObject | None, List[Message], int, Usage]:
     """Handle approval answer from previous INCOMPLETE response, if present."""
     approval_result = mcp_client.handle_approval_response(session_id, messages)
@@ -511,7 +523,7 @@ async def _handle_approval_continuation(
         ApprovalChoice.ALLOW_ONCE.decision,
         ApprovalChoice.ALWAYS_ALLOW.decision,
     ):
-        tool_results = await _execute_tool_calls(pending_tcs, all_output_items, session_id=session_id)
+        tool_results = await _execute_tool_calls(pending_tcs, all_output_items, session_id=session_id, cwd=cwd)
         tool_call_count += len(tool_results)
     else:
         tool_results = [
@@ -543,6 +555,7 @@ async def _handle_approval_continuation(
             total_usage,
             tool_call_count,
             all_output_items,
+            cwd=cwd,
         )
         if chain_resp:
             return chain_resp, [], tool_call_count, total_usage
@@ -557,6 +570,7 @@ async def _handle_approval_continuation(
             total_usage,
             tool_call_count,
             all_output_items,
+            cwd=cwd,
         )
         if chain_resp:
             return chain_resp, [], tool_call_count, total_usage
@@ -661,6 +675,7 @@ class _LoopContext:
     total_usage: Usage = field(default_factory=Usage.zero)
     tool_call_count: int = 0
     output_items: list = field(default_factory=list)
+    cwd: str = ""
 
 
 class _AgentLoopRunner:
@@ -706,29 +721,31 @@ class _AgentLoopRunner:
             self.ctx.model,
             self.ctx.total_usage,
             self.ctx.tool_call_count,
+            cwd=self.ctx.cwd,
         )
         self.ctx.messages = messages
         self.ctx.tool_call_count = tool_call_count
         self.ctx.total_usage = total_usage
         return resp
 
-    def _augmented_instructions(self) -> str | None:
-        """Return instructions augmented with skill state prompts."""
-        base = self._original_instructions or ""
-        state_prompts = skill_provider.get_state_prompts(self.ctx.session_id)
-        if state_prompts:
-            combined = "\n\n".join(state_prompts)
-            return f"{base}\n\n{combined}" if base else combined
-        return base or None
+    def _get_instructions(self) -> str | None:
+        """Return user-provided instructions (without runtime state)."""
+        return self._original_instructions or None
+
+    def _get_state_prompts(self) -> list[str] | None:
+        """Return per-turn runtime state prompts from active skills."""
+        prompts = skill_provider.get_state_prompts(self.ctx.session_id)
+        return prompts or None
 
     async def _run_tool_iterations(self) -> ResponseObject:
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             result = await agent_service.process_messages_with_tools(
                 messages=self.ctx.messages,
                 session_id=self.ctx.session_id,
-                instructions=self._augmented_instructions(),
+                instructions=self._get_instructions(),
                 client_tool_schemas=self.ctx.client_tool_schemas,
                 client_tool_prompts=self.ctx.client_tool_prompts,
+                state_prompts=self._get_state_prompts(),
             )
             self.ctx.session_id = result.session_id
             if result.usage:
@@ -848,6 +865,7 @@ class _AgentLoopRunner:
         # as results arrive (FIRST_COMPLETED), instead of waiting for all.
         pipeline_results, deferred_approval = await _execute_tool_calls_pipelined(
             server_calls, self.ctx.output_items, session_id=self.ctx.session_id,
+            cwd=self.ctx.cwd,
         )
         self.ctx.tool_call_count += len(pipeline_results)
 
@@ -883,6 +901,7 @@ class _AgentLoopRunner:
                 self.ctx.tool_call_count,
                 self.ctx.output_items,
                 iteration=iteration,
+                cwd=self.ctx.cwd,
             )
             if chain_resp:
                 return chain_resp
@@ -983,6 +1002,7 @@ class _AgentLoopRunner:
             instructions=self.ctx.request.instructions,
             client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
             client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
+            state_prompts=self._get_state_prompts(),
         ):
             delta = agent_service._extract_text(chunk.content) if chunk.content else ""
             if delta:
@@ -1027,7 +1047,7 @@ class _AgentLoopRunner:
         """Stream the tool iteration loop, yielding SSE events."""
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             # Inject current TODO state into instructions for this iteration
-            self.ctx.request.instructions = self._augmented_instructions()
+            self.ctx.request.instructions = self._get_instructions()
 
             accumulated = None
 
@@ -1216,6 +1236,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
 
     created_at = int(time.time())
     session_id = _extract_session_id(request)
+    cwd = _extract_cwd(request)
     model = settings.AGENT_MODEL
     messages = _parse_input(request)
 
@@ -1260,6 +1281,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
                     model or "default",
                     Usage.zero(),
                     0,
+                    cwd=cwd,
                 )
             )
             if approval_early:
@@ -1289,6 +1311,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         total_usage=approval_usage,
         tool_call_count=approval_tc_count,
         output_items=approval_output_items,
+        cwd=cwd,
     )
 
     if request.stream:
