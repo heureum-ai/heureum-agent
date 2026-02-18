@@ -279,7 +279,7 @@ def register_search(mcp: FastMCP) -> None:
     async def web_search(
         query: str,
         search_depth: str = "basic",
-        max_results: int = 1,
+        max_results: int = 3,
         country: Optional[str] = None,
     ) -> str:
         """Search the web for current information. Returns brief snippets \

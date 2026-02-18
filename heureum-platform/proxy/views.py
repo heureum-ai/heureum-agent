@@ -225,6 +225,35 @@ def proxy_to_agent(request: Request) -> Response:
         )
 
 
+@api_view(["GET"])
+def proxy_subagent_status(request: Request, session_id: str) -> Response:
+    """Proxy sub-agent status requests to the agent service."""
+    try:
+        agent_url = f"{settings.AGENT_SERVICE_URL}/v1/subagent/status/{session_id}"
+        agent_response = _agent_client.get(agent_url)
+        try:
+            payload = agent_response.json()
+        except ValueError:
+            payload = {"detail": agent_response.text}
+        return Response(payload, status=agent_response.status_code)
+    except httpx.HTTPError as e:
+        return Response(
+            {
+                "type": "server_error",
+                "message": f"Agent service error: {str(e)}",
+            },
+            status=http_status.HTTP_502_BAD_GATEWAY,
+        )
+    except Exception as e:
+        return Response(
+            {
+                "type": "server_error",
+                "message": f"Server error: {str(e)}",
+            },
+            status=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 def _calculate_cost(input_tokens, output_tokens, pricing):
     """Calculate input and output costs given token counts and pricing."""
     if not pricing:
