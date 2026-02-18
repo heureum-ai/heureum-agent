@@ -221,18 +221,18 @@ class TestUserMessageDeduplication:
         user_msgs = Message.objects.filter(session_id=TEST_SESSION_ID, role="user", type="message")
         assert user_msgs.count() == 1
 
-    def test_function_call_items_still_stored_on_followup(self, api_client, session):
-        """function_call and function_call_output items should still be persisted on follow-up."""
+    def test_function_call_output_stored_on_followup(self, api_client, session):
+        """function_call_output should be persisted from follow-up input.
+        function_call is NOT saved here — it is persisted by _persist_output
+        when the agent first returns it."""
         # Initial request
         self._post_proxy(api_client, _make_initial_request_payload("Hi"))
 
         # Follow-up with tool results
         self._post_proxy(api_client, _make_followup_request_payload("Hi"))
 
-        # function_call and function_call_output from INPUT should be stored
-        fc_msgs = Message.objects.filter(session_id=TEST_SESSION_ID, type="function_call")
+        # function_call_output from INPUT should be stored
         fco_msgs = Message.objects.filter(session_id=TEST_SESSION_ID, type="function_call_output")
-        assert fc_msgs.count() >= 1
         assert fco_msgs.count() >= 1
 
     def test_new_user_message_in_separate_turn_is_stored(self, api_client, session):
@@ -480,6 +480,81 @@ class TestPersistOutput:
 
         todo_msgs = Message.objects.filter(session_id="persist-test", type="todo_state")
         assert todo_msgs.count() == 1
+
+    def test_todo_state_gets_cost_when_no_text_message(self, response_obj):
+        """When a response has only tool calls and a todo_state (no text message),
+        the todo_state should carry the response-level cost so it's visible in the UI."""
+        pricing = MagicMock()
+        pricing.input_cost_per_mtok = Decimal("0.3")
+        pricing.output_cost_per_mtok = Decimal("2.5")
+
+        data = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "id": "fc_ask",
+                    "name": "ask_question",
+                    "call_id": "call_ask",
+                    "arguments": json.dumps({"question": "How?", "choices": ["A", "B"]}),
+                    "status": "completed",
+                },
+                {
+                    "type": "function_call",
+                    "id": "fc_todo",
+                    "name": "manage_todo",
+                    "call_id": "call_todo",
+                    "arguments": json.dumps({"action": "create", "task": "Plan"}),
+                    "status": "completed",
+                },
+            ],
+            "model": "gemini-2.5-flash",
+            "usage": {"input_tokens": 40000, "output_tokens": 600, "total_tokens": 40600},
+        }
+        todo = {"task": "Plan", "steps": [{"description": "Step 1", "status": "pending"}]}
+
+        with patch.object(ModelPricing, "get_for_model", return_value=pricing):
+            _persist_output(data, "persist-test", response_obj, todo_state=todo)
+
+        todo_msg = Message.objects.get(session_id="persist-test", type="todo_state")
+        assert todo_msg.input_tokens == 40000
+        assert todo_msg.output_tokens == 600
+        assert todo_msg.total_tokens == 40600
+        # 40000 * 0.3 / 1M = 0.012, 600 * 2.5 / 1M = 0.0015
+        assert todo_msg.input_cost == Decimal("40000") * Decimal("0.3") / Decimal("1000000")
+        assert todo_msg.output_cost == Decimal("600") * Decimal("2.5") / Decimal("1000000")
+        assert todo_msg.total_cost == todo_msg.input_cost + todo_msg.output_cost
+
+    def test_todo_state_no_cost_when_text_message_exists(self, response_obj):
+        """When a response has both a text message and a todo_state,
+        the todo_state should NOT get extra cost (text message already carries it)."""
+        pricing = MagicMock()
+        pricing.input_cost_per_mtok = Decimal("0.3")
+        pricing.output_cost_per_mtok = Decimal("2.5")
+
+        data = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Here is the plan."}],
+                    "status": "completed",
+                },
+            ],
+            "model": "gemini-2.5-flash",
+            "usage": {"input_tokens": 100000, "output_tokens": 5000, "total_tokens": 105000},
+        }
+        item_usages = [
+            {"type": "text", "usage": {"input_tokens": 13000, "output_tokens": 600, "total_tokens": 13600}},
+        ]
+        todo = {"task": "Plan", "steps": [{"description": "Step 1", "status": "completed"}]}
+
+        with patch.object(ModelPricing, "get_for_model", return_value=pricing):
+            _persist_output(data, "persist-test", response_obj, item_usages=item_usages, todo_state=todo)
+
+        todo_msg = Message.objects.get(session_id="persist-test", type="todo_state")
+        assert todo_msg.input_tokens == 0
+        assert todo_msg.output_tokens == 0
+        assert todo_msg.total_cost == Decimal(0)
 
     def test_updates_response_usage(self, response_obj):
         data = {
