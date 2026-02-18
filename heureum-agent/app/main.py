@@ -9,7 +9,7 @@ from typing import AsyncGenerator
 
 from app.config import settings
 from app.routers import agent
-from app.routers.agent import create_response
+from app.routers.agent import create_response, generate_title
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -54,6 +54,12 @@ open_responses_router.add_api_route(
     create_response,
     methods=["POST"],
     response_model=None,
+    tags=["open-responses"],
+)
+open_responses_router.add_api_route(
+    "/title",
+    generate_title,
+    methods=["POST"],
     tags=["open-responses"],
 )
 app.include_router(open_responses_router, prefix="/v1")

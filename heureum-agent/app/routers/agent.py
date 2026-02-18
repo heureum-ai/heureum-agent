@@ -304,6 +304,8 @@ async def _safe_execute_tool(tc: ToolCallInfo, session_id: str = "") -> tuple[To
     """Execute a single tool call and convert failures to readable tool output."""
     try:
         result = await _execute_tool(tc.name, tc.args, session_id=session_id)
+        if not result or (isinstance(result, str) and not result.strip()):
+            return tc, f"[EMPTY_RESULT] {tc.name} returned no output. Consider retrying with different parameters."
         return tc, result
     except Exception as e:
         logger.warning("Tool execution failed (%s): %s", tc.name, e)
@@ -383,6 +385,10 @@ async def _execute_tool_calls_pipelined(
     in-flight task set immediately.  Calls that require approval are
     collected in a ``deferred_approval`` list and returned to the caller.
 
+    Chain depth is tracked per in-flight tool call (hop count from the
+    original tool), not per event-loop cycle.  This avoids completion-order
+    races where late-finishing sibling calls lose their follow-ups.
+
     Args:
         tool_calls: Initial batch of tool calls.
         all_output_items: Mutable list for output items (modified in place).
@@ -400,11 +406,10 @@ async def _execute_tool_calls_pipelined(
 
     all_results: List[Message] = []
     deferred_approval: List[ToolCallInfo] = []
-    depth = 0
 
-    # Map asyncio.Task -> ToolCallInfo for the current in-flight set.
-    pending: Dict[asyncio.Task, ToolCallInfo] = {
-        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id)): tc
+    # Map asyncio.Task -> (ToolCallInfo, hop_depth)
+    pending: Dict[asyncio.Task, Tuple[ToolCallInfo, int]] = {
+        asyncio.create_task(_safe_execute_tool(tc, session_id=session_id)): (tc, 0)
         for tc in tool_calls
     }
 
@@ -412,7 +417,7 @@ async def _execute_tool_calls_pipelined(
         done, _ = await asyncio.wait(pending.keys(), return_when=asyncio.FIRST_COMPLETED)
 
         for task in done:
-            tc_orig = pending.pop(task)
+            _tc_orig, hop_depth = pending.pop(task)
             tc_done, result_str = task.result()
 
             msg = _make_tool_result_message(tc_done, result_str)
@@ -425,20 +430,14 @@ async def _execute_tool_calls_pipelined(
             # Detect chain follow-ups for this single result.
             # Chain follow-ups bypass approval — the user already approved
             # the source tool, implicitly authorizing its chain steps.
-            if depth < max_depth:
+            if hop_depth < max_depth:
                 follow_ups = chain_registry.build_per_result(
                     tc_done, msg, session_id=session_id,
                 )
                 for fu in follow_ups:
                     pending[
                         asyncio.create_task(_safe_execute_tool(fu, session_id=session_id))
-                    ] = fu
-
-        depth += 1
-        if depth >= max_depth and pending:
-            # Still tasks in-flight from earlier depths — let them finish
-            # but don't spawn new chain steps.
-            continue
+                    ] = (fu, hop_depth + 1)
 
     if result_queue is not None:
         await result_queue.put(None)  # sentinel
@@ -1052,7 +1051,6 @@ class _AgentLoopRunner:
                         self.ctx.session_id, self.ctx.messages, partial_text,
                         usage=usage.model_dump(), assistant_lc_message=accumulated,
                     )
-                    yield _sse_event({"type": "response.output_text.delta", "delta": partial_text})
                     guidance = skill_provider.build_retry_guidance(
                         self.ctx.session_id, partial_text,
                     )
@@ -1167,13 +1165,19 @@ class _AgentLoopRunner:
                         "status": "completed",
                     })
 
-            # Emit live skill state (e.g. TODO progress) if any
-            _live_state = skill_provider.get_live_state(self.ctx.session_id)
-            if _live_state:
-                yield _sse_event({
-                    "type": "response.todo.updated",
-                    "todo": _live_state,
-                })
+            # Emit live skill state only when manage_todo was executed
+            # this iteration (avoids re-emitting stale TODO from previous turns).
+            _todo_updated = any(
+                isinstance(item, FunctionToolCall) and item.name == "manage_todo"
+                for item in self.ctx.output_items[items_before:]
+            )
+            if _todo_updated:
+                _live_state = skill_provider.get_live_state(self.ctx.session_id)
+                if _live_state:
+                    yield _sse_event({
+                        "type": "response.todo.updated",
+                        "todo": _live_state,
+                    })
 
             if response:
                 evt = "response.completed" if response.status == ResponseStatus.COMPLETED else "response.incomplete"
