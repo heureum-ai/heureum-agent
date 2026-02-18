@@ -109,3 +109,47 @@ class TestMaybeSaveToSession:
         # Should return original without session_file (non-fatal)
         data = json.loads(out)
         assert "session_file" not in data
+
+    @patch("src.tools.web.fetch.get_platform_client")
+    async def test_saves_full_text_not_truncated(self, mock_get_client, session_ctx):
+        """full_text가 제공되면 truncated된 text 대신 전체 콘텐츠를 저장."""
+        mock_client = AsyncMock()
+        mock_get_client.return_value = mock_client
+
+        full_content = "Full content " * 1000
+        truncated_content = "Truncated..."
+
+        result_json = json.dumps({
+            "text": truncated_content,
+            "url": "https://example.com/article",
+            "title": "Hello",
+        })
+        out = await _maybe_save_to_session(
+            result_json, "https://example.com/article", session_ctx,
+            full_text=full_content,
+        )
+        data = json.loads(out)
+
+        assert "session_file" in data
+        mock_client.write_file.assert_called_once()
+        saved_content = mock_client.write_file.call_args[0][1]
+        assert saved_content == full_content
+        assert saved_content != truncated_content
+
+    async def test_saves_full_text_locally(self, tmp_path):
+        """Non-session mode에서 full_text가 로컬 파일에 저장되는지 확인."""
+        with patch("src.tools.web.fetch.settings") as mock_settings:
+            mock_settings.FILESYSTEM_CWD = str(tmp_path)
+            full_content = "Full local content " * 500
+            result_json = json.dumps({
+                "text": "truncated",
+                "url": "https://example.com/local",
+            })
+            out = await _maybe_save_to_session(
+                result_json, "https://example.com/local", None,
+                full_text=full_content,
+            )
+            data = json.loads(out)
+            assert "session_file" in data
+            with open(data["session_file"], encoding="utf-8") as f:
+                assert f.read() == full_content

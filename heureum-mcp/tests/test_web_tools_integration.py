@@ -8,8 +8,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from src.common.cache import search_cache, fetch_cache
+from src.common.cache import search_cache, fetch_cache, raw_content_cache
 from src.common.security import SSRFError
+from src.tools.web.search import SearchItem, SearchResponse
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -19,11 +20,11 @@ from src.common.security import SSRFError
 def _make_server():
     """Create a web MCP server with Tavily search + web_fetch registered."""
     from mcp.server.fastmcp import FastMCP
-    from src.tools.web.tavily import register_tavily_search
+    from src.tools.web.search import register_search
     from src.tools.web.fetch import register_web_fetch
 
     mcp = FastMCP("test-web-integration")
-    register_tavily_search(mcp)
+    register_search(mcp)
     register_web_fetch(mcp)
     return mcp
 
@@ -45,15 +46,17 @@ def _clear_caches():
     """Clear caches before each test to prevent cross-test pollution."""
     search_cache.clear()
     fetch_cache.clear()
+    raw_content_cache.clear()
     yield
     search_cache.clear()
     fetch_cache.clear()
+    raw_content_cache.clear()
 
 
 @pytest.fixture(autouse=True)
 def _disable_cache():
     """Disable cache by default. Tests that need cache can override."""
-    with patch("src.tools.web.tavily.settings") as mock_search_settings, \
+    with patch("src.tools.web.search.settings") as mock_search_settings, \
          patch("src.tools.web.fetch.settings") as mock_fetch_settings:
         # Copy real settings attrs, then disable cache
         from src.config import settings as real_settings
@@ -67,12 +70,18 @@ def _disable_cache():
         yield mock_search_settings, mock_fetch_settings
 
 
-def _build_tavily_response(results: list[dict] | None = None) -> dict:
-    """Build a fake Tavily API response dict."""
-    return {
-        "query": "test",
-        "results": results or [],
-    }
+def _build_search_response(results: list[dict] | None = None) -> SearchResponse:
+    """Build a SearchResponse from Tavily-style dicts."""
+    items = [
+        SearchItem(
+            title=r.get("title", ""),
+            url=r.get("url", ""),
+            content=r.get("content"),
+            score=r.get("score"),
+        )
+        for r in (results or [])
+    ]
+    return SearchResponse(provider="tavily", results=items)
 
 
 def _build_httpx_response(
@@ -94,19 +103,19 @@ def _build_httpx_response(
     return resp
 
 
-def _patch_tavily(tavily_response):
-    """Context manager that patches _search_tavily to return given response."""
+def _patch_tavily(results: list[dict] | None = None):
+    """Context manager that patches _search_tavily to return SearchResponse."""
     return patch(
-        "src.tools.web.tavily._search_tavily",
+        "src.tools.web.search._search_tavily",
         new_callable=AsyncMock,
-        return_value=tavily_response,
+        return_value=_build_search_response(results),
     )
 
 
 def _patch_tavily_error(exc):
     """Context manager that patches _search_tavily to raise."""
     return patch(
-        "src.tools.web.tavily._search_tavily",
+        "src.tools.web.search._search_tavily",
         new_callable=AsyncMock,
         side_effect=exc,
     )
@@ -141,23 +150,20 @@ class TestSearchThenFetch:
     async def test_single_result_pipeline(self, tmp_path):
         """검색 결과 1개 → fetch 성공."""
         tmp_path_str = str(tmp_path)
-        tavily_resp = _build_tavily_response([
-            {
-                "title": "Example Page",
-                "url": "https://example.com/article",
-                "content": "Example Domain is reserved for documentation.",
-                "score": 0.95,
-            },
-        ])
         httpx_resp = _build_httpx_response(
             url="https://example.com/article",
             html="<html><head><title>Example Page</title></head>"
                  "<body><p>This is the full article content.</p></body></html>",
         )
 
-        with _patch_tavily(tavily_resp):
+        with _patch_tavily([{
+            "title": "Example Page",
+            "url": "https://example.com/article",
+            "content": "Example Domain is reserved for documentation.",
+            "score": 0.95,
+        }]):
             server = _make_server()
-            search = await _call_tool(server, "web_search", {"query": "example 2026"})
+            search = await _call_tool(server, "search", {"query": "example 2026"})
 
         assert search["count"] == 1
         url = search["results"][0]["url"]
@@ -165,11 +171,11 @@ class TestSearchThenFetch:
 
         with _patch_fetch(httpx_resp), patch("src.tools.web.fetch.settings") as mock_s:
             mock_s.FILESYSTEM_CWD = tmp_path_str
-            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            fetch = await _call_tool(server, "web_fetch", {"url": url})
+            fetch = await _call_tool(server, "fetch", {"url": url})
 
         assert fetch["status"] == 200
         assert fetch["title"] == "Example Page"
@@ -179,14 +185,12 @@ class TestSearchThenFetch:
     @pytest.mark.asyncio
     async def test_multiple_results(self):
         """복수 결과가 있는 검색 결과."""
-        tavily_resp = _build_tavily_response([
+        with _patch_tavily([
             {"title": "Python Docs", "url": "https://python.org/docs", "content": "Python info.", "score": 0.9},
             {"title": "Rust Lang", "url": "https://rust-lang.org", "content": "Rust info.", "score": 0.8},
-        ])
-
-        with _patch_tavily(tavily_resp):
+        ]):
             server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "python rust 2026"})
+            result = await _call_tool(server, "search", {"query": "python rust 2026"})
 
         assert result["count"] == 2
         urls = [r["url"] for r in result["results"]]
@@ -204,11 +208,9 @@ class TestWebSearch:
     @pytest.mark.asyncio
     async def test_no_results(self):
         """검색 결과가 없는 경우."""
-        tavily_resp = _build_tavily_response([])
-
-        with _patch_tavily(tavily_resp):
+        with _patch_tavily([]):
             server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "nothing"})
+            result = await _call_tool(server, "search", {"query": "nothing"})
 
         assert result["count"] == 0
         assert result["results"] == []
@@ -218,7 +220,7 @@ class TestWebSearch:
         """Tavily API 에러 시 에러 JSON 반환."""
         with _patch_tavily_error(RuntimeError("API rate limit")):
             server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "test"})
+            result = await _call_tool(server, "search", {"query": "test"})
 
         assert result["error"] == "RuntimeError"
         assert "rate limit" in result["message"].lower()
@@ -231,37 +233,29 @@ class TestWebSearch:
         mock_search_settings.OPENAI_API_KEY = ""
 
         server = _make_server()
-        result = await _call_tool(server, "web_search", {"query": "test"})
+        result = await _call_tool(server, "search", {"query": "test"})
 
         assert result["error"] == "missing_api_key"
 
-    @pytest.mark.asyncio
-    async def test_utm_params_stripped(self):
+    def test_utm_params_stripped(self):
         """UTM 트래킹 파라미터가 URL에서 제거되는지 확인."""
-        url_with_utm = "https://example.com/page?utm_source=google&utm_medium=cpc&id=123"
-        tavily_resp = _build_tavily_response([
-            {"title": "Page", "url": url_with_utm, "content": "Result text.", "score": 0.9},
-        ])
+        from src.tools.web.search import _strip_tracking_params
 
-        with _patch_tavily(tavily_resp):
-            server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "utm test"})
+        url = "https://example.com/page?utm_source=google&utm_medium=cpc&id=123"
+        cleaned = _strip_tracking_params(url)
 
-        cleaned_url = result["results"][0]["url"]
-        assert "utm_source" not in cleaned_url
-        assert "utm_medium" not in cleaned_url
-        assert "id=123" in cleaned_url
+        assert "utm_source" not in cleaned
+        assert "utm_medium" not in cleaned
+        assert "id=123" in cleaned
 
     @pytest.mark.asyncio
     async def test_empty_content(self):
         """Tavily가 content 없는 결과 반환 시 처리."""
-        tavily_resp = _build_tavily_response([
+        with _patch_tavily([
             {"title": "Empty", "url": "https://example.com", "content": "", "score": 0.5},
-        ])
-
-        with _patch_tavily(tavily_resp):
+        ]):
             server = _make_server()
-            result = await _call_tool(server, "web_search", {"query": "empty content test"})
+            result = await _call_tool(server, "search", {"query": "empty content test"})
 
         assert result["count"] == 1
         assert result["results"][0]["content"] == ""
@@ -284,7 +278,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "web_fetch", {"url": "https://example.com/success"})
+            result = await _call_tool(server, "fetch", {"url": "https://example.com/success"})
 
         assert result["status"] == 200
         assert result["title"] == "Hello"
@@ -296,7 +290,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(SSRFError("Blocked: private IP")):
-            result = await _call_tool(server, "web_fetch", {"url": "http://169.254.169.254/metadata"})
+            result = await _call_tool(server, "fetch", {"url": "http://169.254.169.254/metadata"})
 
         assert result["blocked"] is True
         assert "private" in result["error"].lower()
@@ -313,7 +307,7 @@ class TestWebFetch:
         with _patch_fetch_error(
             httpx.HTTPStatusError("Forbidden", request=MagicMock(), response=mock_response)
         ):
-            result = await _call_tool(server, "web_fetch", {"url": "https://example.com/secret"})
+            result = await _call_tool(server, "fetch", {"url": "https://example.com/secret"})
 
         assert "403" in result["error"]
 
@@ -323,7 +317,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(httpx.TimeoutException("timed out")):
-            result = await _call_tool(server, "web_fetch", {"url": "https://slow.com"})
+            result = await _call_tool(server, "fetch", {"url": "https://slow.com"})
 
         assert "timed out" in result["error"].lower()
 
@@ -339,15 +333,15 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "web_fetch", {"url": "https://example.com/500"})
+            result = await _call_tool(server, "fetch", {"url": "https://example.com/500"})
 
         assert "500" in result["error"]
         assert result["status"] == 500
 
     @pytest.mark.asyncio
     async def test_pagination_truncation(self):
-        """start_index + max_length로 pagination 동작 확인."""
-        long_body = "A" * 200
+        """session_file 저장 시 full content가 저장되고 pagination이 리셋됨."""
+        long_body = "A" * 10000
         resp = _build_httpx_response(
             url="https://example.com/long",
             html=f"<html><body><p>{long_body}</p></body></html>",
@@ -355,14 +349,51 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch(resp):
-            result = await _call_tool(server, "web_fetch", {
+            result = await _call_tool(server, "fetch", {
                 "url": "https://example.com/long",
-                "start_index": 50,
-                "max_length": 100,
+                "start_index": 0,
+                "max_length": 5000,
             })
 
+        # session_file saved → pagination reset to full content
+        assert "session_file" in result
+        assert result["truncated"] is False
+        assert result["start_index"] == 0
+        assert result["total_length"] > 0
+        assert result["length"] == result["total_length"]
+        assert result["remaining"] == 0
+        assert result["next_start_index"] is None
+
+    @pytest.mark.asyncio
+    async def test_pagination_metadata_without_session(self):
+        """_build_result의 raw pagination 로직 검증 (session 저장 전)."""
+        from src.tools.web.fetch import _build_result
+        import time
+
+        text = "X" * 10000
+        result_json, full_text = _build_result(
+            url="https://example.com/long",
+            final_url="https://example.com/long",
+            status_code=200,
+            content_type="text/html",
+            title="Test",
+            text=text,
+            extractor="readability",
+            mode="markdown",
+            max_length=5000,
+            start_index=0,
+            start_time=time.monotonic(),
+            source_url="https://example.com/long",
+        )
+        result = json.loads(result_json)
+
         assert result["truncated"] is True
-        assert result["length"] == 100
+        assert result["start_index"] == 0
+        assert result["total_length"] == 10000
+        assert result["remaining"] > 0
+        assert result["next_start_index"] is not None
+        # Invariant: start_index + length + remaining == total_length
+        assert result["start_index"] + result["length"] + result["remaining"] == result["total_length"]
 
     @pytest.mark.asyncio
     async def test_json_content_type(self, tmp_path):
@@ -377,11 +408,11 @@ class TestWebFetch:
 
         with _patch_fetch(resp), patch("src.tools.web.fetch.settings") as mock_s:
             mock_s.FILESYSTEM_CWD = str(tmp_path)
-            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "web_fetch", {"url": "https://api.example.com/data"})
+            result = await _call_tool(server, "fetch", {"url": "https://api.example.com/data"})
 
         assert result["content_type"] == "application/json"
         assert "session_file" in result
@@ -395,7 +426,7 @@ class TestWebFetch:
         server = _make_server()
 
         with _patch_fetch_error(ConnectionError("DNS resolution failed")):
-            result = await _call_tool(server, "web_fetch", {"url": "https://nonexistent.invalid"})
+            result = await _call_tool(server, "fetch", {"url": "https://nonexistent.invalid"})
 
         assert "dns" in result["error"].lower()
 
@@ -413,16 +444,16 @@ class TestCaching:
         mock_search_settings, _ = _disable_cache
         mock_search_settings.CACHE_ENABLED = True
 
-        tavily_resp = _build_tavily_response([
+        sr = _build_search_response([
             {"title": "Cached", "url": "https://example.com/cached", "content": "Cached text.", "score": 0.9},
         ])
 
-        mock_fn = AsyncMock(return_value=tavily_resp)
-        with patch("src.tools.web.tavily._search_tavily", mock_fn):
+        mock_fn = AsyncMock(return_value=sr)
+        with patch("src.tools.web.search._search_tavily", mock_fn):
             server = _make_server()
 
-            first = await _call_tool(server, "web_search", {"query": "cache test"})
-            second = await _call_tool(server, "web_search", {"query": "cache test"})
+            first = await _call_tool(server, "search", {"query": "cache test"})
+            second = await _call_tool(server, "search", {"query": "cache test"})
 
         assert first["cached"] is False
         assert second["cached"] is True
@@ -430,7 +461,7 @@ class TestCaching:
 
     @pytest.mark.asyncio
     async def test_fetch_cache_hit(self, _disable_cache):
-        """같은 URL 두 번 fetch 시 캐시 동작 확인."""
+        """같은 URL 두 번 fetch 시 raw content cache로 두 번째는 HTTP 스킵."""
         _, mock_fetch_settings = _disable_cache
         mock_fetch_settings.CACHE_ENABLED = True
 
@@ -440,11 +471,48 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "web_fetch", {"url": "https://example.com/cache-test"})
-            second = await _call_tool(server, "web_fetch", {"url": "https://example.com/cache-test"})
+            first = await _call_tool(server, "fetch", {"url": "https://example.com/cache-test"})
+            second = await _call_tool(server, "fetch", {"url": "https://example.com/cache-test"})
 
         assert first["cached"] is False
         assert second["cached"] is True
+        assert mock_guard.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_pagination_reuses_raw_cache(self, _disable_cache):
+        """같은 URL 두 번째 fetch는 raw cache에서 가져와 HTTP 재요청 안 함."""
+        _, mock_fetch_settings = _disable_cache
+        mock_fetch_settings.CACHE_ENABLED = True
+
+        long_body = "B" * 10000
+        resp = _build_httpx_response(
+            url="https://example.com/paginated",
+            html=f"<html><body><p>{long_body}</p></body></html>",
+        )
+        mock_guard = AsyncMock(return_value=resp)
+
+        with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
+            server = _make_server()
+
+            page1 = await _call_tool(server, "fetch", {
+                "url": "https://example.com/paginated",
+                "max_length": 5000,
+                "start_index": 0,
+            })
+
+            # session_file 저장으로 pagination 리셋됨
+            assert page1["session_file"] is not None
+            assert page1["remaining"] == 0
+
+            # 같은 URL 두 번째 호출: raw cache에서 가져옴
+            page2 = await _call_tool(server, "fetch", {
+                "url": "https://example.com/paginated",
+                "max_length": 5000,
+                "start_index": 0,
+            })
+
+        assert page2["cached"] is True
+        # Only one actual HTTP fetch
         assert mock_guard.call_count == 1
 
     @pytest.mark.asyncio
@@ -459,11 +527,11 @@ class TestCaching:
         with patch("src.tools.web.fetch.fetch_with_ssrf_guard", mock_guard):
             server = _make_server()
 
-            first = await _call_tool(server, "web_fetch", {
+            first = await _call_tool(server, "fetch", {
                 "url": "https://example.com/auth",
                 "headers": {"Authorization": "Bearer tok"},
             })
-            second = await _call_tool(server, "web_fetch", {
+            second = await _call_tool(server, "fetch", {
                 "url": "https://example.com/auth",
                 "headers": {"Authorization": "Bearer tok"},
             })
@@ -483,7 +551,7 @@ class TestFirecrawlFallback:
     @staticmethod
     def _firecrawl_result():
         """Build a mock Firecrawl ExtractedContent result for testing."""
-        from src.tools.web.fetch_utils import ExtractedContent
+        from src.tools.web.fetch import ExtractedContent
         return ExtractedContent(
             title="Firecrawl Title",
             text="# Content from Firecrawl",
@@ -499,11 +567,11 @@ class TestFirecrawlFallback:
              patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
              patch("src.tools.web.fetch.settings") as mock_s:
             mock_s.FILESYSTEM_CWD = str(tmp_path)
-            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "web_fetch", {"url": "https://blocked.com"})
+            result = await _call_tool(server, "fetch", {"url": "https://blocked.com"})
 
         assert result["extractor"] == "firecrawl"
         assert result["title"] == "Firecrawl Title"
@@ -526,7 +594,7 @@ class TestFirecrawlFallback:
                 new_callable=AsyncMock,
                 return_value=self._firecrawl_result(),
             ):
-                result = await _call_tool(server, "web_fetch", {"url": "https://error.com"})
+                result = await _call_tool(server, "fetch", {"url": "https://error.com"})
 
         assert result["extractor"] == "firecrawl"
 
@@ -543,11 +611,11 @@ class TestFirecrawlFallback:
              patch("src.tools.web.fetch.fetch_firecrawl", new_callable=AsyncMock, return_value=self._firecrawl_result()), \
              patch("src.tools.web.fetch.settings") as mock_s:
             mock_s.FILESYSTEM_CWD = str(tmp_path)
-            mock_s.WEB_FETCH_MAX_LENGTH = 50000
+            mock_s.WEB_FETCH_MAX_LENGTH = 5000
             mock_s.WEB_FETCH_TIMEOUT = 30
             mock_s.WEB_FETCH_USER_AGENT = "test"
             mock_s.CACHE_ENABLED = False
-            result = await _call_tool(server, "web_fetch", {"url": "https://spa.com"})
+            result = await _call_tool(server, "fetch", {"url": "https://spa.com"})
 
         assert result["extractor"] == "firecrawl"
         assert "session_file" in result
@@ -569,7 +637,7 @@ class TestFirecrawlFallback:
                 new_callable=AsyncMock,
                 return_value=None,
             ):
-                result = await _call_tool(server, "web_fetch", {"url": "https://error.com"})
+                result = await _call_tool(server, "fetch", {"url": "https://error.com"})
 
         assert "403" in result["error"]
         assert result["status"] == 403
@@ -586,6 +654,6 @@ class TestChainMetadata:
         """web_search에 chain이 없어야 한다."""
         server = _make_server()
         tools = server._tool_manager._tools
-        meta = tools["web_search"].meta or {}
+        meta = tools["search"].meta or {}
         chain = meta.get("chain", [])
         assert len(chain) == 0

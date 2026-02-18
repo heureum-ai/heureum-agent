@@ -49,8 +49,8 @@ class Settings(BaseSettings):
     )
 
     SERVERS: dict[str, ServerConfig] = {
-        "web": ServerConfig(name="heureum-web", port=3001),
-        "filesystem": ServerConfig(name="heureum-filesystem", port=3002),
+        "web": ServerConfig(name="web", port=3001),
+        "filesystem": ServerConfig(name="filesystem", port=3002),
     }
 
     FILESYSTEM_CWD: str = "/tmp"
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
 
     TAVILY_API_KEY: str = ""
 
-    WEB_FETCH_MAX_LENGTH: int = 50000
+    WEB_FETCH_MAX_LENGTH: int = 5000
     WEB_FETCH_TIMEOUT: float = 30.0
     WEB_FETCH_USER_AGENT: str = "HeureumMCP/0.1"
 
