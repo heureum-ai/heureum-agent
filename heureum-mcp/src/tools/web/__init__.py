@@ -5,9 +5,7 @@
 from mcp.server.fastmcp import FastMCP
 
 from src.tools.web.fetch import register_web_fetch
-from src.tools.web.search import register_web_search
 from src.tools.web.tavily import register_tavily_search
-from src.config import settings
 
 
 def register_web_tools(mcp: FastMCP) -> None:
@@ -16,6 +14,6 @@ def register_web_tools(mcp: FastMCP) -> None:
     Args:
         mcp (FastMCP): The MCP server instance to register tools with.
     """
+    # Tavily-backed tool includes internal OpenAI fallback.
     register_tavily_search(mcp)
-    # register_web_search(mcp)
     register_web_fetch(mcp)

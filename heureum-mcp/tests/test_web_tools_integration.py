@@ -228,6 +228,7 @@ class TestWebSearch:
         """TAVILY_API_KEY가 비어있으면 에러 반환."""
         mock_search_settings, _ = _disable_cache
         mock_search_settings.TAVILY_API_KEY = ""
+        mock_search_settings.OPENAI_API_KEY = ""
 
         server = _make_server()
         result = await _call_tool(server, "web_search", {"query": "test"})

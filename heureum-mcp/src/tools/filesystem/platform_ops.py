@@ -297,13 +297,32 @@ class PlatformLsOperations:
     def __init__(self, client: PlatformFileClient) -> None:
         self._client = client
 
-    def exists(self, absolute_path: str) -> bool:
-        """Synchronous check — always True for root, otherwise True.
+    def _list_by_prefix(self, prefix: str) -> List[Dict[str, Any]]:
+        """List files synchronously using a prefix filter."""
+        with httpx.Client(timeout=30.0) as client:
+            params: Dict[str, str] = {}
+            if prefix:
+                params["path"] = prefix
+            resp = client.get(f"{self._client._base_url}/", params=params)
 
-        Platform storage is flat; any listed prefix is considered existing.
-        The actual check happens in readdir.
-        """
-        return True
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        return data if isinstance(data, list) else []
+
+    def exists(self, absolute_path: str) -> bool:
+        """Check whether a path exists as file or directory prefix."""
+        session_path = self._client.to_session_path(absolute_path).rstrip("/")
+        if not session_path or session_path == ".":
+            return True
+
+        files = self._list_by_prefix(session_path)
+        dir_prefix = session_path + "/"
+        for f in files:
+            path = f.get("path", "")
+            if path == session_path or path.startswith(dir_prefix):
+                return True
+        return False
 
     def stat(self, absolute_path: str) -> _PlatformStatResult:
         """Return a stat-like object.
@@ -311,12 +330,27 @@ class PlatformLsOperations:
         The session root is always a directory.  Anything else is treated
         as a directory if it appears as a prefix in the file listing.
         """
-        session_path = self._client.to_session_path(absolute_path)
+        session_path = self._client.to_session_path(absolute_path).rstrip("/")
         # Root or empty = directory
         if not session_path or session_path == ".":
             return _PlatformStatResult(is_dir=True)
-        # Entries with trailing "/" or that are prefixes = directory
-        return _PlatformStatResult(is_dir=True)
+
+        files = self._list_by_prefix(session_path)
+        has_exact = False
+        has_children = False
+        dir_prefix = session_path + "/"
+        for f in files:
+            path = f.get("path", "")
+            if path == session_path:
+                has_exact = True
+            elif path.startswith(dir_prefix):
+                has_children = True
+
+        if has_children:
+            return _PlatformStatResult(is_dir=True)
+        if has_exact:
+            return _PlatformStatResult(is_dir=False)
+        raise FileNotFoundError(f"Path not found: {session_path}")
 
     def readdir(self, absolute_path: str) -> List[str]:
         """Synchronous readdir — raises because Platform API is async.
@@ -327,17 +361,7 @@ class PlatformLsOperations:
         session_path = self._client.to_session_path(absolute_path)
         prefix = (session_path + "/") if session_path and session_path != "." else ""
 
-        # Synchronous HTTP call (runs inside to_thread)
-        with httpx.Client(timeout=30.0) as client:
-            params: Dict[str, str] = {}
-            if prefix:
-                params["path"] = prefix
-            resp = client.get(f"{self._client._base_url}/", params=params)
-
-        if resp.status_code != 200:
-            return []
-
-        files = resp.json()
+        files = self._list_by_prefix(prefix)
         entries: List[str] = []
         seen_dirs: set[str] = set()
 
@@ -402,12 +426,15 @@ class PlatformFindOperations:
         limit: int,
     ) -> List[str]:
         """Find files matching glob pattern via Platform API list + fnmatch."""
-        prefix = self._client.to_session_path(cwd)
+        prefix = self._client.to_session_path(cwd).strip("/")
         all_files = await self._client.list_files(prefix)
+        dir_prefix = f"{prefix}/" if prefix else ""
 
         results: List[str] = []
         for f in all_files:
             file_path: str = f.get("path", "")
+            if prefix and file_path != prefix and not file_path.startswith(dir_prefix):
+                continue
             # Match against the pattern
             basename = os.path.basename(file_path)
             if fnmatch.fnmatch(basename, pattern) or fnmatch.fnmatch(file_path, pattern):
@@ -415,7 +442,10 @@ class PlatformFindOperations:
                 skip = any(self._matches_pattern(file_path, ign) for ign in ignore)
                 if not skip:
                     # Return absolute paths so FindTool can relativize correctly
-                    abs_path = f"{cwd}/{file_path}" if not file_path.startswith(cwd) else file_path
+                    if file_path.startswith("/"):
+                        abs_path = file_path
+                    else:
+                        abs_path = f"{self._client._cwd}/{file_path}"
                     results.append(abs_path)
                     if len(results) >= limit:
                         break

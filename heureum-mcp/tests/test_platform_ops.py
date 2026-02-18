@@ -320,6 +320,26 @@ class TestPlatformLsOperations:
         # "notes" should appear only once (deduped)
         assert entries.count("notes") == 1
 
+    def test_stat_file_is_not_directory(self, client):
+        """stat() should classify exact file paths as files."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"path": "report.txt", "size": 10, "content_type": "text/plain"},
+        ]
+
+        with patch("src.tools.filesystem.platform_ops.httpx.Client") as MockClient:
+            mock_client_instance = MagicMock()
+            mock_client_instance.__enter__ = MagicMock(return_value=mock_client_instance)
+            mock_client_instance.__exit__ = MagicMock(return_value=False)
+            mock_client_instance.get.return_value = mock_resp
+            MockClient.return_value = mock_client_instance
+
+            ops = PlatformLsOperations(client)
+            stat = ops.stat("/session/report.txt")
+
+        assert stat.is_directory() is False
+
 
 # ---------------------------------------------------------------------------
 # PlatformFindOperations
@@ -379,4 +399,20 @@ class TestPlatformFindOperations:
         assert len(results) == 1
         assert results[0] == "/session/src/main.py"
 
+    @pytest.mark.asyncio
+    async def test_glob_respects_cwd_prefix_without_duplication(self, client):
+        """When cwd is nested, returned absolute paths should not duplicate prefixes."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = [
+            {"path": "docs/a.md", "size": 100, "content_type": "text/markdown"},
+            {"path": "docs/b.md", "size": 120, "content_type": "text/markdown"},
+        ]
+        client._http = AsyncMock()
+        client._http.get = AsyncMock(return_value=mock_resp)
+
+        ops = PlatformFindOperations(client)
+        results = await ops.glob("*.md", "/session/docs", [], 100)
+
+        assert results == ["/session/docs/a.md", "/session/docs/b.md"]
 
