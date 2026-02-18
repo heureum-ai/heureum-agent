@@ -152,11 +152,33 @@ class TestTavilySearch:
     async def test_missing_api_key(self, _disable_cache):
         """TAVILY_API_KEY가 비어있으면 에러 반환."""
         _disable_cache.TAVILY_API_KEY = ""
+        _disable_cache.OPENAI_API_KEY = ""
 
         server = _make_tavily_server()
         result = await _call_tool(server, "web_search", {"query": "test"})
 
         assert result["error"] == "missing_api_key"
+
+    @pytest.mark.asyncio
+    async def test_openai_fallback_when_tavily_key_missing(self, _disable_cache):
+        """Tavily key 없고 OpenAI key 있으면 OpenAI fallback 사용."""
+        _disable_cache.TAVILY_API_KEY = ""
+        _disable_cache.OPENAI_API_KEY = "sk-test"
+
+        fallback = {
+            "provider": "openai",
+            "model": "gpt-4o-mini-search-preview",
+            "results": [{"title": "Fallback", "url": "https://example.com/fallback"}],
+        }
+
+        with patch("src.tools.web.tavily._search_openai", new_callable=AsyncMock, return_value=fallback) as mock_openai:
+            server = _make_tavily_server()
+            result = await _call_tool(server, "web_search", {"query": "fallback test"})
+
+        assert result["provider"] == "openai"
+        assert result["count"] == 1
+        assert result["results"][0]["url"] == "https://example.com/fallback"
+        mock_openai.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_utm_params_stripped(self):

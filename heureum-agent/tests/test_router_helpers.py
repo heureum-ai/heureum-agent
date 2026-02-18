@@ -2,16 +2,22 @@
 
 """Tests for pure helper functions in app.routers.agent."""
 
+import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 from uuid import UUID
 
 import pytest
 from app.config import settings
-from app.models import Message
+from app.models import Message, ToolCallInfo
+import app.routers.agent as agent_module
 from app.routers.agent import (
+    _AgentLoopRunner,
     _build_response,
     _extract_session_id,
+    _execute_tool_calls_pipelined,
+    _LoopContext,
     _parse_input,
     _text_output,
     _tool_call_output,
@@ -302,3 +308,80 @@ class TestBuildResponse:
 class TestConstants:
     def test_max_agent_iterations(self):
         assert settings.MAX_AGENT_ITERATIONS == 50
+
+
+class TestPipelinedChainDepth:
+    @pytest.mark.asyncio
+    async def test_depth_is_tracked_per_chain_hop(self, monkeypatch):
+        """All sibling root calls should get first-hop follow-ups."""
+
+        async def _fake_safe(tc: ToolCallInfo, session_id: str = "") -> tuple[ToolCallInfo, str]:
+            delays = {"start_a": 0.01, "start_b": 0.02, "start_c": 0.03}
+            await asyncio.sleep(delays.get(tc.name, 0))
+            return tc, '{"ok": true}'
+
+        def _fake_build(tc: ToolCallInfo, *_args, **_kwargs):
+            if tc.name.startswith("start_"):
+                suffix = tc.name[-1]
+                return [ToolCallInfo(name=f"follow_{suffix}", args={}, id=f"fu_{tc.id}")]
+            return []
+
+        monkeypatch.setattr(agent_module, "_safe_execute_tool", _fake_safe)
+        monkeypatch.setattr(agent_module.chain_registry, "build_per_result", _fake_build)
+
+        roots = [
+            ToolCallInfo(name="start_a", args={}, id="a"),
+            ToolCallInfo(name="start_b", args={}, id="b"),
+            ToolCallInfo(name="start_c", args={}, id="c"),
+        ]
+        results, _ = await _execute_tool_calls_pipelined(
+            roots,
+            all_output_items=[],
+            session_id="s1",
+            max_depth=1,
+        )
+
+        names = [m.tool_name for m in results]
+        assert "follow_a" in names
+        assert "follow_b" in names
+        assert "follow_c" in names
+
+
+class TestStreamRetries:
+    @pytest.mark.asyncio
+    async def test_unfinished_work_does_not_emit_duplicate_delta(self, monkeypatch):
+        """Partial text should be streamed once per iteration."""
+
+        class _FakeAccum:
+            def __init__(self):
+                self.content = "PARTIAL"
+                self.tool_calls = []
+                self.usage_metadata = {}
+
+        async def _fake_stream(*_args, **_kwargs):
+            yield ("delta", "PARTIAL")
+            yield ("done", _FakeAccum())
+
+        monkeypatch.setattr(agent_module.skill_provider, "has_unfinished_work", lambda _sid: True)
+        monkeypatch.setattr(agent_module.skill_provider, "build_retry_guidance", lambda _sid, _t: "Continue")
+        monkeypatch.setattr(agent_module.agent_service, "_append_to_history", lambda *a, **k: None)
+        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+
+        ctx = _LoopContext(
+            request=SimpleNamespace(instructions=None),
+            created_at=0,
+            session_id="s1",
+            model="test-model",
+            messages=[],
+            tool_names=["dummy_tool"],
+            total_usage=Usage.zero(),
+        )
+        runner = _AgentLoopRunner(ctx)
+        monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
+
+        events = []
+        async for event in runner._stream_tool_iterations():
+            events.append(event)
+
+        deltas = [e for e in events if "response.output_text.delta" in e]
+        assert len(deltas) == 1
