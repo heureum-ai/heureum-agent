@@ -1204,14 +1204,13 @@ class AgentService:
                 lc_history.append(assistant_lc_message)
                 lc_history.extend(self._to_lc_message(msg) for msg in tool_results)
             else:
-                # Synthetic fallback: convert to plain text to avoid
-                # Gemini thought-signature validation failures.
-                summary = ", ".join(
-                    f"{tc.get('name', 'tool')}({tc.get('args', {})})" for tc in tool_calls
-                )
+                # Synthetic fallback: when the original AIMessage is not
+                # available (e.g. chain follow-ups), store tool interactions
+                # as plain messages.  Use minimal, non-echoable content to
+                # prevent the LLM from reproducing it in its next response.
                 lc_history.append(
                     AIMessage(
-                        content=f"[Tool calls executed: {summary}]" if summary else "[Tool calls executed]",
+                        content="",
                         additional_kwargs={
                             "synthetic_tool_calls": tool_calls,
                             "synthetic_usage": _normalize_usage_metadata(usage),
@@ -1219,9 +1218,11 @@ class AgentService:
                     )
                 )
                 for tr in tool_results:
-                    label = tr.tool_name or tr.tool_call_id or "tool"
                     lc_history.append(
-                        HumanMessage(content=f"[Tool result: {label}] {tr.content}")
+                        ToolMessage(
+                            content=tr.content,
+                            tool_call_id=tr.tool_call_id or "synthetic",
+                        )
                     )
 
             # Invalidate stale browser page snapshots now that the new

@@ -1139,10 +1139,10 @@ class _AgentLoopRunner:
             items_before = len(self.ctx.output_items)
             response = await self._handle_tool_call_iteration(result_obj, iteration)
 
-            # Emit SSE events for newly executed server tools
-            # (includes pipelined chain results that were appended during
-            # _execute_tool_calls_pipelined). Skip original LLM calls
-            # which were already emitted above.
+            # Emit SSE events for newly executed server tools.
+            # Skip original LLM function_call events (already emitted above)
+            # but always emit tool_result events so the frontend can update
+            # tool call status from "running" to "completed".
             for item in self.ctx.output_items[items_before:]:
                 if isinstance(item, FunctionToolCall) and item.name != "tool_approval":
                     if item.call_id in original_call_ids:
@@ -1160,8 +1160,6 @@ class _AgentLoopRunner:
                         "item": item_data,
                     })
                 elif isinstance(item, FunctionToolResult):
-                    if item.call_id in original_call_ids:
-                        continue
                     yield _sse_event({
                         "type": "response.tool_result.done",
                         "call_id": item.call_id,

@@ -582,8 +582,17 @@ export default function ChatPage() {
             appendStreamDelta(event.delta);
             break;
           case 'response.function_call.done': {
-            // When tool calls arrive after streamed text, persist text and clear
+            // When tool calls arrive after streamed text, persist text and clear.
+            // Flush previous iteration's tool calls to messages first so they
+            // render in the correct position relative to streamed text.
             const currentText = useChatStore.getState().streamingText;
+            if (currentText && collectedToolCalls.length > 0) {
+              for (const prevTc of collectedToolCalls) {
+                if (prevTc.status === 'running') prevTc.status = 'completed';
+                addMessage({ role: 'assistant', content: '', toolCall: prevTc });
+              }
+              collectedToolCalls.length = 0;
+            }
             if (currentText) {
               addMessage({ role: 'assistant', content: currentText });
               clearStreamingText();

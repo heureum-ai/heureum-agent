@@ -72,17 +72,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
   updateOrAddTodo: (todo) => {
     const msgs = get().messages;
-    let lastIdx = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].todo != null) { lastIdx = i; break; }
-    }
-    if (lastIdx >= 0) {
-      const updated = [...msgs];
-      updated[lastIdx] = { ...updated[lastIdx], todo };
-      set({ messages: updated });
-    } else {
-      set({ messages: [...msgs, { role: 'assistant', content: '', todo }] });
-    }
+    // Remove previous todo and re-add at the end so it always
+    // appears near the latest activity (like Claude Code's in-place update).
+    const filtered = msgs.filter(m => m.todo == null);
+    set({ messages: [...filtered, { role: 'assistant', content: '', todo }] });
   },
   setHasOlderMessages: (v) => set({ hasOlderMessages: v }),
   setLoadingOlder: (v) => set({ isLoadingOlder: v }),
