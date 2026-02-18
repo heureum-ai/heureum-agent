@@ -239,8 +239,9 @@ class TestPromptConstants:
     def test_identity_contains_app_name(self):
         assert "Heureum Agent" in AGENT_IDENTITY_PROMPT
 
-    def test_prompt_contains_model(self):
-        assert settings.AGENT_MODEL in AGENT_IDENTITY_PROMPT
+    def test_prompt_does_not_leak_model_name(self):
+        """Identity prompt must NOT reveal the underlying model name."""
+        assert settings.AGENT_MODEL not in AGENT_IDENTITY_PROMPT
 
     def test_compaction_prefix_value(self):
         assert COMPACTION_PREFIX == "[compaction] Previous conversation summary:"

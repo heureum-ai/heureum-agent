@@ -12,6 +12,7 @@ from app.config import settings
 from app.services.prompts.compaction import COMPACTION_PREFIX
 from app.services.agent_service import (
     AgentService,
+    _strip_tool_call_narration,
     _strip_tool_messages,
 )
 from app.services.providers.skill import SkillProvider
@@ -133,15 +134,15 @@ class TestPreparePromptAndTools:
         prompt, _ = svc._prepare_prompt_and_tools(client_tool_prompts=guides)
         assert '<tool_guide name="bash">' in prompt
 
-    def test_no_client_schemas_returns_always_active_server_tools(self):
-        """Without client schemas, only server tools with empty client_tools are included.
-        periodic_task requires web_search/web_fetch so it is excluded."""
+    def test_no_client_schemas_returns_all_server_tools(self):
+        """Without client schemas, all server skill tools are still included."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
         assert "manage_todo" in names
         assert "notify_user" in names
-        assert "manage_periodic_task" not in names
+        assert "manage_periodic_task" in names
+        assert "sessions_spawn" in names
 
     def test_periodic_task_included_with_web_search(self):
         """When client provides web_search, periodic_task tools are included."""
@@ -593,6 +594,68 @@ class TestOverflowRecovery:
                 [Message(role=MessageRole.USER, content="q2")],
                 session_id="s1",
             )
+
+
+class TestStripToolCallNarration:
+    """Tests for _strip_tool_call_narration — removes narration text from
+    AIMessages that carry tool_calls, without mutating originals."""
+
+    def test_strips_narration_from_tool_call_message(self):
+        """AIMessage with text + tool_calls → content cleared."""
+        original = AIMessage(
+            content="mcp_web__search를 사용하여 검색하겠습니다.",
+            tool_calls=[{"name": "mcp_web__search", "args": {"query": "test"}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        assert result[0].content == ""
+        assert result[0].tool_calls == original.tool_calls
+
+    def test_preserves_text_only_message(self):
+        """AIMessage with text only (no tool_calls) → unchanged."""
+        original = AIMessage(content="대한민국은 동아시아에 위치한 나라입니다.")
+        result = _strip_tool_call_narration([original])
+        assert result[0] is original
+        assert result[0].content == "대한민국은 동아시아에 위치한 나라입니다."
+
+    def test_preserves_tool_call_without_narration(self):
+        """AIMessage with empty content + tool_calls → unchanged."""
+        original = AIMessage(
+            content="",
+            tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        assert result[0] is original
+
+    def test_does_not_mutate_original(self):
+        """Original message in session storage must not be modified."""
+        original = AIMessage(
+            content="narration text",
+            tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        # Original is untouched
+        assert original.content == "narration text"
+        # Result has empty content
+        assert result[0].content == ""
+        assert result[0] is not original
+
+    def test_preserves_non_ai_messages(self):
+        """HumanMessage, ToolMessage, etc. pass through unchanged."""
+        messages = [
+            HumanMessage(content="한국에 대해 알려줘"),
+            AIMessage(
+                content="검색하겠습니다.",
+                tool_calls=[{"name": "search", "args": {}, "id": "c1"}],
+            ),
+            ToolMessage(content="검색 결과...", tool_call_id="c1"),
+            AIMessage(content="대한민국은..."),
+        ]
+        result = _strip_tool_call_narration(messages)
+        assert result[0] is messages[0]  # HumanMessage unchanged
+        assert result[1].content == ""   # narration stripped
+        assert result[1].tool_calls == messages[1].tool_calls
+        assert result[2] is messages[2]  # ToolMessage unchanged
+        assert result[3] is messages[3]  # text-only AI unchanged
 
 
 class TestToolMessageFallback:
@@ -1060,3 +1123,313 @@ class TestActualUsageBasedCompaction:
         """_get_last_input_tokens returns None for unknown session."""
         svc = _create_service()
         assert svc._get_last_input_tokens("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# _platform_message_to_lc
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeContent:
+    """Tests for _normalize_content — structured content extraction."""
+
+    def test_plain_string(self):
+        assert AgentService._normalize_content("hello") == "hello"
+
+    def test_empty_string(self):
+        assert AgentService._normalize_content("") == ""
+
+    def test_input_text_list(self):
+        content = [{"type": "input_text", "text": "ㅎㅇ"}]
+        assert AgentService._normalize_content(content) == "ㅎㅇ"
+
+    def test_output_text_list(self):
+        content = [{"type": "output_text", "text": "응답입니다"}]
+        assert AgentService._normalize_content(content) == "응답입니다"
+
+    def test_multiple_parts(self):
+        content = [
+            {"type": "input_text", "text": "Part 1"},
+            {"type": "input_text", "text": "Part 2"},
+        ]
+        assert AgentService._normalize_content(content) == "Part 1\nPart 2"
+
+    def test_mixed_types_in_list(self):
+        content = [
+            {"type": "output_text", "text": "Hello"},
+            {"type": "refusal", "refusal": "No can do"},
+        ]
+        assert AgentService._normalize_content(content) == "Hello"
+
+    def test_list_with_plain_strings(self):
+        content = ["hello", "world"]
+        assert AgentService._normalize_content(content) == "hello\nworld"
+
+    def test_dict_with_text(self):
+        content = {"type": "input_text", "text": "단일 dict"}
+        assert AgentService._normalize_content(content) == "단일 dict"
+
+    def test_none(self):
+        assert AgentService._normalize_content(None) == ""
+
+    def test_empty_list(self):
+        assert AgentService._normalize_content([]) == ""
+
+
+class TestPlatformMessageToLc:
+    """Tests for converting Platform DB records to LangChain messages."""
+
+    def test_user_message(self):
+        record = {"role": "user", "content": "Hello"}
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "Hello"
+
+    def test_assistant_message(self):
+        record = {"role": "assistant", "content": "Hi there"}
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.content == "Hi there"
+
+    def test_user_message_structured_content(self):
+        """Platform DB stores user text as [{"type": "input_text", "text": "..."}]."""
+        record = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ㅎㅇ"}],
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "ㅎㅇ"
+
+    def test_assistant_message_structured_content(self):
+        """Platform DB stores assistant text as [{"type": "output_text", "text": "..."}]."""
+        record = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "안녕하세요!"}],
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.content == "안녕하세요!"
+
+    def test_function_call_nested_content(self):
+        """Platform DB stores function_call data inside content dict."""
+        record = {
+            "type": "function_call",
+            "role": "tool",
+            "content": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "bash",
+                "arguments": '{"command": "ls"}',
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert len(msg.tool_calls) == 1
+        assert msg.tool_calls[0]["name"] == "bash"
+        assert msg.tool_calls[0]["args"] == {"command": "ls"}
+        assert msg.tool_calls[0]["id"] == "call_1"
+
+    def test_function_call_flat_fallback(self):
+        """Also supports flat format (call_id/name/args at record level)."""
+        record = {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "bash",
+            "arguments": '{"command": "ls"}',
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls[0]["name"] == "bash"
+        assert msg.tool_calls[0]["id"] == "call_1"
+
+    def test_function_call_output_nested_content(self):
+        """Platform DB stores function_call_output data inside content dict."""
+        record = {
+            "type": "function_call_output",
+            "role": "tool",
+            "content": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "file.txt\ndir/",
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, ToolMessage)
+        assert msg.content == "file.txt\ndir/"
+        assert msg.tool_call_id == "call_1"
+
+    def test_function_call_output_flat_fallback(self):
+        """Also supports flat format."""
+        record = {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "file.txt\ndir/",
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, ToolMessage)
+        assert msg.content == "file.txt\ndir/"
+        assert msg.tool_call_id == "call_1"
+
+    def test_empty_record(self):
+        msg = AgentService._platform_message_to_lc({})
+        assert msg is None
+
+    def test_system_message(self):
+        record = {"role": "system", "content": "You are helpful."}
+        msg = AgentService._platform_message_to_lc(record)
+        from langchain_core.messages import SystemMessage as SM
+        assert isinstance(msg, SM)
+
+    def test_function_call_with_dict_arguments(self):
+        record = {
+            "type": "function_call",
+            "content": {
+                "type": "function_call",
+                "call_id": "call_2",
+                "name": "read",
+                "arguments": {"path": "/a"},
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert msg.tool_calls[0]["args"] == {"path": "/a"}
+
+    def test_permission_grant_skipped(self):
+        record = {
+            "type": "permission_grant",
+            "role": "system",
+            "content": {"tool_name": "bash", "decision": "allow_once"},
+        }
+        assert AgentService._platform_message_to_lc(record) is None
+
+    def test_todo_state_skipped(self):
+        record = {
+            "type": "todo_state",
+            "role": "assistant",
+            "content": {"task": "test", "steps": []},
+        }
+        assert AgentService._platform_message_to_lc(record) is None
+
+
+# ---------------------------------------------------------------------------
+# _rehydrate_session
+# ---------------------------------------------------------------------------
+
+
+class TestRehydrateSession:
+    """Tests for session rehydration from Platform DB."""
+
+    @pytest.mark.asyncio
+    async def test_404_returns_none(self):
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 404
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("unknown-session")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mixed_messages_restored(self):
+        """Rehydration with actual Platform DB record shapes."""
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        records = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}],
+            },
+            {
+                "type": "function_call",
+                "role": "tool",
+                "content": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "bash",
+                    "arguments": '{"command": "ls"}',
+                },
+            },
+            {
+                "type": "function_call_output",
+                "role": "tool",
+                "content": {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": "file.txt",
+                },
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done"}],
+            },
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = records
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is not None
+        assert len(result) == 4
+        assert isinstance(result[0], HumanMessage)
+        assert isinstance(result[1], AIMessage)
+        assert isinstance(result[2], ToolMessage)
+        assert isinstance(result[3], AIMessage)
+
+    @pytest.mark.asyncio
+    async def test_platform_unreachable_returns_none(self):
+        import httpx
+
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        svc._platform_client.get = AsyncMock(
+            side_effect=httpx.ConnectError("Connection refused")
+        )
+
+        result = await svc._rehydrate_session("s1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_records_returns_none(self):
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = []
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_structured_content_normalized(self):
+        """Open Responses structured content (input_text/output_text) is flattened."""
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        records = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "ㅎㅇ"}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "안녕하세요!"}],
+            },
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = records
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is not None
+        assert len(result) == 2
+        assert isinstance(result[0], HumanMessage)
+        assert result[0].content == "ㅎㅇ"
+        assert isinstance(result[1], AIMessage)
+        assert result[1].content == "안녕하세요!"

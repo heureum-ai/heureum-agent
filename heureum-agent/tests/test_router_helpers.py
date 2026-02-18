@@ -385,3 +385,253 @@ class TestStreamRetries:
 
         deltas = [e for e in events if "response.output_text.delta" in e]
         assert len(deltas) == 1
+
+
+# ---------------------------------------------------------------------------
+# TestToolCallNarrationFiltering
+# ---------------------------------------------------------------------------
+
+
+async def _async_noop(*_a, **_k):
+    pass
+
+
+def _parse_sse_events(raw_events):
+    """Parse SSE 'data: {...}' strings into dicts."""
+    parsed = []
+    for raw in raw_events:
+        if raw.startswith("data: "):
+            payload = raw[len("data: "):].rstrip("\n")
+            if payload == "[DONE]":
+                continue
+            parsed.append(json.loads(payload))
+    return parsed
+
+
+class TestToolCallNarrationFiltering:
+    """Narration text must be discarded when the LLM generates text + tool_calls.
+
+    When the model produces text alongside tool_calls (e.g.
+    "mcp_web__search를 사용하여 검색하겠습니다."), that narration text
+    should NOT be shown to the user.  The streaming loop must emit a
+    ``response.output_text.abandoned`` event so the frontend clears
+    the streamed narration.
+    """
+
+    @staticmethod
+    def _text_accum(text):
+        return SimpleNamespace(content=text, tool_calls=[], usage_metadata={})
+
+    @staticmethod
+    def _tool_accum(text="", tool_calls=None):
+        if tool_calls is None:
+            tool_calls = [
+                {"name": "mcp_web__search", "args": {"query": "test"}, "id": "call_1"}
+            ]
+        return SimpleNamespace(content=text, tool_calls=tool_calls, usage_metadata={})
+
+    @staticmethod
+    def _make_ctx(**overrides):
+        defaults = dict(
+            request=SimpleNamespace(instructions=None),
+            created_at=0,
+            session_id="s1",
+            model="test-model",
+            messages=[],
+            tool_names=["mcp_web__search"],
+            total_usage=Usage.zero(),
+        )
+        defaults.update(overrides)
+        return _LoopContext(**defaults)
+
+    def _apply_common_patches(self, monkeypatch):
+        monkeypatch.setattr(
+            agent_module.skill_provider, "has_unfinished_work", lambda _sid: False,
+        )
+        monkeypatch.setattr(
+            agent_module.skill_provider, "should_force_text_only", lambda _sid: False,
+        )
+        monkeypatch.setattr(
+            agent_module.skill_provider, "clear_completed_plans", lambda _sid: None,
+        )
+        monkeypatch.setattr(
+            agent_module.skill_provider, "get_state_prompts", lambda _sid: [],
+        )
+        monkeypatch.setattr(
+            agent_module.agent_service, "_append_to_history", lambda *a, **k: None,
+        )
+        monkeypatch.setattr(
+            agent_module.agent_service, "append_tool_interaction", _async_noop,
+        )
+        monkeypatch.setattr(agent_module.settings, "ENABLE_SELF_EVALUATION", False)
+
+    # ------------------------------------------------------------------ #
+    # Case 1 (Normal): text-only → deltas + done, no abandoned            #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_text_only_streams_deltas_and_done(self, monkeypatch):
+        """Text-only LLM response: deltas streamed, done emitted, no abandoned."""
+        self._apply_common_patches(monkeypatch)
+        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+
+        accum = self._text_accum("대한민국은 동아시아에 위치한 나라입니다.")
+
+        async def _fake_stream(*_a, **_k):
+            yield ("delta", "대한민국은 ")
+            yield ("delta", "동아시아에 위치한 나라입니다.")
+            yield ("done", accum)
+
+        ctx = self._make_ctx()
+        runner = _AgentLoopRunner(ctx)
+        monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
+
+        raw_events = []
+        async for event in runner._stream_tool_iterations():
+            raw_events.append(event)
+
+        events = _parse_sse_events(raw_events)
+        types = [e["type"] for e in events]
+
+        deltas = [e for e in events if e["type"] == "response.output_text.delta"]
+        assert len(deltas) == 2
+        assert deltas[0]["delta"] == "대한민국은 "
+        assert deltas[1]["delta"] == "동아시아에 위치한 나라입니다."
+
+        assert "response.output_text.done" in types
+        assert "response.completed" in types
+        assert "response.output_text.abandoned" not in types
+
+    # ------------------------------------------------------------------ #
+    # Case 2 (Bug): text + tool_calls → abandoned MUST be emitted         #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_tool_call_with_narration_emits_abandoned(self, monkeypatch):
+        """When LLM generates narration text + tool_calls, abandoned event
+        must be emitted so the frontend discards the streamed narration."""
+        self._apply_common_patches(monkeypatch)
+        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+
+        narration = "mcp_web__search를 사용하여 검색하겠습니다."
+        accum = self._tool_accum(text=narration)
+
+        async def _fake_stream(*_a, **_k):
+            yield ("delta", narration)
+            yield ("done", accum)
+
+        ctx = self._make_ctx()
+        runner = _AgentLoopRunner(ctx)
+        monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
+        monkeypatch.setattr(
+            runner, "_handle_tool_call_iteration",
+            lambda *_a, **_k: _async_noop(),
+        )
+
+        raw_events = []
+        async for event in runner._stream_tool_iterations():
+            raw_events.append(event)
+
+        events = _parse_sse_events(raw_events)
+        types = [e["type"] for e in events]
+
+        # Narration was progressively streamed (unavoidable)
+        deltas = [e for e in events if e["type"] == "response.output_text.delta"]
+        assert len(deltas) == 1
+
+        # KEY: abandoned must be emitted to discard the narration
+        abandoned = [e for e in events if e["type"] == "response.output_text.abandoned"]
+        assert len(abandoned) == 1
+        assert abandoned[0]["reason"] == "tool_call"
+
+        # output_text.done should NOT appear (not a final text response)
+        assert "response.output_text.done" not in types
+
+    # ------------------------------------------------------------------ #
+    # Case 3: tool_call without narration text → abandoned still safe      #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_tool_call_without_narration_emits_abandoned(self, monkeypatch):
+        """Tool call with empty text: no deltas, abandoned still emitted (harmless)."""
+        self._apply_common_patches(monkeypatch)
+        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+
+        accum = self._tool_accum(text="")
+
+        async def _fake_stream(*_a, **_k):
+            yield ("done", accum)
+
+        ctx = self._make_ctx()
+        runner = _AgentLoopRunner(ctx)
+        monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
+        monkeypatch.setattr(
+            runner, "_handle_tool_call_iteration",
+            lambda *_a, **_k: _async_noop(),
+        )
+
+        raw_events = []
+        async for event in runner._stream_tool_iterations():
+            raw_events.append(event)
+
+        events = _parse_sse_events(raw_events)
+
+        deltas = [e for e in events if e["type"] == "response.output_text.delta"]
+        assert len(deltas) == 0
+
+        abandoned = [e for e in events if e["type"] == "response.output_text.abandoned"]
+        assert len(abandoned) == 1
+        assert abandoned[0]["reason"] == "tool_call"
+
+    # ------------------------------------------------------------------ #
+    # Case 4 (Multi-turn): iter1 narration discarded, iter2 text kept      #
+    # ------------------------------------------------------------------ #
+
+    @pytest.mark.asyncio
+    async def test_multi_iter_narration_discarded_final_text_kept(self, monkeypatch):
+        """Iteration 1: tool_call + narration → abandoned.
+        Iteration 2: text-only → done + completed."""
+        self._apply_common_patches(monkeypatch)
+        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 2)
+
+        narration = "검색 도구를 사용하겠습니다."
+        final_answer = "대한민국은 동아시아에 위치한 나라입니다."
+
+        call_count = 0
+
+        async def _fake_stream(*_a, **_k):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                yield ("delta", narration)
+                yield ("done", self._tool_accum(text=narration))
+            else:
+                yield ("delta", final_answer)
+                yield ("done", self._text_accum(final_answer))
+
+        ctx = self._make_ctx()
+        runner = _AgentLoopRunner(ctx)
+        monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
+        monkeypatch.setattr(
+            runner, "_handle_tool_call_iteration",
+            lambda *_a, **_k: _async_noop(),
+        )
+
+        raw_events = []
+        async for event in runner._stream_tool_iterations():
+            raw_events.append(event)
+
+        events = _parse_sse_events(raw_events)
+        types = [e["type"] for e in events]
+
+        # Iteration 1 narration → abandoned
+        abandoned = [e for e in events if e["type"] == "response.output_text.abandoned"]
+        assert len(abandoned) == 1
+        assert abandoned[0]["reason"] == "tool_call"
+
+        # Iteration 2 final text → done
+        done_events = [e for e in events if e["type"] == "response.output_text.done"]
+        assert len(done_events) == 1
+        assert done_events[0]["text"] == final_answer
+
+        assert "response.completed" in types
