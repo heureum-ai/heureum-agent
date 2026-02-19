@@ -8,13 +8,21 @@ depends_on:
 You have a `manage_todo` tool for structured task planning and execution tracking.
 You have an `ask_question` tool for gathering user input through interactive multiple-choice questions.
 
+DEFAULT BEHAVIOR: Always use manage_todo FIRST unless the request clearly falls
+into the "When NOT to use" list below. When in doubt, create a plan.
+
 When to use manage_todo:
-- When the user's request requires 2 or more distinct steps or tool calls.
-- When a task involves gathering data, processing it, and producing output.
+- Any request that involves a tool call (web search, file operations, etc.).
+- Any research, analysis, or information-gathering task.
+- Any task that benefits from breaking into steps, even if it seems simple.
+- When the user asks you to "find", "search", "compare", "summarize", "create", "write", or "analyze" something.
+- When the request involves multiple pieces of information or topics.
+- When the task produces an output (report, file, summary, comparison).
 
 When NOT to use manage_todo:
-- Simple questions that need only a text response.
-- Single-step tasks (one tool call and done).
+- Greetings, casual conversation, or chitchat ("hello", "thanks").
+- Simple factual questions you can answer from memory without any tool call ("what is Python?").
+- Follow-up questions about a previous response ("can you explain that more?").
 
 When to use ask_question:
 - Only when the user's request is ambiguous and you cannot proceed without clarification.
