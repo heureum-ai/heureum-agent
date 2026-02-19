@@ -19,10 +19,12 @@ interfaces for integration with the agent loop.
 
 import json
 import logging
+import os
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from app.config import settings
+from app.services.providers.skill import SkillMeta, parse_skill_md
 from app.services.orchestrator import (
     RoleExtractor,
     Synthesizer,
@@ -40,6 +42,45 @@ ToolExecutorFn = Callable[[str, Dict[str, Any], str], Coroutine[Any, Any, str]]
 def _sse_event(event: dict) -> str:
     """Format a dict as an SSE data line."""
     return f"data: {json.dumps(event)}\n\n"
+
+
+def _build_skill_reference_catalog() -> str:
+    """Load agent SKILL.md files and format them as a reference catalog string.
+
+    Discovers ``agents/*/SKILL.md`` files under ``app/skills/``, parses each
+    with ``parse_skill_md``, and returns a formatted catalog.  Returns ``""``
+    if no skill files are found.
+    """
+    # Default: app/skills/agents/ (sibling to this file's grandparent)
+    base_dir = os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "skills", "agents")
+    )
+    abs_path = base_dir
+
+    if not os.path.isdir(abs_path):
+        logger.debug("Agent skills directory not found: %s", abs_path)
+        return ""
+
+    skills: List[SkillMeta] = []
+    for entry in sorted(os.listdir(abs_path)):
+        skill_file = os.path.join(abs_path, entry, "SKILL.md")
+        if os.path.isfile(skill_file):
+            try:
+                skills.append(parse_skill_md(skill_file))
+            except Exception:
+                logger.warning("Failed to parse skill file: %s", skill_file, exc_info=True)
+
+    if not skills:
+        return ""
+
+    parts: List[str] = []
+    for s in skills:
+        deps = f" (depends_on: {', '.join(s.depends_on)})" if s.depends_on else ""
+        parts.append(f"- **{s.name}**: {s.description}{deps}")
+
+    catalog = "\n".join(parts)
+    logger.info("Loaded %d agent skill references", len(skills))
+    return catalog
 
 
 class WorkflowRunner:
@@ -83,9 +124,10 @@ class WorkflowRunner:
         try:
             # Phase 1: Role extraction
             self._trace.start_phase("role_extraction")
+            catalog = _build_skill_reference_catalog()
             role_extractor = RoleExtractor(self._llm)
             extraction = await role_extractor.extract(
-                self._user_message, self._tool_names,
+                self._user_message, self._tool_names, skill_reference=catalog,
             )
             roles = extraction.roles
             self._trace.set_roles([r.role_type for r in roles])
@@ -169,9 +211,10 @@ class WorkflowRunner:
             yield {"type": "response.orchestration.started", "session_id": self._session_id}
 
             self._trace.start_phase("role_extraction")
+            catalog = _build_skill_reference_catalog()
             role_extractor = RoleExtractor(self._llm)
             extraction = await role_extractor.extract(
-                self._user_message, self._tool_names,
+                self._user_message, self._tool_names, skill_reference=catalog,
             )
             roles = extraction.roles
             self._trace.set_roles([r.role_type for r in roles])

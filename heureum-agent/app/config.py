@@ -112,7 +112,6 @@ class Settings(BaseSettings):
     ORCHESTRATOR_MAX_ROLES: int = 5
     ORCHESTRATOR_MAX_STEPS: int = 10
     MAX_ORCHESTRATOR_STEP_ITERATIONS: int = 15
-
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
 
