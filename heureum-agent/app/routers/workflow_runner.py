@@ -19,12 +19,9 @@ interfaces for integration with the agent loop.
 
 import json
 import logging
-import os
 import time
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
-from app.config import settings
-from app.services.providers.skill import SkillMeta, parse_skill_md
 from app.services.orchestrator import (
     RoleExtractor,
     Synthesizer,
@@ -44,45 +41,6 @@ def _sse_event(event: dict) -> str:
     return f"data: {json.dumps(event)}\n\n"
 
 
-def _build_skill_reference_catalog() -> str:
-    """Load agent SKILL.md files and format them as a reference catalog string.
-
-    Discovers ``agents/*/SKILL.md`` files under ``app/skills/``, parses each
-    with ``parse_skill_md``, and returns a formatted catalog.  Returns ``""``
-    if no skill files are found.
-    """
-    # Default: app/skills/agents/ (sibling to this file's grandparent)
-    base_dir = os.path.normpath(
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "skills", "agents")
-    )
-    abs_path = base_dir
-
-    if not os.path.isdir(abs_path):
-        logger.debug("Agent skills directory not found: %s", abs_path)
-        return ""
-
-    skills: List[SkillMeta] = []
-    for entry in sorted(os.listdir(abs_path)):
-        skill_file = os.path.join(abs_path, entry, "SKILL.md")
-        if os.path.isfile(skill_file):
-            try:
-                skills.append(parse_skill_md(skill_file))
-            except Exception:
-                logger.warning("Failed to parse skill file: %s", skill_file, exc_info=True)
-
-    if not skills:
-        return ""
-
-    parts: List[str] = []
-    for s in skills:
-        deps = f" (depends_on: {', '.join(s.depends_on)})" if s.depends_on else ""
-        parts.append(f"- **{s.name}**: {s.description}{deps}")
-
-    catalog = "\n".join(parts)
-    logger.info("Loaded %d agent skill references", len(skills))
-    return catalog
-
-
 class WorkflowRunner:
     """Runs the full workflow orchestration pipeline for a single task.
 
@@ -91,6 +49,7 @@ class WorkflowRunner:
         agent_service: AgentService for session/history management.
         execute_tool: Async callable ``(name, args, session_id) -> str``.
         todo_service: TodoService for plan tracking.
+        skill_provider: SkillProvider for agent skill catalog.
         tool_names: All available tool names.
         session_id: The parent conversation session ID.
         user_message: The task description to orchestrate.
@@ -102,6 +61,7 @@ class WorkflowRunner:
         agent_service,
         execute_tool: ToolExecutorFn,
         todo_service,
+        skill_provider,
         tool_names: List[str],
         session_id: str,
         user_message: str,
@@ -110,6 +70,7 @@ class WorkflowRunner:
         self._agent_service = agent_service
         self._execute_tool = execute_tool
         self._todo_service = todo_service
+        self._skill_provider = skill_provider
         self._tool_names = tool_names
         self._session_id = session_id
         self._user_message = user_message

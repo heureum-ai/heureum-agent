@@ -159,6 +159,7 @@ class SkillProvider:
         self._skills: Dict[str, Any] = {}
         self._tool_to_skill: Dict[str, Any] = {}
         self._display_names: Dict[str, str] = {}
+        self._agent_skills: List[SkillMeta] = []
         self._discover()
 
     # ------------------------------------------------------------------
@@ -221,6 +222,34 @@ class SkillProvider:
         if self._skills:
             logger.info("Discovered skills: %s", list(self._skills.keys()))
 
+        # Also discover agent persona skills under app/skills/agents/
+        self._discover_agent_skills(skills_dir)
+
+    def _discover_agent_skills(self, skills_dir: str) -> None:
+        """Scan ``app/skills/agents/`` for agent persona SKILL.md files.
+
+        These are guide-only skills used by the workflow orchestration
+        pipeline (RoleExtractor) — they have no ``__init__.py`` and are
+        not registered as tool-providing skills.
+        """
+        agents_dir = os.path.join(skills_dir, "agents")
+        if not os.path.isdir(agents_dir):
+            return
+
+        for entry in sorted(os.listdir(agents_dir)):
+            skill_file = os.path.join(agents_dir, entry, "SKILL.md")
+            if os.path.isfile(skill_file):
+                try:
+                    self._agent_skills.append(parse_skill_md(skill_file))
+                except Exception:
+                    logger.warning("Failed to parse agent skill: %s", skill_file, exc_info=True)
+
+        if self._agent_skills:
+            logger.info(
+                "Discovered agent skills: %s",
+                [s.name for s in self._agent_skills],
+            )
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -268,8 +297,23 @@ class SkillProvider:
         return dict(self._display_names)
 
     # ------------------------------------------------------------------
-    # Guide prompts
+    # Guide prompts & agent skill catalog
     # ------------------------------------------------------------------
+
+    def get_agent_skill_catalog(self) -> str:
+        """Return a formatted catalog of agent persona skills.
+
+        Used by the workflow orchestration pipeline (RoleExtractor) to
+        know which agent roles are available.  Returns ``""`` if no
+        agent skills were discovered.
+        """
+        if not self._agent_skills:
+            return ""
+        parts: List[str] = []
+        for s in self._agent_skills:
+            deps = f" (depends_on: {', '.join(s.depends_on)})" if s.depends_on else ""
+            parts.append(f"- **{s.name}**: {s.description}{deps}")
+        return "\n".join(parts)
 
     def get_all_guide_prompts(self) -> List[str]:
         """Return guide prompts from all skills, each wrapped in XML tags.
