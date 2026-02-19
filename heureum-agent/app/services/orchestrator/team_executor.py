@@ -314,7 +314,7 @@ class TeamExecutor:
                 tc_start = time.time()
                 tc_error = None
                 try:
-                    tool_result = await self._execute_tool(tc_name, tc_args, sub_session_id)
+                    tool_result = await self._execute_tool(tc_name, tc_args, self._parent_session_id)
                 except Exception as e:
                     tool_result = f"Error executing tool '{tc_name}': {e}"
                     tc_error = str(e)

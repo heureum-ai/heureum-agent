@@ -958,12 +958,19 @@ class _AgentLoopRunner:
         """
         from app.routers.workflow_runner import WorkflowRunner
 
+        # Exclude client-side tools (e.g. ask_question) — they require
+        # user interaction and cannot be executed in headless sub-agents.
+        server_only_tools = [
+            t for t in self.ctx.tool_names
+            if t not in self.ctx.client_tool_names
+        ]
+
         runner = WorkflowRunner(
             llm=agent_service.llm,
             agent_service=agent_service,
             execute_tool=_execute_tool,
             todo_service=todo_service,
-            tool_names=self.ctx.tool_names,
+            tool_names=server_only_tools,
             session_id=self.ctx.session_id,
             user_message=task,
         )
@@ -1031,12 +1038,17 @@ class _AgentLoopRunner:
         """Stream workflow orchestration events as SSE."""
         from app.routers.workflow_runner import WorkflowRunner
 
+        server_only_tools = [
+            t for t in self.ctx.tool_names
+            if t not in self.ctx.client_tool_names
+        ]
+
         runner = WorkflowRunner(
             llm=agent_service.llm,
             agent_service=agent_service,
             execute_tool=_execute_tool,
             todo_service=todo_service,
-            tool_names=self.ctx.tool_names,
+            tool_names=server_only_tools,
             session_id=self.ctx.session_id,
             user_message=task,
         )
