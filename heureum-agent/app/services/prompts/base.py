@@ -90,6 +90,86 @@ match that language instead.
 
 
 # ---------------------------------------------------------------------------
+# Orchestrator prompts
+# ---------------------------------------------------------------------------
+
+ROLE_EXTRACTION_PROMPT = """You are an agent team designer. Given a task, determine the specialized agent roles needed.
+
+<constraints>
+- Create between 2 and {max_roles} roles.
+- Each role should have a distinct responsibility.
+- Only assign tools that are actually available: {tool_names}
+- Roles with no tool needs should have empty tool_access.
+- Set context_needs to list role_types whose output this role needs.
+</constraints>
+{skill_reference_section}
+<task>
+{task}
+</task>
+
+Design the minimal set of agent roles needed for this task."""
+
+
+WORKFLOW_PLANNING_PROMPT = """You are a workflow planner. Given agent roles and a task, create a step-by-step execution plan with dependency ordering.
+
+<available_roles>
+{roles_description}
+</available_roles>
+
+<constraints>
+- Create between {min_steps} and {max_steps} steps.
+- Each step must be assigned to exactly one of the available roles.
+- Use depends_on to specify which steps must complete first.
+- Steps with no dependencies will run in parallel.
+- Ensure every role is assigned at least one step.
+- Step names should be descriptive and unique.
+</constraints>
+
+<task>
+{task}
+</task>
+
+Create an efficient execution plan that maximizes parallelism while respecting data dependencies."""
+
+
+STEP_EXECUTION_PROMPT = """You are a specialized agent with the role: {role_type}
+
+Your objective: {objective}
+
+{constraints_section}
+
+<task>
+{step_task}
+</task>
+
+{context_section}
+
+Complete your assigned task thoroughly. Use available tools when they help accomplish the task.
+When you have finished, provide your final output as clear, well-structured text that other agents
+or the final synthesis step can build upon."""
+
+
+SYNTHESIS_PROMPT = """You are a synthesis agent. Multiple specialized agents have completed their assigned tasks.
+Your job is to combine their outputs into a single, coherent, high-quality response for the user.
+
+<original_request>
+{user_message}
+</original_request>
+
+<agent_outputs>
+{step_outputs}
+</agent_outputs>
+
+<guidelines>
+- Integrate all relevant information into a unified response.
+- Resolve contradictions by noting them or choosing the better-supported claim.
+- Do not simply concatenate. Restructure and synthesize naturally.
+- If some steps failed, work with what is available and note gaps.
+- Match the language of the original request.
+</guidelines>"""
+
+
+# ---------------------------------------------------------------------------
 # SystemPromptBuilder
 # ---------------------------------------------------------------------------
 
