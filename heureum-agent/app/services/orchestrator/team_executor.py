@@ -86,6 +86,7 @@ class TeamExecutor:
         self._trace_collector = trace_collector
         self._result_store = result_store
         self._results: Dict[str, StepResult] = {}
+        self._child_session_ids: List[str] = []
 
     async def execute_all_batches(self, batches: List[TeamBatch]) -> List[StepResult]:
         """Execute all batches sequentially, steps within each batch in parallel.
@@ -114,6 +115,17 @@ class TeamExecutor:
                     self._results[step.step_name] = result
 
         return list(self._results.values())
+
+    def cleanup_registry(self) -> None:
+        """Deferred cleanup of all spawned subagent registry records.
+
+        Called after execution completes and frontend polling has had time
+        to observe the final states of all child sessions.
+        """
+        registry = get_registry()
+        for sid in self._child_session_ids:
+            registry.cleanup(sid)
+        self._child_session_ids.clear()
 
     async def _execute_step(self, step: WorkflowStep) -> StepResult:
         """Execute a single step by spawning an independent sub-agent.
@@ -263,8 +275,9 @@ class TeamExecutor:
                     record.result_summary or f"Step failed: {record.status}"
                 )
 
-            # Clean up the registry record and step context
-            get_registry().cleanup(spawn_result.child_session_id)
+            # Track child session for deferred cleanup (keeps registry records
+            # alive so frontend subagent polling can discover them).
+            self._child_session_ids.append(spawn_result.child_session_id)
             clear_session_step_context(spawn_result.child_session_id)
 
             result = StepResult(

@@ -17,6 +17,7 @@ Provides both ``run()`` (non-streaming) and ``stream_events()`` (SSE)
 interfaces for integration with the agent loop.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -141,6 +142,7 @@ class WorkflowRunner:
                 result_store=self._result_store,
             )
             step_results = await executor.execute_all_batches(batches)
+            executor.cleanup_registry()
             self._trace.end_phase(
                 "execution",
                 output_summary=f"completed={sum(1 for r in step_results if r.status.value == 'completed')}/{len(step_results)}",
@@ -250,12 +252,28 @@ class WorkflowRunner:
                     },
                 }
 
-            # Phase 4: Execution with step events
+            # Phase 4: Execution with real-time step events via asyncio.Queue
             self._trace.start_phase("execution")
-            step_events_queue: List[dict] = []
+            event_queue: asyncio.Queue = asyncio.Queue()
+            _DONE = object()
 
             async def on_step_event(event_type: str, data: dict) -> None:
-                step_events_queue.append({"type": event_type, **data})
+                # Emit the step event immediately
+                await event_queue.put({"type": event_type, **data})
+                # Also emit current TODO state so UI updates in real-time
+                if self._plan_skill:
+                    todo_state = self._plan_skill.get_state(self._session_id)
+                    if todo_state:
+                        await event_queue.put({
+                            "type": "response.todo.updated",
+                            "todo": {
+                                "task": todo_state.task,
+                                "steps": [
+                                    {"description": s.description, "status": s.status, "result": s.result}
+                                    for s in todo_state.steps
+                                ],
+                            },
+                        })
 
             executor = TeamExecutor(
                 llm=self._llm,
@@ -270,29 +288,54 @@ class WorkflowRunner:
                 trace_collector=self._trace,
                 result_store=self._result_store,
             )
-            step_results = await executor.execute_all_batches(batches)
+
+            # Emit synthetic sessions_spawn events to trigger frontend
+            # SubagentProgressCard polling.  The frontend skips sessions_spawn
+            # from the tool-call UI but remembers the call_id; when the
+            # matching tool_result arrives with status "accepted", it starts
+            # polling GET /subagent/status/{parentSessionId} which discovers
+            # all children spawned by TeamExecutor.
+            _poll_call_id = f"orch-{self._session_id}"
+            yield {
+                "type": "response.function_call.done",
+                "item": {
+                    "call_id": _poll_call_id,
+                    "name": "sessions_spawn",
+                    "arguments": json.dumps({"task": self._user_message}),
+                },
+            }
+            yield {
+                "type": "response.tool_result.done",
+                "call_id": _poll_call_id,
+                "status": "completed",
+                "output": json.dumps({"status": "accepted"}),
+            }
+
+            async def _run_execution():
+                try:
+                    return await executor.execute_all_batches(batches)
+                finally:
+                    await event_queue.put(_DONE)
+
+            exec_task = asyncio.create_task(_run_execution())
+
+            # Consume events in real-time as steps start/complete
+            while True:
+                event = await event_queue.get()
+                if event is _DONE:
+                    break
+                yield event
+
+            step_results = await exec_task
             self._trace.end_phase(
                 "execution",
                 output_summary=f"completed={sum(1 for r in step_results if r.status.value == 'completed')}/{len(step_results)}",
             )
 
-            # Flush step events
-            for evt in step_events_queue:
-                yield evt
-
-            # Emit updated TODO state
-            todo_state = self._plan_skill.get_state(self._session_id)
-            if todo_state:
-                yield {
-                    "type": "response.todo.updated",
-                    "todo": {
-                        "task": todo_state.task,
-                        "steps": [
-                            {"description": s.description, "status": s.status, "result": s.result}
-                            for s in todo_state.steps
-                        ],
-                    },
-                }
+            # Give frontend polling time to observe final child states
+            # before cleaning up registry records (poll interval = 3s).
+            await asyncio.sleep(5)
+            executor.cleanup_registry()
 
             # Phase 5: Streaming synthesis
             self._trace.start_phase("synthesis")
