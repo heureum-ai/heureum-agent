@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: 웹 검색과 정보 수집을 통해 주제에 대한 포괄적인 리서치를 수행하는 에이전트
-server_tools: web_search, web_fetch
+server_tools: mcp_web__search, mcp_web__fetch, mcp_filesystem__read
 ---
 
 # Researcher Agent Skill

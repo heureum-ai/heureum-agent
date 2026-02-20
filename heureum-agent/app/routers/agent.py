@@ -700,9 +700,16 @@ def _resolve_tools(
     for name in mcp_client.server_tool_names:
         if name not in client_tool_names:
             tool_names.append(name)
-    # Always include skill-owned tools
+    # Always include skill-owned tools.
+    # When workflow orchestration is enabled, exclude sessions_spawn from
+    # the main agent — the LLM should use manage_todo(create) instead,
+    # which triggers the orchestration pipeline that handles sub-agent
+    # spawning internally via TeamExecutor.
+    _skip_tools: set = set()
+    if settings.ENABLE_WORKFLOW:
+        _skip_tools.add("sessions_spawn")
     for name in skill_provider.get_all_tool_names():
-        if name not in tool_names:
+        if name not in tool_names and name not in _skip_tools:
             tool_names.append(name)
 
     # MCP display names
@@ -958,12 +965,11 @@ class _AgentLoopRunner:
         """
         from app.routers.workflow_runner import WorkflowRunner
 
-        # Exclude client-side tools (e.g. ask_question) — they require
-        # user interaction and cannot be executed in headless sub-agents.
-        server_only_tools = [
-            t for t in self.ctx.tool_names
-            if t not in self.ctx.client_tool_names
-        ]
+        # Build server-only tool list from MCP + skill providers
+        # (excludes client-side tools that require user interaction).
+        server_only_tools = list(
+            mcp_client.server_tool_names | skill_provider.get_all_tool_names()
+        )
 
         runner = WorkflowRunner(
             llm=agent_service.llm,
@@ -1038,10 +1044,10 @@ class _AgentLoopRunner:
         """Stream workflow orchestration events as SSE."""
         from app.routers.workflow_runner import WorkflowRunner
 
-        server_only_tools = [
-            t for t in self.ctx.tool_names
-            if t not in self.ctx.client_tool_names
-        ]
+        # Build server-only tool list from MCP + skill providers.
+        server_only_tools = list(
+            mcp_client.server_tool_names | skill_provider.get_all_tool_names()
+        )
 
         runner = WorkflowRunner(
             llm=agent_service.llm,
@@ -1087,6 +1093,9 @@ class _AgentLoopRunner:
             })
 
     async def _run_tool_iterations(self) -> ResponseObject:
+        # When workflow orchestration is enabled, hide sessions_spawn from
+        # the LLM so it uses manage_todo(create) which triggers the pipeline.
+        _exclude = {"sessions_spawn"} if settings.ENABLE_WORKFLOW else None
         skill_provider.clear_completed_plans(self.ctx.session_id)
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
             result = await agent_service.process_messages_with_tools(
@@ -1096,6 +1105,7 @@ class _AgentLoopRunner:
                 client_tool_schemas=self.ctx.client_tool_schemas,
                 client_tool_prompts=self.ctx.client_tool_prompts,
                 state_prompts=self._get_state_prompts(iteration=iteration),
+                exclude_skill_tools=_exclude,
             )
             self.ctx.session_id = result.session_id
             if result.usage:
@@ -1325,13 +1335,13 @@ class _AgentLoopRunner:
         self.ctx.tool_call_count += len(pipeline_results) + len(client_calls)
 
         # Check for workflow signal before continuing the regular loop
-        workflow_task = self._detect_workflow_signal(tool_results)
+        workflow_task = self._detect_workflow_signal(pipeline_results)
         if workflow_task:
             await agent_service.append_tool_interaction(
                 self.ctx.session_id,
                 self.ctx.messages,
                 [tc.model_dump() for tc in all_tool_calls],
-                tool_results,
+                pipeline_results,
                 usage=result.usage.model_dump(),
                 assistant_lc_message=result.assistant_lc_message,
             )
@@ -1493,6 +1503,7 @@ class _AgentLoopRunner:
         """Stream LLM chunks, yielding text deltas and returning accumulated result."""
         accumulated = None
 
+        _exclude = {"sessions_spawn"} if settings.ENABLE_WORKFLOW else None
         async for chunk in agent_service.stream_messages_with_tools(
             messages=self.ctx.messages,
             session_id=self.ctx.session_id,
@@ -1500,6 +1511,7 @@ class _AgentLoopRunner:
             client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
             client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
             state_prompts=self._get_state_prompts(iteration=iteration),
+            exclude_skill_tools=_exclude,
         ):
             delta = agent_service._extract_text(chunk.content) if chunk.content else ""
             if delta:
@@ -2062,6 +2074,7 @@ async def subagent_status(session_id: str) -> dict:
                 "elapsed_seconds": round(now - r.started_at, 1),
                 "result_summary": r.result_summary[:500] if r.result_summary else None,
                 "current_iteration": r.current_iteration,
+                "step_name": r.step_name,
                 "progress": [
                     {
                         "tool_name": s.tool_name,

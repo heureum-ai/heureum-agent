@@ -380,6 +380,9 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
                 output_cost=todo_output_cost,
                 total_cost=todo_input_cost + todo_output_cost,
             )
+        # DEBUG: log what is being persisted
+        _persist_bi = [(s.get("step_name"), s.get("batch_index")) for s in todo_state.get("steps", [])]
+        print(f"[PROXY DEBUG] Persisting todo_state — batch_index values: {_persist_bi}")
         Message.objects.create(
             session_id=session_id,
             response=response_obj,
@@ -491,6 +494,10 @@ def _proxy_streaming(request_data, session_id, response_obj):
 
                             elif evt_type == "response.todo.updated":
                                 last_todo_state = event.get("todo")
+                                # DEBUG: log batch_index to verify workflow data
+                                _steps = (last_todo_state or {}).get("steps", [])
+                                _bi = [(s.get("step_name"), s.get("batch_index")) for s in _steps]
+                                print(f"[PROXY DEBUG] todo.updated — batch_index values: {_bi}")
                                 yield line + "\n"
 
                             elif evt_type in (

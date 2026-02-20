@@ -206,6 +206,10 @@ class TeamExecutor:
             context_section=context_section,
         )
 
+        # Persist the system prompt to filesystem
+        if self._result_store:
+            self._result_store.save_step_prompt(step.step_name, system_content)
+
         # Determine which tools this agent can access
         step_tool_names = self._tool_names
         if role and role.tool_access:
@@ -229,6 +233,7 @@ class TeamExecutor:
                 system_prompt=system_content,
                 orchestrator_mode=True,
                 max_iterations=settings.MAX_ORCHESTRATOR_STEP_ITERATIONS,
+                step_name=step.step_name,
             )
             spawn_result = await spawn_subagent(spawn_request)
             if spawn_result.status != "accepted":
@@ -300,7 +305,7 @@ class TeamExecutor:
 
         # Persist step result to filesystem
         if self._result_store:
-            self._result_store.save_step_result(step.step_name, result, duration_ms)
+            self._result_store.save_step_result(step.step_name, result, duration_ms, task=step.task)
 
         # Record step trace
         if self._trace_collector:

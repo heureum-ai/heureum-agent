@@ -90,6 +90,22 @@ DATABASES = {
     )
 }
 
+# SQLite: enable WAL mode and increase busy timeout for concurrent access
+# (workflow orchestration spawns parallel agents that write simultaneously).
+if DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3":
+    DATABASES["default"].setdefault("OPTIONS", {})
+    DATABASES["default"]["OPTIONS"]["timeout"] = 30
+    DATABASES["default"]["OPTIONS"]["transaction_mode"] = "IMMEDIATE"
+
+    from django.db.backends.signals import connection_created
+
+    def _sqlite_wal_mode(sender, connection, **kwargs):
+        if connection.vendor == "sqlite":
+            with connection.cursor() as cursor:
+                cursor.execute("PRAGMA journal_mode=WAL;")
+
+    connection_created.connect(_sqlite_wal_mode)
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {

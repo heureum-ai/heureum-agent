@@ -1,27 +1,12 @@
 /* Copyright (c) 2026 Heureum AI. All rights reserved. */
 
-/* ── TODO Progress — Claude Code style ── */
+/* ── TODO Progress ── */
 
-.ac-todo {
+.ac-todo-block {
   display: flex;
-  gap: 10px;
-  align-items: flex-start;
+  flex-direction: column;
+  gap: 4px;
   max-width: 85%;
-  font-size: 14px;
-}
-
-.ac-todo-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--h-status-success);
-  flex-shrink: 0;
-  margin-top: 6px;
-}
-
-.ac-todo-content {
-  flex: 1;
-  min-width: 0;
 }
 
 .ac-todo-task {
@@ -29,75 +14,49 @@
   font-size: 14px;
   color: var(--h-text-primary);
   line-height: 1.4;
+  margin-bottom: 4px;
 }
 
-/* Steps */
-.ac-todo-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
+/* Inline tool calls under a running agent */
+.ac-wf-tool-list {
+  padding-left: 8px;
+  margin-top: 2px;
 }
 
-.ac-todo-step {
+.ac-wf-tool {
   display: flex;
   align-items: flex-start;
-  gap: 8px;
-  padding: 2px 0;
+  gap: 0;
+  padding: 0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 
-.ac-todo-step-icon {
+.ac-wf-tool-prefix {
   flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  margin-top: 1px;
-}
-
-.ac-todo-step-desc {
-  color: var(--h-text-primary);
-  line-height: 1.4;
-  font-size: 14px;
-}
-
-/* Completed */
-.ac-todo-step-completed .ac-todo-step-icon {
-  color: var(--h-status-success);
-}
-
-.ac-todo-step-completed .ac-todo-step-desc {
+  font-family: 'Menlo', 'Monaco', 'Courier New', monospace;
   color: var(--h-text-faint);
-  text-decoration: line-through;
+  font-size: 11px;
+  user-select: none;
 }
 
-/* In-progress */
-.ac-todo-step-in_progress .ac-todo-step-icon {
-  color: var(--h-status-info);
-  animation: acTodoPulse 1.2s ease-in-out infinite;
-}
-
-/* Pending */
-.ac-todo-step-pending .ac-todo-step-icon {
-  color: var(--h-text-faint);
-}
-
-.ac-todo-step-pending .ac-todo-step-desc {
+.ac-wf-tool-text {
   color: var(--h-text-muted);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 400px;
 }
 
-/* Failed */
-.ac-todo-step-failed .ac-todo-step-icon {
+.ac-wf-tool-running .ac-wf-tool-text {
+  color: var(--h-status-info);
+}
+
+.ac-wf-tool-completed .ac-wf-tool-text {
+  color: var(--h-text-faint);
+}
+
+.ac-wf-tool-failed .ac-wf-tool-text {
   color: var(--h-status-error);
-}
-
-.ac-todo-step-failed .ac-todo-step-desc {
-  color: var(--h-status-error);
-}
-
-@keyframes acTodoPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
 }

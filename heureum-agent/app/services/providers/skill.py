@@ -462,6 +462,9 @@ class SkillProvider:
                             "description": s.description,
                             "status": s.status,
                             "result": s.result,
+                            "step_name": getattr(s, "step_name", None),
+                            "assigned_agent": getattr(s, "assigned_agent", None),
+                            "batch_index": getattr(s, "batch_index", None),
                         }
                         for s in state.steps
                     ],

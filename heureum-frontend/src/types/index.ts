@@ -103,6 +103,9 @@ export interface TodoStep {
   description: string;
   status: 'pending' | 'in_progress' | 'completed' | 'failed';
   result?: string;
+  step_name?: string;
+  assigned_agent?: string;
+  batch_index?: number;
 }
 
 export interface TodoState {
@@ -171,6 +174,7 @@ export interface SubagentProgress {
   currentIteration?: number;
   resultSummary?: string | null;
   steps: SubagentProgressStep[];
+  stepName?: string;
 }
 
 // Legacy interfaces for backward compatibility

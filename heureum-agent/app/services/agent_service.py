@@ -892,6 +892,7 @@ class AgentService:
         client_tool_prompts: Optional[List[str]] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         state_prompts: Optional[List[str]] = None,
+        exclude_skill_tools: Optional[set] = None,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
@@ -927,6 +928,17 @@ class AgentService:
         if self.skill_provider:
             server_tool_prompts = self.skill_provider.get_all_guide_prompts()
             server_tool_schemas = self.skill_provider.get_all_tool_schemas()
+            # Filter out excluded skill tools (e.g. sessions_spawn when
+            # workflow orchestration handles sub-agent spawning).
+            if exclude_skill_tools:
+                server_tool_schemas = [
+                    s for s in server_tool_schemas
+                    if s.get("function", {}).get("name") not in exclude_skill_tools
+                ]
+                server_tool_prompts = [
+                    p for p in server_tool_prompts
+                    if not any(f'name="{t}"' in p for t in exclude_skill_tools)
+                ]
         else:
             server_tool_prompts = []
             server_tool_schemas = []
@@ -1195,6 +1207,7 @@ class AgentService:
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        exclude_skill_tools: Optional[set] = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -1235,6 +1248,7 @@ class AgentService:
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
             state_prompts=state_prompts,
+            exclude_skill_tools=exclude_skill_tools,
         )
         lc_new_messages = [self._to_lc_message(msg) for msg in new_messages]
         overflow_retries = 0
@@ -1532,6 +1546,7 @@ class AgentService:
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        exclude_skill_tools: Optional[set] = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1548,6 +1563,8 @@ class AgentService:
                 clients for the system prompt.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
+            exclude_skill_tools (Optional[set]): Skill tool names to
+                exclude from schemas and guide prompts sent to the LLM.
 
         Returns:
             LLMResult: A text result or tool call result with usage.
@@ -1562,6 +1579,7 @@ class AgentService:
                 client_tool_schemas=client_tool_schemas,
                 client_tool_prompts=client_tool_prompts,
                 state_prompts=state_prompts,
+                exclude_skill_tools=exclude_skill_tools,
             )
 
             usage = self._extract_usage(response)
@@ -1602,6 +1620,7 @@ class AgentService:
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        exclude_skill_tools: Optional[set] = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1619,6 +1638,8 @@ class AgentService:
                 clients for the system prompt.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
+            exclude_skill_tools (Optional[set]): Skill tool names to
+                exclude from schemas and guide prompts sent to the LLM.
 
         Yields:
             AIMessageChunk: Incremental response chunks.
@@ -1629,6 +1650,7 @@ class AgentService:
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
             state_prompts=state_prompts,
+            exclude_skill_tools=exclude_skill_tools,
         )
         lc_new = [self._to_lc_message(msg) for msg in messages]
         overflow_retries = 0

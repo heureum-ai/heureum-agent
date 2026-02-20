@@ -117,10 +117,17 @@ class WorkflowRunner:
                 batches=[{"batch_index": i, "steps": [s.step_name for s in b.steps]} for i, b in enumerate(batches)],
             )
 
+            # Build batch_index_map: step_name -> batch index
+            batch_index_map: Dict[str, int] = {}
+            for batch_idx, batch in enumerate(batches):
+                for bstep in batch.steps:
+                    batch_index_map[bstep.step_name] = batch_idx
+
             # Phase 3: TODO creation
             self._trace.start_phase("todo_creation")
             await self._plan_skill.create_orchestrated(
                 self._session_id, self._user_message, plan.steps,
+                batch_index_map=batch_index_map,
             )
             step_index_map = {
                 s.step_name: i for i, s in enumerate(plan.steps)
@@ -228,10 +235,17 @@ class WorkflowRunner:
                 "batches": len(batches),
             }
 
+            # Build batch_index_map: step_name -> batch index
+            batch_index_map: Dict[str, int] = {}
+            for batch_idx, batch in enumerate(batches):
+                for bstep in batch.steps:
+                    batch_index_map[bstep.step_name] = batch_idx
+
             # Phase 3: TODO creation
             self._trace.start_phase("todo_creation")
             await self._plan_skill.create_orchestrated(
                 self._session_id, self._user_message, plan.steps,
+                batch_index_map=batch_index_map,
             )
             step_index_map = {
                 s.step_name: i for i, s in enumerate(plan.steps)
@@ -241,16 +255,29 @@ class WorkflowRunner:
             # Emit TODO state
             todo_state = self._plan_skill.get_state(self._session_id)
             if todo_state:
-                yield {
+                _todo_event = {
                     "type": "response.todo.updated",
                     "todo": {
                         "task": todo_state.task,
                         "steps": [
-                            {"description": s.description, "status": s.status, "result": s.result}
+                            {
+                                "description": s.description,
+                                "status": s.status,
+                                "result": s.result,
+                                "step_name": s.step_name,
+                                "assigned_agent": s.assigned_agent,
+                                "batch_index": s.batch_index,
+                            }
                             for s in todo_state.steps
                         ],
                     },
                 }
+                logger.info(
+                    "Emitting initial todo.updated — batch_index_map=%s, steps=%s",
+                    batch_index_map,
+                    [(s.step_name, s.batch_index) for s in todo_state.steps],
+                )
+                yield _todo_event
 
             # Phase 4: Execution with real-time step events via asyncio.Queue
             self._trace.start_phase("execution")
@@ -269,7 +296,14 @@ class WorkflowRunner:
                             "todo": {
                                 "task": todo_state.task,
                                 "steps": [
-                                    {"description": s.description, "status": s.status, "result": s.result}
+                                    {
+                                        "description": s.description,
+                                        "status": s.status,
+                                        "result": s.result,
+                                        "step_name": s.step_name,
+                                        "assigned_agent": s.assigned_agent,
+                                        "batch_index": s.batch_index,
+                                    }
                                     for s in todo_state.steps
                                 ],
                             },

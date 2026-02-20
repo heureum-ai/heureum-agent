@@ -85,6 +85,7 @@ class TodoStep:
     step_name: Optional[str] = None        # unique ID for dependency tracking (workflow mode)
     depends_on: Optional[List[str]] = None  # step_name values this step depends on
     assigned_agent: Optional[str] = None    # agent role_type (workflow mode)
+    batch_index: Optional[int] = None       # execution batch index (workflow mode)
 
 
 @dataclass
@@ -236,6 +237,7 @@ class PlanSkill:
         session_id: str,
         task: str,
         workflow_steps,
+        batch_index_map: Optional[Dict[str, int]] = None,
     ) -> str:
         """Create an orchestrated TODO from WorkflowStep objects.
 
@@ -246,6 +248,7 @@ class PlanSkill:
             session_id: The session ID.
             task: Overall task description.
             workflow_steps: List of WorkflowStep pydantic objects.
+            batch_index_map: Optional mapping of step_name -> batch index.
 
         Returns:
             Formatted state string.
@@ -254,6 +257,7 @@ class PlanSkill:
         if existing:
             self._session_history.setdefault(session_id, []).append(existing)
 
+        _bmap = batch_index_map or {}
         filename = self._make_todo_filename(task)
         steps = [
             TodoStep(
@@ -261,6 +265,7 @@ class PlanSkill:
                 step_name=s.step_name,
                 depends_on=list(s.depends_on) if s.depends_on else None,
                 assigned_agent=s.assigned_agent,
+                batch_index=_bmap.get(s.step_name),
             )
             for s in workflow_steps
         ]

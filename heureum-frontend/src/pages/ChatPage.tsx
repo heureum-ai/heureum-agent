@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback, type KeyboardEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useChatStore } from '../store/chatStore';
+import { useChatStore, getSubagentProgressMap } from '../store/chatStore';
 import { useAuthStore } from '../store/authStore';
 import {
   chatAPI,
@@ -472,6 +472,7 @@ export default function ChatPage() {
             elapsedSeconds: child.elapsed_seconds,
             currentIteration: child.current_iteration,
             resultSummary: child.result_summary,
+            stepName: child.step_name,
             steps: (child.progress || []).map((s) => ({
               toolName: s.tool_name,
               detail: s.detail,
@@ -735,6 +736,7 @@ export default function ChatPage() {
             break;
           }
           case 'response.todo.updated':
+            console.log('[DEBUG todo.updated]', JSON.stringify(event.todo?.steps?.map((s: any) => ({ step_name: s.step_name, batch_index: s.batch_index, assigned_agent: s.assigned_agent })), null, 2));
             useChatStore.getState().updateOrAddTodo(event.todo);
             break;
           case 'response.output_text.abandoned': {
@@ -1356,13 +1358,19 @@ export default function ChatPage() {
       );
     }
     if (msg.todo) {
+      const progressMap = getSubagentProgressMap();
       return (
         <div key={i} className="ac-msg-row ac-msg-todo">
-          <TodoProgress todo={msg.todo} />
+          <TodoProgress todo={msg.todo} subagentProgressMap={progressMap} />
         </div>
       );
     }
     if (msg.subagentProgress) {
+      // In workflow mode, suppress separate SubagentProgressCard for
+      // agents that are linked to a workflow step (shown inline in TodoProgress).
+      if (msg.subagentProgress.stepName) {
+        return null;
+      }
       return (
         <div key={i} className="ac-msg-row ac-msg-tool">
           <SubagentProgressCard progress={msg.subagentProgress} />

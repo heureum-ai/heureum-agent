@@ -109,7 +109,7 @@ class Settings(BaseSettings):
 
     # Workflow orchestration
     ENABLE_WORKFLOW: bool = True
-    AGENT_WORK_DIR: str = "data"  # Base directory for agent result storage
+    AGENT_WORK_DIR: str = "../heureum-platform/media"  # Base directory for agent result storage
     ORCHESTRATOR_MAX_ROLES: int = 5
     ORCHESTRATOR_MAX_STEPS: int = 10
     MAX_ORCHESTRATOR_STEP_ITERATIONS: int = 15

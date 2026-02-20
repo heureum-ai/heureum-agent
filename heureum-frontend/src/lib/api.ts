@@ -759,6 +759,7 @@ export interface SubagentStatusItem {
   elapsed_seconds: number;
   result_summary?: string | null;
   current_iteration?: number;
+  step_name?: string;
   progress?: SubagentProgressStep[];
 }
 

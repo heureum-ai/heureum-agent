@@ -18,6 +18,7 @@ Directory layout::
     ├── steps/
     │   ├── {step_name}/
     │   │   ├── meta.json
+    │   │   ├── prompt.md
     │   │   ├── result.md
     │   │   └── subagents/
     │   │       ├── {child_session_id}/
@@ -81,11 +82,21 @@ class AgentResultStore:
     # Step results
     # ------------------------------------------------------------------
 
+    def save_step_prompt(self, step_name: str, prompt: str) -> None:
+        """Persist the system prompt used for the step as ``steps/{name}/prompt.md``."""
+        try:
+            path = self._root / "steps" / step_name / "prompt.md"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(prompt, encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to save step prompt for %s", step_name, exc_info=True)
+
     def save_step_result(
         self,
         step_name: str,
         result: Any,
         duration_ms: float,
+        task: str = "",
     ) -> None:
         """Persist a step result to ``steps/{name}/meta.json`` + ``result.md``."""
         try:
@@ -94,6 +105,7 @@ class AgentResultStore:
 
             meta = {
                 "step_name": step_name,
+                "task": task,
                 "status": result.status.value if hasattr(result, "status") else "unknown",
                 "assigned_agent": getattr(result, "assigned_agent", ""),
                 "duration_ms": round(duration_ms, 1),

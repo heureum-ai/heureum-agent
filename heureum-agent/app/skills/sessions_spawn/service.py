@@ -154,11 +154,17 @@ class SessionsSpawnSkill:
 
     async def _spawn(self, args: Dict[str, Any], session_id: str) -> str:
         try:
+            # Propagate orchestrator_mode when the parent is an orchestrator step,
+            # so sub-sub-agents can use approval-required tools (e.g. web search).
+            from app.services.subagent import get_session_step_context
+
+            is_orchestrator_child = get_session_step_context(session_id) is not None
             request = SpawnRequest(
                 parent_session_id=session_id,
                 task=args.get("task", ""),
                 tools=args.get("tools"),
                 cleanup=args.get("cleanup", "delete"),
+                orchestrator_mode=is_orchestrator_child,
             )
             result = await spawn_subagent(request)
             return json.dumps(

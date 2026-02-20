@@ -65,6 +65,7 @@ class SpawnRequest:
     system_prompt: Optional[str] = None  # Override default subagent instructions
     orchestrator_mode: bool = False  # Skip depth/children limits
     max_iterations: Optional[int] = None  # Override default max iterations
+    step_name: Optional[str] = None  # Workflow step name for UI mapping
 
 
 @dataclass
@@ -90,6 +91,7 @@ class SubagentRunRecord:
     asyncio_task: Optional[asyncio.Task] = None
     progress_log: List[ProgressStep] = field(default_factory=list)
     current_iteration: int = 0
+    step_name: Optional[str] = None  # Workflow step name for UI mapping
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +241,26 @@ def clear_session_step_context(session_id: str) -> None:
     _session_step_context.pop(session_id, None)
 
 
+def _resolve_root_session_id(session_id: str) -> str:
+    """Walk up the parent chain to find the root (platform) session ID.
+
+    Sub-agent session IDs (``subagent_*``) are transient and don't exist
+    in the platform DB.  This function traces the parent chain until it
+    reaches a real session ID (e.g. ``sess_*``).
+    """
+    visited: set = set()
+    current = session_id
+    while current.startswith("subagent_"):
+        if current in visited:
+            break  # cycle guard
+        visited.add(current)
+        record = _registry.get(current)
+        if not record:
+            break
+        current = record.parent_session_id
+    return current
+
+
 # ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
@@ -285,6 +307,7 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
         child_session_id=child_session_id,
         parent_session_id=request.parent_session_id,
         task=request.task,
+        step_name=request.step_name,
     )
     _registry.register(record)
 
@@ -464,8 +487,14 @@ def _resolve_child_tools(
     parent_mcp_tools = agent_service.mcp_tools or []
     child_skill_provider = global_skill_provider
 
-    # Approval-required tools cannot be used by sub-agents (no interactive approval)
-    approval_required = getattr(mcp_client, "_approval_required_tools", set())
+    # Approval-required tools cannot be used by sub-agents (no interactive
+    # approval), UNLESS orchestrator_mode is set — workflow steps are
+    # pre-approved so they may use all requested tools.
+    approval_required = (
+        set()
+        if request.orchestrator_mode
+        else getattr(mcp_client, "_approval_required_tools", set())
+    )
 
     if request.tools:
         # Filter MCP tools to whitelist, excluding approval-required
@@ -564,7 +593,11 @@ async def _execute_subagent_task(
     a text response (no more tool calls).
     """
     # Lazy: circular dep + must read current (patchable) attribute
-    from app.routers.agent import _execute_tool
+    from app.routers.agent import _execute_tool, mcp_client
+
+    # Resolve the root (platform) session ID so MCP file operations
+    # target the real session in the platform DB, not a transient subagent ID.
+    root_session_id = _resolve_root_session_id(record.child_session_id)
 
     # Inherit tools from parent
     child_mcp_tools, child_skill_provider, tool_names = _resolve_child_tools(request)
@@ -630,7 +663,14 @@ async def _execute_subagent_task(
                         record.progress_log = record.progress_log[-200:]
 
                     try:
-                        output = await _execute_tool(tc.name, tc.args, session_id=session_id)
+                        # Use root session for MCP tools (file ops need platform session),
+                        # child session for skill tools (parent tracking).
+                        effective_sid = (
+                            root_session_id
+                            if mcp_client.is_server_tool(tc.name)
+                            else session_id
+                        )
+                        output = await _execute_tool(tc.name, tc.args, session_id=effective_sid)
                         step.status = "completed"
                         step.completed_at = time.time()
                         tool_results.append(

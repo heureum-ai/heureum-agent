@@ -93,3 +93,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setLoadingOlder: (v) => set({ isLoadingOlder: v }),
   setOldestLoadedPage: (p) => set({ oldestLoadedPage: p }),
 }));
+
+/**
+ * Build a Map from stepName to SubagentProgress for workflow tree integration.
+ * Used by TodoProgress to show inline tool call progress per agent.
+ */
+export function getSubagentProgressMap(): Map<string, import('../types').SubagentProgress> {
+  const msgs = useChatStore.getState().messages;
+  const map = new Map<string, import('../types').SubagentProgress>();
+  for (const m of msgs) {
+    if (m.subagentProgress?.stepName) {
+      map.set(m.subagentProgress.stepName, m.subagentProgress);
+    }
+  }
+  return map;
+}
