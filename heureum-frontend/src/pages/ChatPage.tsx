@@ -999,9 +999,20 @@ export default function ChatPage() {
 
       // coding tools (read, edit, write, grep, find, ls)
       if (CODING_TOOL_NAMES.has(tc.name)) {
-        if (!canExecuteTools() || !getSessionCwd()) {
-          results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: No working directory set.' });
+        if (!canExecuteTools()) {
+          results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: Desktop app required for file operations.' });
           continue;
+        }
+        if (!getSessionCwd()) {
+          // Auto-trigger select_cwd when a coding tool is called without CWD
+          const cwdResult = await window.api!.selectCwd();
+          if (cwdResult.path) {
+            setSessionCwd(cwdResult.path);
+            setCwd(cwdResult.path);
+          } else {
+            results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: No working directory set. User declined folder selection.' });
+            continue;
+          }
         }
         const codingArgs = JSON.parse(tc.arguments);
         const codingDisplay = `${tc.name}: ${JSON.stringify(codingArgs).substring(0, 100)}`;
