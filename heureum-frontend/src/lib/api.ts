@@ -420,9 +420,11 @@ function extractBaseCommand(fullCommand: string): string {
 function buildTools(): ToolDefinition[] {
   const tools: ToolDefinition[] = [ASK_QUESTION_TOOL];
   if (canExecuteTools()) {
-    tools.push(buildBashTool());
-    if (cachedCodingTools) {
-      tools.push(...cachedCodingTools);
+    if (sessionCwd) {
+      tools.push(buildBashTool());
+      if (cachedCodingTools) {
+        tools.push(...cachedCodingTools);
+      }
     }
     if (!cwdSelectionDeclined && !sessionCwd) {
       tools.push(buildSelectCwdTool());
@@ -1112,27 +1114,21 @@ export const chatAPI = {
         // --- Handle coding tool calls (read, edit, write, grep, find, ls) ---
         if (CODING_TOOL_NAMES.has(tc.name)) {
           if (!sessionCwd) {
-            // Auto-trigger select_cwd when a coding tool is called without CWD
-            const cwdResult = await window.api!.selectCwd();
-            if (cwdResult.path) {
-              setSessionCwd(cwdResult.path);
-            } else {
-              cwdSelectionDeclined = true;
-              const deniedInfo: ToolCallInfo = {
-                command: tc.name,
-                status: 'failed',
-                output: 'User declined to select a working directory.',
-                exitCode: 1,
-              };
-              onToolCall?.({ ...deniedInfo });
-              collectedToolCalls.push(deniedInfo);
-              toolResults.push({
-                type: 'function_call_output',
-                call_id: tc.call_id,
-                output: 'Error: No working directory set. User declined folder selection.',
-              });
-              continue;
-            }
+            const deniedInfo: ToolCallInfo = {
+              command: tc.name,
+              status: 'failed',
+              output: 'No working directory set.',
+              exitCode: 1,
+            };
+            onToolCall?.({ ...deniedInfo });
+            collectedToolCalls.push(deniedInfo);
+            const sessionId = data.metadata?.session_id || request.session_id || '';
+            return {
+              message:
+                'A working directory is required to run commands. You can set one using the "Set Working Directory" button in the header.',
+              session_id: sessionId,
+              toolCalls: collectedToolCalls,
+            };
           }
 
           const codingArgs = JSON.parse(tc.arguments);
@@ -1181,7 +1177,7 @@ export const chatAPI = {
           const codingToolInfo: ToolCallInfo = { command: tc.name, status: 'running' };
           onToolCall?.({ ...codingToolInfo });
 
-          const codingResult = await window.api!.codingTool(tc.name, codingArgs, sessionCwd!);
+          const codingResult = await window.api!.codingTool(tc.name, codingArgs, sessionCwd);
           const codingOutput = codingResult.success
             ? codingResult.output
             : `Error: ${codingResult.output || 'Coding tool execution failed'}`;
