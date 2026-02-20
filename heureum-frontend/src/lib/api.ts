@@ -86,6 +86,7 @@ function buildBashTool(): ToolDefinition {
   return {
     type: 'function',
     name: 'bash',
+    display_name: 'Bash',
     description: `Execute a bash command on the local system.${cwdNote}`,
     parameters: {
       type: 'object',
@@ -104,6 +105,7 @@ function buildSelectCwdTool(): ToolDefinition {
   return {
     type: 'function',
     name: 'select_cwd',
+    display_name: 'Select Directory',
     description: `Open a native folder picker dialog for the user to select a working directory for bash commands. ${cwdStatus} Call this before running bash commands if no working directory has been set, or if the user wants to change it.`,
     parameters: {
       type: 'object',
@@ -116,6 +118,7 @@ function buildSelectCwdTool(): ToolDefinition {
 const ASK_QUESTION_TOOL: ToolDefinition = {
   type: 'function',
   name: 'ask_question',
+  display_name: 'Question',
   description:
     'Ask the user a multiple-choice question when you need clarification or a decision',
   parameters: {
@@ -152,6 +155,7 @@ const ASK_QUESTION_TOOL: ToolDefinition = {
 const BROWSER_NAVIGATE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'browser_navigate',
+  display_name: 'Navigate',
   description: 'Navigate the current browser tab to a URL. Returns page content.',
   parameters: {
     type: 'object',
@@ -165,6 +169,7 @@ const BROWSER_NAVIGATE_TOOL: ToolDefinition = {
 const BROWSER_NEW_TAB_TOOL: ToolDefinition = {
   type: 'function',
   name: 'browser_new_tab',
+  display_name: 'New Tab',
   description: 'Open a URL in a new browser tab. Returns page content.',
   parameters: {
     type: 'object',
@@ -178,6 +183,7 @@ const BROWSER_NEW_TAB_TOOL: ToolDefinition = {
 const BROWSER_CLICK_TOOL: ToolDefinition = {
   type: 'function',
   name: 'browser_click',
+  display_name: 'Click',
   description: 'Click an element on the page using a CSS selector from browser_get_content.',
   parameters: {
     type: 'object',
@@ -191,6 +197,7 @@ const BROWSER_CLICK_TOOL: ToolDefinition = {
 const BROWSER_TYPE_TOOL: ToolDefinition = {
   type: 'function',
   name: 'browser_type',
+  display_name: 'Type',
   description: 'Type text into an input field using a CSS selector from browser_get_content.',
   parameters: {
     type: 'object',
@@ -205,6 +212,7 @@ const BROWSER_TYPE_TOOL: ToolDefinition = {
 const BROWSER_GET_CONTENT_TOOL: ToolDefinition = {
   type: 'function',
   name: 'browser_get_content',
+  display_name: 'Get Content',
   description:
     'Get current page content: title, URL, interactive elements with CSS selectors, and visible text. Call this before clicking or typing.',
   parameters: { type: 'object', properties: {} },
@@ -221,6 +229,7 @@ const BROWSER_TOOLS: ToolDefinition[] = [
 const GET_DEVICE_INFO_TOOL: ToolDefinition = {
   type: 'function',
   name: 'get_device_info',
+  display_name: 'Device Info',
   description: 'Get mobile device info: model, OS, battery, screen size, memory.',
   parameters: { type: 'object', properties: {} },
 };
@@ -228,6 +237,7 @@ const GET_DEVICE_INFO_TOOL: ToolDefinition = {
 const GET_SENSOR_DATA_TOOL: ToolDefinition = {
   type: 'function',
   name: 'get_sensor_data',
+  display_name: 'Sensor Data',
   description: 'Get live sensor readings: accelerometer, gyroscope, barometer.',
   parameters: { type: 'object', properties: {} },
 };
@@ -235,6 +245,7 @@ const GET_SENSOR_DATA_TOOL: ToolDefinition = {
 const GET_CONTACTS_TOOL: ToolDefinition = {
   type: 'function',
   name: 'get_contacts',
+  display_name: 'Contacts',
   description: 'Search phone contacts. Returns names, phone numbers, and emails.',
   parameters: {
     type: 'object',
@@ -247,6 +258,7 @@ const GET_CONTACTS_TOOL: ToolDefinition = {
 const GET_LOCATION_TOOL: ToolDefinition = {
   type: 'function',
   name: 'get_location',
+  display_name: 'Location',
   description: 'Get current GPS location: latitude, longitude, altitude, accuracy.',
   parameters: { type: 'object', properties: {} },
 };
@@ -254,6 +266,7 @@ const GET_LOCATION_TOOL: ToolDefinition = {
 const TAKE_PHOTO_TOOL: ToolDefinition = {
   type: 'function',
   name: 'take_photo',
+  display_name: 'Photo',
   description: 'Open the camera to take a photo.',
   parameters: {
     type: 'object',
@@ -266,6 +279,7 @@ const TAKE_PHOTO_TOOL: ToolDefinition = {
 const SEND_NOTIFICATION_TOOL: ToolDefinition = {
   type: 'function',
   name: 'send_notification',
+  display_name: 'Notification',
   description: 'Send a local push notification with title and body.',
   parameters: {
     type: 'object',
@@ -280,6 +294,7 @@ const SEND_NOTIFICATION_TOOL: ToolDefinition = {
 const GET_CLIPBOARD_TOOL: ToolDefinition = {
   type: 'function',
   name: 'get_clipboard',
+  display_name: 'Clipboard',
   description: 'Read current clipboard text.',
   parameters: { type: 'object', properties: {} },
 };
@@ -287,6 +302,7 @@ const GET_CLIPBOARD_TOOL: ToolDefinition = {
 const SET_CLIPBOARD_TOOL: ToolDefinition = {
   type: 'function',
   name: 'set_clipboard',
+  display_name: 'Clipboard',
   description: 'Copy text to clipboard.',
   parameters: {
     type: 'object',
@@ -300,6 +316,7 @@ const SET_CLIPBOARD_TOOL: ToolDefinition = {
 const SEND_SMS_TOOL: ToolDefinition = {
   type: 'function',
   name: 'send_sms',
+  display_name: 'SMS',
   description: 'Open SMS compose screen with pre-filled recipients and message.',
   parameters: {
     type: 'object',
@@ -314,6 +331,7 @@ const SEND_SMS_TOOL: ToolDefinition = {
 const SHARE_CONTENT_TOOL: ToolDefinition = {
   type: 'function',
   name: 'share_content',
+  display_name: 'Share',
   description: 'Open native share sheet to share text or URL.',
   parameters: {
     type: 'object',
@@ -328,6 +346,7 @@ const SHARE_CONTENT_TOOL: ToolDefinition = {
 const TRIGGER_HAPTIC_TOOL: ToolDefinition = {
   type: 'function',
   name: 'trigger_haptic',
+  display_name: 'Haptic',
   description: 'Trigger haptic vibration feedback.',
   parameters: {
     type: 'object',
@@ -340,6 +359,7 @@ const TRIGGER_HAPTIC_TOOL: ToolDefinition = {
 const OPEN_URL_TOOL: ToolDefinition = {
   type: 'function',
   name: 'open_url',
+  display_name: 'Open URL',
   description: 'Open a URL in the in-app browser.',
   parameters: {
     type: 'object',
@@ -371,6 +391,24 @@ function canExecuteTools(): boolean {
   return typeof window !== 'undefined' && window.api?.canExecuteTools === true;
 }
 
+// --- Coding tools (read, edit, write, grep, find, ls) from central tools.ts via IPC ---
+let cachedCodingTools: ToolDefinition[] | null = null;
+export let CODING_TOOL_NAMES: Set<string> = new Set();
+
+export async function initCodingTools(): Promise<void> {
+  if (!canExecuteTools()) return;
+  try {
+    const schemas = await window.api!.getCodingTools();
+    cachedCodingTools = schemas.map(s => ({
+      ...s,
+      type: 'function' as const,
+    }));
+    CODING_TOOL_NAMES = new Set(cachedCodingTools.map(t => t.name));
+  } catch {
+    cachedCodingTools = [];
+  }
+}
+
 export function isMobileApp(): boolean {
   return typeof window !== 'undefined' && window.mobileBridge?.available === true;
 }
@@ -382,8 +420,9 @@ function extractBaseCommand(fullCommand: string): string {
 function buildTools(): ToolDefinition[] {
   const tools: ToolDefinition[] = [ASK_QUESTION_TOOL];
   if (canExecuteTools()) {
-    if (sessionCwd) {
-      tools.push(buildBashTool());
+    tools.push(buildBashTool());
+    if (cachedCodingTools) {
+      tools.push(...cachedCodingTools);
     }
     if (!cwdSelectionDeclined && !sessionCwd) {
       tools.push(buildSelectCwdTool());
@@ -463,24 +502,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await apiClient.delete(`/api/v1/sessions/${sessionId}/`);
 }
 
-export async function storeToolResults(
-  sessionId: string,
-  results: FunctionToolResult[],
-): Promise<void> {
-  for (const result of results) {
-    try {
-      await apiClient.post('/api/v1/messages/', {
-        type: 'function_call_output',
-        role: 'tool',
-        status: 'completed',
-        content: result,
-        session_id: sessionId,
-      });
-    } catch {
-      // Best-effort storage, don't fail the main flow
-    }
-  }
-}
 
 export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
   // Fetch all pages of messages
@@ -721,6 +742,35 @@ export async function checkSessionUpdates(
 ): Promise<{ message_count: number; updated_at: string }> {
   const response = await apiClient.get<{ message_count: number; updated_at: string }>(
     `/api/v1/sessions/${sessionId}/check-updates/`,
+  );
+  return response.data;
+}
+
+export interface SubagentProgressStep {
+  tool_name: string;
+  detail: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface SubagentStatusItem {
+  child_session_id: string;
+  task: string;
+  status: string;
+  elapsed_seconds: number;
+  result_summary?: string | null;
+  current_iteration?: number;
+  progress?: SubagentProgressStep[];
+}
+
+export interface SubagentStatusResponse {
+  children: SubagentStatusItem[];
+}
+
+export async function fetchSubagentStatus(
+  sessionId: string,
+): Promise<SubagentStatusResponse> {
+  const response = await apiClient.get<SubagentStatusResponse>(
+    `/api/v1/subagent/status/${sessionId}/`,
   );
   return response.data;
 }
@@ -1054,6 +1104,97 @@ export const chatAPI = {
             type: 'function_call_output',
             call_id: tc.call_id,
             output: browserOutput || '(no output)',
+          });
+          continue;
+        }
+
+        // --- Handle coding tool calls (read, edit, write, grep, find, ls) ---
+        if (CODING_TOOL_NAMES.has(tc.name)) {
+          if (!sessionCwd) {
+            // Auto-trigger select_cwd when a coding tool is called without CWD
+            const cwdResult = await window.api!.selectCwd();
+            if (cwdResult.path) {
+              setSessionCwd(cwdResult.path);
+            } else {
+              cwdSelectionDeclined = true;
+              const deniedInfo: ToolCallInfo = {
+                command: tc.name,
+                status: 'failed',
+                output: 'User declined to select a working directory.',
+                exitCode: 1,
+              };
+              onToolCall?.({ ...deniedInfo });
+              collectedToolCalls.push(deniedInfo);
+              toolResults.push({
+                type: 'function_call_output',
+                call_id: tc.call_id,
+                output: 'Error: No working directory set. User declined folder selection.',
+              });
+              continue;
+            }
+          }
+
+          const codingArgs = JSON.parse(tc.arguments);
+
+          // Permission check
+          const codingBaseCommand = tc.name;
+          let codingDecision: PermissionDecision = 'allow_once';
+          const codingStored = await checkPermission(clientId, tc.name, codingBaseCommand);
+          if (codingStored === true) {
+            codingDecision = 'always_allow';
+          } else if (codingStored === false) {
+            codingDecision = 'deny';
+          } else if (onPermissionRequired) {
+            codingDecision = await onPermissionRequired({
+              toolName: tc.name,
+              command: `${tc.name}: ${JSON.stringify(codingArgs).substring(0, 100)}`,
+              callId: tc.call_id,
+            });
+          }
+
+          const codingLogDecision = codingStored === true ? 'auto_approved' : codingDecision;
+          const codingSid = data.metadata?.session_id || request.session_id || '';
+          logPermissionDecision(codingSid, clientId, tc.name, tc.name, codingBaseCommand, codingLogDecision, tc.call_id).catch(() => {});
+
+          if (codingDecision === 'deny') {
+            const deniedInfo: ToolCallInfo = {
+              command: tc.name,
+              status: 'failed',
+              output: 'Permission denied by user',
+              exitCode: -1,
+            };
+            onToolCall?.({ ...deniedInfo });
+            collectedToolCalls.push(deniedInfo);
+            toolResults.push({
+              type: 'function_call_output',
+              call_id: tc.call_id,
+              output: 'Permission denied: user rejected tool execution.',
+            });
+            continue;
+          }
+
+          if (codingDecision === 'always_allow' && codingStored !== true) {
+            await setPermission(clientId, tc.name, codingBaseCommand, true);
+          }
+
+          const codingToolInfo: ToolCallInfo = { command: tc.name, status: 'running' };
+          onToolCall?.({ ...codingToolInfo });
+
+          const codingResult = await window.api!.codingTool(tc.name, codingArgs, sessionCwd!);
+          const codingOutput = codingResult.success
+            ? codingResult.output
+            : `Error: ${codingResult.output || 'Coding tool execution failed'}`;
+
+          codingToolInfo.output = codingOutput || '(no output)';
+          codingToolInfo.status = codingResult.success ? 'completed' : 'failed';
+          codingToolInfo.exitCode = codingResult.success ? 0 : 1;
+          onToolCall?.({ ...codingToolInfo });
+          collectedToolCalls.push({ ...codingToolInfo });
+
+          toolResults.push({
+            type: 'function_call_output',
+            call_id: tc.call_id,
+            output: codingOutput || '(no output)',
           });
           continue;
         }

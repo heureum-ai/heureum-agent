@@ -15,11 +15,11 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.config import ApprovalChoice, CLIENT_TOOLS, settings
-from app.services.prompts.base import NO_OUTPUT
-from app.services.tool_chain import ChainRule, ChainStep, ToolChainRegistry
+from app.config import ApprovalChoice, settings
 from app.models import Message, ToolCallInfo
 from app.schemas.open_responses import MessageRole
+from app.services.prompts.base import NO_OUTPUT
+from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
@@ -38,6 +38,7 @@ class _ServerConnection:
     url: str
     _exit_stack: AsyncExitStack = field(default_factory=AsyncExitStack)
     session: Optional[ClientSession] = None
+    server_name: str = ""
 
     async def connect(self) -> ClientSession:
         """Establish streamable-http connection and initialize MCP session.
@@ -49,8 +50,14 @@ class _ServerConnection:
             streamablehttp_client(f"{self.url}/mcp")
         )
         session = await self._exit_stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
+        init_result = await session.initialize()
         self.session = session
+        # Capture server name from MCP protocol for diagnostics.
+        server_info = getattr(init_result, "serverInfo", None) or getattr(
+            init_result, "server_info", None
+        )
+        if server_info:
+            self.server_name = getattr(server_info, "name", "") or ""
         return session
 
     async def close(self) -> None:
@@ -81,12 +88,12 @@ class MCPClient:
 
         Args:
             server_urls (Optional[List[str]]): List of MCP server base URLs.
-                Defaults to ``[settings.MCP_SERVER_URL]`` if not provided.
+                Defaults to ``settings.get_mcp_server_urls()`` if not provided.
             chain_registry (Optional[ToolChainRegistry]): Shared registry for
                 tool chain rules. MCP chain metadata is registered here during
                 discovery. If None, chain rules from MCP metadata are ignored.
         """
-        self._server_urls = server_urls or [settings.MCP_SERVER_URL]
+        self._server_urls = server_urls or settings.get_mcp_server_urls()
         self._connections: Dict[str, _ServerConnection] = {}
         self._server_tool_names: Set[str] = set()
         self._tool_to_server: Dict[str, str] = {}  # tool_name -> server_url
@@ -94,6 +101,7 @@ class MCPClient:
         self._cache_timestamp: float = 0
         self._chain_registry = chain_registry
         self._approval_required_tools: Set[str] = set()  # from MCP meta
+        self._display_names: Dict[str, str] = {}
         self._pending_tool_calls: Dict[str, Dict[str, Any]] = {}
         self._auto_approved_tools: Dict[str, Set[str]] = {}
 
@@ -135,6 +143,10 @@ class MCPClient:
     async def discover_tools(self) -> List[Dict[str, Any]]:
         """Discover tools from all configured MCP servers.
 
+        Tool names are used as-is from MCP servers.  Servers are expected to
+        register tools with fully-qualified names (e.g. ``mcp_web__search``)
+        to prevent collisions.
+
         Returns cached results if available and not expired.
 
         Returns:
@@ -152,6 +164,9 @@ class MCPClient:
         if self._chain_registry:
             self._chain_registry.clear()
         self._approval_required_tools.clear()
+        self._display_names.clear()
+
+        _pending_chains: List[Tuple[str, list]] = []
 
         for url in self._server_urls:
             try:
@@ -159,36 +174,31 @@ class MCPClient:
                 response = await session.list_tools()
 
                 for tool in response.tools:
+                    tool_name = tool.name
+
                     self._available_tools.append(
                         {
                             "type": "function",
                             "function": {
-                                "name": tool.name,
+                                "name": tool_name,
                                 "description": tool.description or "",
                                 "parameters": tool.inputSchema,
                             },
                         }
                     )
-                    self._server_tool_names.add(tool.name)
-                    self._tool_to_server[tool.name] = url
+                    self._server_tool_names.add(tool_name)
+                    self._tool_to_server[tool_name] = url
 
-                    # Collect metadata: chain rules & approval requirements
+                    # Collect metadata
                     meta = getattr(tool, "meta", None) or {}
                     chain = meta.get("chain")
                     if isinstance(chain, list) and chain and self._chain_registry:
-                        steps = [
-                            ChainStep(
-                                target=entry["target"],
-                                extract=entry["extract"],
-                                arg_mapping=entry.get("arg_mapping", {}),
-                            )
-                            for entry in chain
-                        ]
-                        self._chain_registry.register(
-                            ChainRule(source=tool.name, steps=steps)
-                        )
+                        _pending_chains.append((tool_name, chain))
                     if meta.get("requires_approval"):
-                        self._approval_required_tools.add(tool.name)
+                        self._approval_required_tools.add(tool_name)
+                    display_name = meta.get("display_name")
+                    if display_name:
+                        self._display_names[tool_name] = display_name
 
                 logger.info(
                     "Discovered %d tools from MCP server %s: %s",
@@ -196,20 +206,43 @@ class MCPClient:
                     url,
                     [t.name for t in response.tools],
                 )
-                if self._chain_registry and self._chain_registry.rules:
-                    logger.info("Chain rules discovered: %s", list(self._chain_registry.rules.keys()))
-                if self._approval_required_tools:
-                    logger.info("Approval-required tools: %s", self._approval_required_tools)
 
             except Exception as e:
                 logger.warning("MCP server unavailable at %s: %s", url, e)
                 await self._disconnect_server(url)
 
+        # Register chain rules — target names are already fully-qualified.
+        if self._chain_registry and _pending_chains:
+            for source, raw_steps in _pending_chains:
+                steps = [
+                    ChainStep(
+                        target=entry["target"],
+                        extract=entry["extract"],
+                        arg_mapping=entry.get("arg_mapping", {}),
+                    )
+                    for entry in raw_steps
+                ]
+                self._chain_registry.register(ChainRule(source=source, steps=steps))
+            logger.info("Chain rules registered: %s", list(self._chain_registry.rules.keys()))
+
+        if self._approval_required_tools:
+            logger.info("Approval-required tools: %s", self._approval_required_tools)
+
         self._cache_timestamp = now
         return self._available_tools
 
-    async def call_tool(self, name: str, arguments: Dict[str, Any]) -> str:
+    async def call_tool(
+        self, name: str, arguments: Dict[str, Any], session_id: str = "", cwd: str = ""
+    ) -> str:
         """Call a tool on its MCP server and return the result as text.
+
+        Args:
+            name: Tool name (as registered by the MCP server).
+            arguments: Tool arguments.
+            session_id: Optional session ID. When provided, it is forwarded
+                to the MCP server via ``_meta`` so server-side tools can
+                scope operations to the session (e.g. save to platform DB).
+            cwd: Optional working directory from the user's session.
 
         On failure, returns an error message that guides the LLM to retry.
         """
@@ -217,9 +250,18 @@ class MCPClient:
         if not server_url:
             return f"Error: tool '{name}' not found on any MCP server"
 
+        meta = None
+        if session_id:
+            meta = {
+                "session_id": session_id,
+                "platform_api_url": settings.PLATFORM_API_URL,
+            }
+            if cwd:
+                meta["cwd"] = cwd
+
         try:
             session = await self._get_session(server_url)
-            result = await session.call_tool(name, arguments)
+            result = await session.call_tool(name, arguments, meta=meta)
             return self._extract_text(result)
         except Exception as e:
             logger.warning("Tool call failed (%s on %s): %s", name, server_url, e)
@@ -272,6 +314,11 @@ class MCPClient:
         """Set of tool names discovered from MCP servers."""
         return self._server_tool_names
 
+    @property
+    def display_names(self) -> Dict[str, str]:
+        """Display names extracted from MCP tool metadata."""
+        return dict(self._display_names)
+
     # ------------------------------------------------------------------
     # Tool approval
     # ------------------------------------------------------------------
@@ -282,11 +329,22 @@ class MCPClient:
         return tool_name in pending
 
     def classify_tool_calls(
-        self, tool_calls: List[ToolCallInfo], session_id: str
+        self,
+        tool_calls: List[ToolCallInfo],
+        session_id: str,
+        client_tool_names: Set[str] | None = None,
     ) -> Tuple[List[ToolCallInfo], List[ToolCallInfo]]:
-        """2-way classification: (client_calls, server_calls)."""
-        client_calls = [tc for tc in tool_calls if tc.name in CLIENT_TOOLS]
-        server_calls = [tc for tc in tool_calls if tc.name not in CLIENT_TOOLS]
+        """2-way classification: (client_calls, server_calls).
+
+        Args:
+            tool_calls: All tool calls from the LLM response.
+            session_id: Active session identifier.
+            client_tool_names: Names of client-side tools (from request).
+                Falls back to empty set if not provided.
+        """
+        names = client_tool_names or set()
+        client_calls = [tc for tc in tool_calls if tc.name in names]
+        server_calls = [tc for tc in tool_calls if tc.name not in names]
         return client_calls, server_calls
 
     def request_approval(
@@ -298,10 +356,10 @@ class MCPClient:
         assistant_lc_message: Any = None,
         remaining_chained: Optional[List[ToolCallInfo]] = None,
     ) -> Dict[str, Any]:
-        """Store pending state and return ask_question payload.
+        """Store pending state and return tool_approval payload.
 
         Returns:
-            {"approval_call_id": str, "question": dict}
+            {"approval_call_id": str, "question": dict, "display_name": str}
         """
         approval_call_id = _gen_call_id()
         approval_only = [tc for tc in server_calls if self.needs_approval(tc.name, session_id)]
@@ -313,9 +371,13 @@ class MCPClient:
             "assistant_lc_message": assistant_lc_message,
             "remaining_chained": remaining_chained or [],
         }
+        # Use the first tool's display_name for the approval UI
+        first_tool = approval_only[0] if approval_only else server_calls[0]
+        display_name = self._display_names.get(first_tool.name, first_tool.name)
         return {
             "approval_call_id": approval_call_id,
             "question": self._format_approval_question(approval_only),
+            "display_name": display_name,
         }
 
     def handle_approval_response(
@@ -344,11 +406,16 @@ class MCPClient:
             return None
 
         filtered = [
-            m for m in messages
+            m
+            for m in messages
             if not (m.role == MessageRole.TOOL and m.tool_call_id == pending["approval_call_id"])
         ]
 
-        choice = ApprovalChoice(answer) if answer in ApprovalChoice._value2member_map_ else ApprovalChoice.DENY
+        choice = (
+            ApprovalChoice(answer)
+            if answer in ApprovalChoice._value2member_map_
+            else ApprovalChoice.DENY
+        )
         decision = choice.decision
 
         if choice is ApprovalChoice.ALWAYS_ALLOW:
@@ -378,22 +445,24 @@ class MCPClient:
 
     @staticmethod
     def _format_approval_question(tool_calls: List[ToolCallInfo]) -> dict:
-        """Build ask_question arguments describing the tools awaiting approval."""
+        """Build tool_approval arguments describing the tools awaiting approval."""
         if len(tool_calls) == 1:
             tc = tool_calls[0]
             question = f"Allow {tc.name}({json.dumps(tc.args, ensure_ascii=False)})?"
         else:
             lines = [
-                f"  - {tc.name}({json.dumps(tc.args, ensure_ascii=False)})"
-                for tc in tool_calls
+                f"  - {tc.name}({json.dumps(tc.args, ensure_ascii=False)})" for tc in tool_calls
             ]
             question = "Allow the following tool executions?\n" + "\n".join(lines)
-        return {"question": question, "choices": ApprovalChoice.options()}
+        tool_name = tool_calls[0].name if tool_calls else "unknown"
+        return {
+            "question": question,
+            "choices": ApprovalChoice.options(),
+            "tool_name": tool_name,
+        }
 
     @staticmethod
-    def _extract_approval_answer(
-        messages: List[Message], approval_call_id: str
-    ) -> Optional[str]:
+    def _extract_approval_answer(messages: List[Message], approval_call_id: str) -> Optional[str]:
         """Find the approval answer in incoming messages by matching call_id.
 
         # TODO: "User chose: " / "User input: " prefix stripping is
@@ -405,9 +474,9 @@ class MCPClient:
             if msg.role == MessageRole.TOOL and msg.tool_call_id == approval_call_id:
                 content = msg.content or ""
                 if content.startswith("User chose: "):
-                    return content[len("User chose: "):]
+                    return content[len("User chose: ") :]
                 if content.startswith("User input: "):
-                    return content[len("User input: "):]
+                    return content[len("User input: ") :]
                 return content
         return None
 

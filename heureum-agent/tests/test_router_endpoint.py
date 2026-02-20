@@ -5,16 +5,14 @@
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-import pytest
-from httpx import ASGITransport, AsyncClient
-
 import app.routers.agent as exp_module
-from app.main import app
-from app.models import AgentResponse, LLMResult, LLMResultType, ToolCallInfo
-from app.schemas.open_responses import Usage
+import pytest
 from app.config import ApprovalChoice
+from app.main import app
+from app.models import LLMResult, LLMResultType, ToolCallInfo
+from app.schemas.open_responses import Usage
 from app.services.providers.mcp import MCPClient
-
+from httpx import ASGITransport, AsyncClient
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -36,7 +34,8 @@ def _patch_module(monkeypatch):
     monkeypatch.setattr(exp_module, "agent_service", mock_svc)
 
     # Mock chain_registry (no-op: no chain rules registered)
-    from app.services.tool_chain import ToolChainRegistry
+    from app.services.providers.tool import ToolChainRegistry
+
     mock_chain_registry = ToolChainRegistry()
     monkeypatch.setattr(exp_module, "chain_registry", mock_chain_registry)
 
@@ -46,10 +45,12 @@ def _patch_module(monkeypatch):
     mock_mcp._pending_tool_calls = {}
     mock_mcp._auto_approved_tools = {}
     mock_mcp._approval_required_tools = {"web_search", "web_fetch"}
+    mock_mcp.display_names = {}
     _real = MCPClient.__new__(MCPClient)
     _real._pending_tool_calls = mock_mcp._pending_tool_calls
     _real._auto_approved_tools = mock_mcp._auto_approved_tools
     _real._approval_required_tools = mock_mcp._approval_required_tools
+    _real._display_names = {}
     mock_mcp.classify_tool_calls = _real.classify_tool_calls
     mock_mcp.needs_approval = _real.needs_approval
     mock_mcp.handle_approval_response = _real.handle_approval_response
@@ -120,8 +121,10 @@ class TestCreateResponseText:
 
     async def test_text_response_no_tools(self, client, mock_svc):
         """A simple text request returns status=completed and the expected text."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hello!",
+        # Server-only tools are always present, so process_messages_with_tools is called
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="Hello!",
             session_id="test_session",
             usage=Usage.zero(),
         )
@@ -146,8 +149,9 @@ class TestCreateResponseText:
 
     async def test_session_id_in_metadata(self, client, mock_svc):
         """The response metadata includes the session_id."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="OK",
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="OK",
             session_id="my_session",
             usage=Usage.zero(),
         )
@@ -186,17 +190,9 @@ class TestCreateResponseToolCall:
         assert fc_items[0]["name"] == "ask_question"
 
     async def test_server_tool_execution(self, client, mock_svc, mock_mcp):
-        """A server tool is executed via mcp_client and the final text is returned."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculator",
-                    "description": "Do math",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        """A server (MCP) tool is executed via mcp_client and the final text is returned."""
+        # MCP tools are NOT in request.tools — they are discovered server-side
+        mock_mcp.server_tool_names = ["calculator"]
         # First call: LLM wants to invoke a server tool
         # Second call: LLM produces the final text answer
         mock_svc.process_messages_with_tools.side_effect = [
@@ -218,7 +214,7 @@ class TestCreateResponseToolCall:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "2"
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("calculate", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("calculate", tools=[]))
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "completed"
@@ -233,16 +229,8 @@ class TestCreateResponseToolCall:
 
     async def test_tool_call_with_result_in_output(self, client, mock_svc, mock_mcp):
         """Server tool call + result pairs appear as adjacent output items."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculator",
-                    "description": "Do math",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        # MCP tools are NOT in request.tools
+        mock_mcp.server_tool_names = ["calculator"]
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
                 type=LLMResultType.TOOL_CALL,
@@ -262,7 +250,7 @@ class TestCreateResponseToolCall:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "result text"
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("go", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("go", tools=[]))
         data = resp.json()
         # Server tool history is in metadata, not output
         tool_history = data["metadata"]["tool_history"]
@@ -281,16 +269,7 @@ class TestErrorHandling:
 
     async def test_not_implemented_tool(self, client, mock_svc, mock_mcp):
         """A tool with no executor returns status=failed, error type=server_error with code."""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "unknown_tool",
-                    "description": "No executor",
-                    "parameters": {"type": "object", "properties": {}},
-                },
-            }
-        ]
+        # unknown_tool is NOT a client tool (not in request.tools) — classified as server call
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
             tool_calls=[
@@ -299,10 +278,10 @@ class TestErrorHandling:
             session_id="s1",
             usage=Usage.zero(),
         )
-        # is_server_tool returns False, so _execute_tool raises NotImplementedError
+        # is_server_tool returns False, so classified as unsupported
         mock_mcp.is_server_tool.return_value = False
 
-        resp = await client.post(ENDPOINT, json=_tool_payload("run it", tools=tools))
+        resp = await client.post(ENDPOINT, json=_tool_payload("run it", tools=[]))
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "failed"
@@ -311,7 +290,7 @@ class TestErrorHandling:
 
     async def test_server_error(self, client, mock_svc):
         """A general exception returns status=failed, error type=server_error."""
-        mock_svc.process_messages.side_effect = RuntimeError("kaboom")
+        mock_svc.process_messages_with_tools.side_effect = RuntimeError("kaboom")
 
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         assert resp.status_code == 200
@@ -336,20 +315,30 @@ class TestResponseStructure:
 
     async def test_response_has_required_fields(self, client, mock_svc):
         """The response JSON contains all required top-level fields."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="Hi",
             session_id="s1",
             usage=Usage.zero(),
         )
         resp = await client.post(ENDPOINT, json=_text_payload("Hi"))
         data = resp.json()
-        for field in ("id", "object", "created_at", "model", "status", "output", "usage"):
+        for field in (
+            "id",
+            "object",
+            "created_at",
+            "model",
+            "status",
+            "output",
+            "usage",
+        ):
             assert field in data, f"Missing field: {field}"
 
     async def test_response_object_literal(self, client, mock_svc):
         """The 'object' field is always the literal string 'response'."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="Hi",
             session_id="s1",
             usage=Usage.zero(),
         )
@@ -359,8 +348,9 @@ class TestResponseStructure:
 
     async def test_usage_structure(self, client, mock_svc):
         """The usage object contains input_tokens, output_tokens, and total_tokens."""
-        mock_svc.process_messages.return_value = AgentResponse(
-            message="Hi",
+        mock_svc.process_messages_with_tools.return_value = LLMResult(
+            type=LLMResultType.TEXT,
+            text="Hi",
             session_id="s1",
             usage=Usage.zero(),
         )
@@ -399,8 +389,10 @@ class TestToolApproval:
         mock_mcp._pending_tool_calls.clear()
         mock_mcp._auto_approved_tools.clear()
 
-    async def test_approval_tool_returns_ask_question(self, client, mock_svc, mock_mcp):
-        """web_search triggers an ask_question approval instead of executing."""
+    async def test_approval_tool_returns_tool_approval(self, client, mock_svc, mock_mcp):
+        """web_search triggers a tool_approval instead of executing."""
+        # web_search is an MCP server tool, not in request.tools
+        mock_mcp.server_tool_names = ["web_search"]
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
             tool_calls=[
@@ -412,19 +404,21 @@ class TestToolApproval:
 
         resp = await client.post(
             ENDPOINT,
-            json=_tool_payload("search", tools=WEB_SEARCH_TOOLS, session_id="s1"),
+            json=_tool_payload("search", tools=[], session_id="s1"),
         )
         data = resp.json()
 
         assert data["status"] == "incomplete"
         fc_items = [o for o in data["output"] if o.get("type") == "function_call"]
         assert len(fc_items) == 1
-        assert fc_items[0]["name"] == "ask_question"
+        assert fc_items[0]["name"] == "tool_approval"
         args = json.loads(fc_items[0]["arguments"])
         assert "web_search" in args["question"]
-        assert ApprovalChoice.ALLOW_ONCE in args["choices"]
-        assert ApprovalChoice.ALWAYS_ALLOW in args["choices"]
-        assert ApprovalChoice.DENY in args["choices"]
+        assert args["tool_name"] == "web_search"
+        choice_labels = [c["label"] for c in args["choices"]]
+        assert ApprovalChoice.ALLOW_ONCE.value in choice_labels
+        assert ApprovalChoice.ALWAYS_ALLOW.value in choice_labels
+        assert ApprovalChoice.DENY.value in choice_labels
 
         # Tool was NOT executed
         mock_mcp.call_tool.assert_not_called()
@@ -457,10 +451,17 @@ class TestToolApproval:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_1", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_1",
-                     "output": ApprovalChoice.ALLOW_ONCE},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_1",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_1",
+                        "output": ApprovalChoice.ALLOW_ONCE,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -469,7 +470,9 @@ class TestToolApproval:
         data = resp.json()
 
         assert data["status"] == "completed"
-        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"})
+        mock_mcp.call_tool.assert_called_once_with(
+            "web_search", {"query": "test"}, session_id="s1", cwd=""
+        )
         # Pending state was cleaned up
         assert "s1" not in mock_mcp._pending_tool_calls
         # NOT auto-approved for future calls
@@ -486,17 +489,27 @@ class TestToolApproval:
         mock_mcp.is_server_tool.return_value = True
         mock_mcp.call_tool.return_value = "ok"
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="done", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="done",
+            session_id="s1",
+            usage=Usage.zero(),
         )
 
         resp = await client.post(
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_2", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_2",
-                     "output": ApprovalChoice.ALWAYS_ALLOW},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_2",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_2",
+                        "output": ApprovalChoice.ALWAYS_ALLOW,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -514,17 +527,27 @@ class TestToolApproval:
             "input_messages": [],
         }
         mock_svc.process_messages_with_tools.return_value = LLMResult(
-            type=LLMResultType.TEXT, text="I cannot search", session_id="s1", usage=Usage.zero(),
+            type=LLMResultType.TEXT,
+            text="I cannot search",
+            session_id="s1",
+            usage=Usage.zero(),
         )
 
         resp = await client.post(
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "function_call", "name": "ask_question",
-                     "call_id": "ask_q_3", "arguments": "{}"},
-                    {"type": "function_call_output", "call_id": "ask_q_3",
-                     "output": ApprovalChoice.DENY},
+                    {
+                        "type": "function_call",
+                        "name": "ask_question",
+                        "call_id": "ask_q_3",
+                        "arguments": "{}",
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "ask_q_3",
+                        "output": ApprovalChoice.DENY,
+                    },
                 ],
                 "tools": WEB_SEARCH_TOOLS,
                 "metadata": {"session_id": "s1"},
@@ -542,6 +565,7 @@ class TestToolApproval:
     async def test_auto_approved_tool_skips_approval(self, client, mock_svc, mock_mcp):
         """A tool in _auto_approved_tools is executed without asking."""
         mock_mcp._auto_approved_tools["s1"] = {"web_search"}
+        mock_mcp.server_tool_names = ["web_search"]
 
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
@@ -553,7 +577,10 @@ class TestToolApproval:
                 usage=Usage.zero(),
             ),
             LLMResult(
-                type=LLMResultType.TEXT, text="auto result", session_id="s1", usage=Usage.zero(),
+                type=LLMResultType.TEXT,
+                text="auto result",
+                session_id="s1",
+                usage=Usage.zero(),
             ),
         ]
         mock_mcp.is_server_tool.return_value = True
@@ -561,7 +588,7 @@ class TestToolApproval:
 
         resp = await client.post(
             ENDPOINT,
-            json=_tool_payload("go", tools=WEB_SEARCH_TOOLS, session_id="s1"),
+            json=_tool_payload("go", tools=[], session_id="s1"),
         )
         data = resp.json()
 
@@ -593,11 +620,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_new_tab", "args": {"url": "https://coupang.com"}, "id": "call_1"},
+                    {
+                        "name": "browser_new_tab",
+                        "args": {"url": "https://coupang.com"},
+                        "id": "call_1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content='{"url":"https://coupang.com"}',
-                    tool_call_id="call_1", tool_name="browser_new_tab"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"url":"https://coupang.com"}',
+                tool_call_id="call_1",
+                tool_name="browser_new_tab",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
@@ -614,15 +649,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "Open coupang"}]},
-                    {"type": "function_call", "name": "browser_new_tab",
-                     "call_id": "call_1", "arguments": '{"url":"https://coupang.com"}'},
-                    {"type": "function_call_output", "call_id": "call_1",
-                     "output": "Successfully opened https://coupang.com"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "Open coupang"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_new_tab",
+                        "call_id": "call_1",
+                        "arguments": '{"url":"https://coupang.com"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_1",
+                        "output": "Successfully opened https://coupang.com",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -633,14 +687,14 @@ class TestClientToolContinuation:
         # (not the duplicate user message)
         call_args = mock_svc.process_messages_with_tools.call_args
         messages_arg = call_args.kwargs.get("messages", call_args[0][0] if call_args[0] else None)
-        assert messages_arg == [], (
-            f"Expected empty messages but got {messages_arg}"
-        )
+        assert messages_arg == [], f"Expected empty messages but got {messages_arg}"
 
         # Verify placeholder in history was replaced with actual result
         assert existing_history[2].content == "Successfully opened https://coupang.com"
 
-    async def test_continuation_with_failed_tool_gets_llm_response(self, client, mock_svc, mock_mcp):
+    async def test_continuation_with_failed_tool_gets_llm_response(
+        self, client, mock_svc, mock_mcp
+    ):
         """When a client tool fails, the LLM should see the error and respond."""
         from app.models import Message
         from app.schemas.open_responses import MessageRole
@@ -651,11 +705,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_click", "args": {"selector": "#btn"}, "id": "call_c1"},
+                    {
+                        "name": "browser_click",
+                        "args": {"selector": "#btn"},
+                        "id": "call_c1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content='{"selector":"#btn"}',
-                    tool_call_id="call_c1", tool_name="browser_click"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"selector":"#btn"}',
+                tool_call_id="call_c1",
+                tool_name="browser_click",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
@@ -670,15 +732,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "Click the button"}]},
-                    {"type": "function_call", "name": "browser_click",
-                     "call_id": "call_c1", "arguments": '{"selector":"#btn"}'},
-                    {"type": "function_call_output", "call_id": "call_c1",
-                     "output": "Error: Element not found"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "Click the button"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_click",
+                        "call_id": "call_c1",
+                        "arguments": '{"selector":"#btn"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_c1",
+                        "output": "Error: Element not found",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -697,7 +778,6 @@ class TestClientToolContinuation:
         """When session is lost (empty history), echo recovery must produce
         [UserMessage, AIMessage{tool_calls}, ToolMessage] — NOT
         [AIMessage, UserMessage, ToolMessage] which violates the OpenAI API."""
-        from app.models import Message
         from app.schemas.open_responses import MessageRole
 
         # Empty session = echo recovery branch
@@ -714,15 +794,34 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "쿠팡 열어줘"}]},
-                    {"type": "function_call", "name": "browser_navigate",
-                     "call_id": "call_nav1", "arguments": '{"url":"https://coupang.com"}'},
-                    {"type": "function_call_output", "call_id": "call_nav1",
-                     "output": "Error: browser extension not connected"},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "쿠팡 열어줘"}],
+                    },
+                    {
+                        "type": "function_call",
+                        "name": "browser_navigate",
+                        "call_id": "call_nav1",
+                        "arguments": '{"url":"https://coupang.com"}',
+                    },
+                    {
+                        "type": "function_call_output",
+                        "call_id": "call_nav1",
+                        "output": "Error: browser extension not connected",
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s2"},
             },
         )
@@ -752,11 +851,19 @@ class TestClientToolContinuation:
                 role=MessageRole.ASSISTANT,
                 content="",
                 tool_calls=[
-                    {"name": "browser_new_tab", "args": {"url": "https://coupang.com"}, "id": "call_1"},
+                    {
+                        "name": "browser_new_tab",
+                        "args": {"url": "https://coupang.com"},
+                        "id": "call_1",
+                    },
                 ],
             ),
-            Message(role=MessageRole.TOOL, content="Error: extension not connected",
-                    tool_call_id="call_1", tool_name="browser_new_tab"),
+            Message(
+                role=MessageRole.TOOL,
+                content="Error: extension not connected",
+                tool_call_id="call_1",
+                tool_name="browser_new_tab",
+            ),
             Message(role=MessageRole.ASSISTANT, content="확장 프로그램을 설치해 주세요."),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
@@ -773,15 +880,40 @@ class TestClientToolContinuation:
             ENDPOINT,
             json={
                 "input": [
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "쿠팡 열어줘"}]},
-                    {"type": "message", "role": "assistant", "status": "completed",
-                     "content": [{"type": "output_text", "text": "확장 프로그램을 설치해 주세요."}]},
-                    {"type": "message", "role": "user", "status": "completed",
-                     "content": [{"type": "input_text", "text": "연결했어"}]},
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "쿠팡 열어줘"}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "확장 프로그램을 설치해 주세요.",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "status": "completed",
+                        "content": [{"type": "input_text", "text": "연결했어"}],
+                    },
                 ],
-                "tools": [{"type": "function", "function": {"name": "ask_question",
-                           "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ask_question",
+                            "description": "Ask",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    }
+                ],
                 "metadata": {"session_id": "s1"},
             },
         )
@@ -796,7 +928,10 @@ class TestClientToolContinuation:
         assert messages_arg[0].content == "연결했어"
 
     async def test_continuation_keeps_tool_path_without_forced_cutoff(
-        self, client, mock_svc, mock_mcp,
+        self,
+        client,
+        mock_svc,
+        mock_mcp,
     ):
         """Consecutive continuations should keep the tool-enabled path.
 
@@ -809,30 +944,70 @@ class TestClientToolContinuation:
         existing_history = [
             Message(role=MessageRole.USER, content="검색해줘"),
             Message(
-                role=MessageRole.ASSISTANT, content="",
-                tool_calls=[{"name": "browser_click", "args": {"selector": ".btn"}, "id": "call_r1"}],
+                role=MessageRole.ASSISTANT,
+                content="",
+                tool_calls=[
+                    {
+                        "name": "browser_click",
+                        "args": {"selector": ".btn"},
+                        "id": "call_r1",
+                    }
+                ],
             ),
-            Message(role=MessageRole.TOOL, content='{"selector":".btn"}',
-                    tool_call_id="call_r1", tool_name="browser_click"),
+            Message(
+                role=MessageRole.TOOL,
+                content='{"selector":".btn"}',
+                tool_call_id="call_r1",
+                tool_name="browser_click",
+            ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
         mock_svc.process_messages_with_tools.side_effect = [
-            LLMResult(type=LLMResultType.TEXT, text="Retrying...", session_id="s1", usage=Usage.zero()),
-            LLMResult(type=LLMResultType.TEXT, text="Still trying...", session_id="s1", usage=Usage.zero()),
+            LLMResult(
+                type=LLMResultType.TEXT,
+                text="Retrying...",
+                session_id="s1",
+                usage=Usage.zero(),
+            ),
+            LLMResult(
+                type=LLMResultType.TEXT,
+                text="Still trying...",
+                session_id="s1",
+                usage=Usage.zero(),
+            ),
         ]
 
         continuation_payload = {
             "input": [
-                {"type": "message", "role": "user", "status": "completed",
-                 "content": [{"type": "input_text", "text": "검색해줘"}]},
-                {"type": "function_call", "name": "browser_click",
-                 "call_id": "call_r1", "arguments": '{"selector":".btn"}'},
-                {"type": "function_call_output", "call_id": "call_r1",
-                 "output": "Error: Element not found"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "status": "completed",
+                    "content": [{"type": "input_text", "text": "검색해줘"}],
+                },
+                {
+                    "type": "function_call",
+                    "name": "browser_click",
+                    "call_id": "call_r1",
+                    "arguments": '{"selector":".btn"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_r1",
+                    "output": "Error: Element not found",
+                },
             ],
-            "tools": [{"type": "function", "function": {"name": "ask_question",
-                       "description": "Ask", "parameters": {"type": "object", "properties": {}}}}],
+            "tools": [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "ask_question",
+                        "description": "Ask",
+                        "parameters": {"type": "object", "properties": {}},
+                    },
+                }
+            ],
             "metadata": {"session_id": "s1"},
         }
 

@@ -19,6 +19,8 @@
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.0",
+    "@heureum/coding": "file:../heureum-client-tools/coding",
+    "@heureum/web": "file:../heureum-client-tools/web",
     "electron-updater": "^6.7.0",
     "ws": "^8.19.0"
   },

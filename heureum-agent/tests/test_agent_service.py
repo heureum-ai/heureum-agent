@@ -5,18 +5,20 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+# TOOL_SCHEMA_MAP removed — use inline schema dicts in tests
+from app.config import settings
 from app.models import LLMResultType, Message
 from app.schemas.open_responses import MessageRole
-from app.schemas.tool_schema import TOOL_SCHEMA_MAP
-from app.config import settings
-from app.services.prompts.base import COMPACTION_PREFIX
 from app.services.agent_service import (
     AgentService,
-    _is_thought_signature_error,
+    _strip_tool_call_narration,
     _strip_tool_messages,
-    _is_context_overflow_error,
 )
 from app.services.compaction.settings import CompactionSettings
+from app.services.error import LLMErrorClassifier
+from app.services.prompts.compaction import COMPACTION_PREFIX
+from app.services.providers.skill import SkillProvider
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 # ---------------------------------------------------------------------------
@@ -42,10 +44,11 @@ def _mock_tool_call(name="bash", args=None, call_id="call_1"):
 
 def _create_service(**kwargs) -> AgentService:
     """Instantiate an AgentService with a mocked LLM for unit testing."""
-    with patch("app.services.agent_service.ChatOpenAI") as mock_cls:
-        mock_llm = AsyncMock()
-        mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-        mock_cls.return_value = mock_llm
+    if "skill_provider" not in kwargs:
+        kwargs["skill_provider"] = SkillProvider()
+    mock_llm = AsyncMock()
+    mock_llm.bind_tools = MagicMock(return_value=mock_llm)
+    with patch("app.services.agent_service.create_llm", return_value=mock_llm):
         svc = AgentService(**kwargs)
         svc.llm = mock_llm
         return svc
@@ -62,7 +65,7 @@ class TestIsContextOverflowError:
     def test_context_length_exceeded(self):
         """Verify detection of maximum context length error messages."""
         assert (
-            _is_context_overflow_error(
+            LLMErrorClassifier.is_context_overflow(
                 Exception("This model's maximum context length is 128000 tokens")
             )
             is True
@@ -70,108 +73,157 @@ class TestIsContextOverflowError:
 
     def test_too_many_tokens(self):
         """Verify detection of too many tokens error messages."""
-        assert _is_context_overflow_error(Exception("too many tokens")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("too many tokens")) is True
 
     def test_content_too_large(self):
         """Verify detection of content_too_large error messages."""
-        assert _is_context_overflow_error(Exception("content_too_large")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("content_too_large")) is True
 
     def test_max_tokens(self):
         """Verify detection of max_tokens exceeded error messages."""
-        assert _is_context_overflow_error(Exception("max_tokens exceeded")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("max_tokens exceeded")) is True
 
     def test_prompt_too_long(self):
         """Verify detection of prompt is too long error messages."""
-        assert _is_context_overflow_error(Exception("prompt is too long")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("prompt is too long")) is True
 
     def test_input_too_long(self):
         """Verify detection of input too long for model error messages."""
-        assert _is_context_overflow_error(Exception("input too long for model")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("input too long for model")) is True
 
     def test_string_too_long(self):
         """Verify detection of string too long error messages."""
-        assert _is_context_overflow_error(Exception("string too long")) is True
+        assert LLMErrorClassifier.is_context_overflow(Exception("string too long")) is True
 
     def test_unrelated_error(self):
         """Verify that unrelated errors are not classified as overflow."""
-        assert _is_context_overflow_error(Exception("connection timeout")) is False
+        assert LLMErrorClassifier.is_context_overflow(Exception("connection timeout")) is False
 
 
 # ---------------------------------------------------------------------------
-# _make_system_prompt
+# _prepare_prompt_and_tools
 # ---------------------------------------------------------------------------
 
 
-class TestMakeSystemPrompt:
-    """Tests for system prompt construction via _make_system_prompt."""
+class TestPreparePromptAndTools:
+    """Tests for the unified prompt + tool resolution method."""
 
-    def test_without_instructions(self):
-        """Verify prompt includes tool names but omits instructions tag when none given."""
+    _BASH_SCHEMA = {
+        "type": "function",
+        "function": {
+            "name": "bash",
+            "description": "Run",
+            "parameters": {"type": "object"},
+        },
+    }
+    _ASK_SCHEMA = {
+        "type": "function",
+        "function": {
+            "name": "ask_question",
+            "description": "Ask",
+            "parameters": {"type": "object"},
+        },
+    }
+
+    def test_prompt_without_instructions(self):
+        """Verify prompt includes identity but omits instructions tag when none given."""
         svc = _create_service()
-        prompt = svc._make_system_prompt(["bash"])
-        assert "bash" in prompt
+        prompt, tools = svc._prepare_prompt_and_tools()
+        assert "<identity>" in prompt
         assert "<instructions>" not in prompt
+        # Server-only tools are always included
+        server_names = {t["function"]["name"] for t in tools}
+        assert "manage_todo" in server_names
 
-    def test_with_instructions(self):
+    def test_prompt_with_instructions(self):
         """Verify custom instructions are wrapped in instructions tags."""
         svc = _create_service()
-        prompt = svc._make_system_prompt(["bash"], instructions="Be concise.")
+        prompt, _ = svc._prepare_prompt_and_tools(instructions="Be concise.")
         assert "<instructions>" in prompt
         assert "Be concise." in prompt
 
-    def test_mcp_tools_included(self):
-        """Verify MCP tool descriptions are included in the system prompt."""
-        mcp_tools = [
+    def test_client_tools_included(self):
+        """Verify client-provided tool guides are included in the system prompt."""
+        svc = _create_service()
+        guides = ['<tool_guide name="bash">\nUse bash.\n</tool_guide>']
+        prompt, _ = svc._prepare_prompt_and_tools(client_tool_prompts=guides)
+        assert '<tool_guide name="bash">' in prompt
+
+    def test_no_client_schemas_returns_all_server_tools(self):
+        """Without client schemas, all server skill tools are still included."""
+        svc = _create_service()
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_todo" in names
+        assert "notify_user" in names
+        assert "manage_periodic_task" in names
+        assert "sessions_spawn" in names
+
+    def test_periodic_task_included_with_web_search(self):
+        """When client provides web_search, periodic_task tools are included."""
+        svc = _create_service()
+        web_search_schema = {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search",
+                "parameters": {"type": "object"},
+            },
+        }
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[web_search_schema],
+        )
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_periodic_task" in names
+        assert "manage_todo" in names
+
+    def test_client_schemas_returned(self):
+        """Verify client schemas are passed through."""
+        svc = _create_service()
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[self._BASH_SCHEMA, self._ASK_SCHEMA],
+        )
+        names = [s["function"]["name"] for s in tools]
+        assert "bash" in names
+        assert "ask_question" in names
+
+    def test_mcp_tools_appended(self):
+        """Verify MCP tool schemas are appended alongside client schemas."""
+        mcp = [{"type": "function", "function": {"name": "mcp_tool"}}]
+        svc = _create_service(mcp_tools=mcp)
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[self._BASH_SCHEMA],
+        )
+        names = [s["function"]["name"] for s in tools]
+        assert "bash" in names
+        assert "mcp_tool" in names
+
+    def test_mcp_tools_activate_skills(self):
+        """Verify MCP tools count as client tools for skill activation."""
+        mcp = [
             {
                 "type": "function",
                 "function": {
                     "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {"type": "object", "properties": {}},
+                    "description": "Search",
+                    "parameters": {"type": "object"},
                 },
             }
         ]
-        svc = _create_service(mcp_tools=mcp_tools)
-        prompt = svc._make_system_prompt([])
-        assert "web_search" in prompt
-
-
-# ---------------------------------------------------------------------------
-# _resolve_tool_schemas
-# ---------------------------------------------------------------------------
-
-
-class TestResolveToolSchemas:
-    """Tests for resolving tool name strings into OpenAI-format schemas."""
-
-    def test_known_tools(self):
-        """Verify known tool names are resolved to their schemas."""
-        svc = _create_service()
-        schemas = svc._resolve_tool_schemas(["bash", "ask_question"])
-        names = [s["function"]["name"] for s in schemas]
-        assert "bash" in names
-        assert "ask_question" in names
-
-    def test_unknown_tools_ignored(self):
-        """Verify unknown tool names are silently skipped."""
-        svc = _create_service()
-        schemas = svc._resolve_tool_schemas(["nonexistent", "bash"])
-        assert len(schemas) == 1
-        assert schemas[0]["function"]["name"] == "bash"
-
-    def test_mcp_tools_appended(self):
-        """Verify MCP tool schemas are appended alongside built-in tools."""
-        mcp = [{"type": "function", "function": {"name": "mcp_tool"}}]
         svc = _create_service(mcp_tools=mcp)
-        schemas = svc._resolve_tool_schemas(["bash"])
-        names = [s["function"]["name"] for s in schemas]
-        assert "bash" in names
-        assert "mcp_tool" in names
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_periodic_task" in names
 
-    def test_empty(self):
-        """Verify an empty tool list returns an empty schema list."""
+    def test_empty_schemas_no_mcp(self):
+        """Verify an empty client schema list still includes always-active server tools."""
         svc = _create_service()
-        assert svc._resolve_tool_schemas([]) == []
+        _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        # Always-active server tools present (no client_tools dependency)
+        assert "manage_todo" in names
+        assert "notify_user" in names
+        assert len(tools) > 0
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +248,14 @@ class TestCallLlm:
         """Verify LLM is bound with tools before invocation when tools are provided."""
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("hi")
-        result = await svc._call_llm([MagicMock()], tools=[TOOL_SCHEMA_MAP["bash"]])
+        _dummy_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+        result = await svc._call_llm([MagicMock()], tools=[_dummy_schema])
         svc.llm.bind_tools.assert_called_once()
         assert result.content == "hi"
 
@@ -215,22 +274,25 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [Message(role=MessageRole.USER, content="hi")],
             [Message(role=MessageRole.USER, content="hello")],
-            ["bash"],
         )
         assert lc_msgs[0].type == "system"
 
     def test_no_inline_prompts(self):
-        """Verify inline tool-specific prompts are not injected into the system message."""
+        """Verify no hardcoded legacy tool prompts are injected."""
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            ["ask_question"],
         )
         system_content = lc_msgs[0].content
-        assert "CRITICAL RULE" not in system_content
+        # "CRITICAL RULE" may appear via SKILL.md guide (legitimate);
+        # check that legacy *hardcoded* prompts are absent instead.
         assert "NEVER write a question mark" not in system_content
-        assert "ask_question" in system_content
+        # Server-side tool guides are filtered by client_tools availability;
+        # client-specific guides are only injected when provided via client_tool_prompts.
+        # Verify no client-tool-name-based injection happens by default.
+        assert '<tool_guide name="bash">' not in system_content
+        assert '<tool_guide name="ask_question">' not in system_content
 
     def test_compaction_summary_in_history(self):
         """Verify compaction summary is separated from the fresh system prompt."""
@@ -239,7 +301,7 @@ class TestPromptReconstruction:
             Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\nOld summary"),
             Message(role=MessageRole.USER, content="q"),
         ]
-        lc_msgs = svc._build_lc_messages(history, [], [])
+        lc_msgs = svc._build_lc_messages(history, [])
 
         # [0] = fresh system prompt, [1] = compaction summary, [2] = user
         assert COMPACTION_PREFIX not in lc_msgs[0].content
@@ -251,7 +313,6 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            [],
             instructions="Be concise.",
         )
         assert "Be concise." in lc_msgs[0].content
@@ -263,29 +324,8 @@ class TestPromptReconstruction:
         lc_msgs = svc._build_lc_messages(
             [],
             [Message(role=MessageRole.USER, content="hi")],
-            [],
         )
         assert "<instructions>" not in lc_msgs[0].content
-
-    def test_mcp_tools_in_prompt(self):
-        """Verify MCP tool descriptions are embedded in the system prompt."""
-        mcp_tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "web_search",
-                    "description": "Search the web",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"query": {"type": "string", "description": "Search query"}},
-                        "required": ["query"],
-                    },
-                },
-            }
-        ]
-        svc = _create_service(mcp_tools=mcp_tools)
-        lc_msgs = svc._build_lc_messages([], [Message(role=MessageRole.USER, content="hi")], [])
-        assert "web_search" in lc_msgs[0].content
 
 
 # ---------------------------------------------------------------------------
@@ -489,7 +529,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_response("answer")
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="hi")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TEXT
         assert result.text == "answer"
@@ -505,7 +544,6 @@ class TestProcessMessagesWithTools:
         )
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="list files")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 1
@@ -521,7 +559,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_tool_call()
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="run ls")],
-            tool_names=["bash"],
         )
         assert len(svc.sessions[result.session_id]) == 0
 
@@ -532,7 +569,6 @@ class TestProcessMessagesWithTools:
         svc.llm.ainvoke.return_value = _mock_response("done")
         await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="hi")],
-            tool_names=["bash"],
             instructions="Be brief.",
         )
         call_args = svc.llm.ainvoke.call_args[0][0]
@@ -597,13 +633,78 @@ class TestOverflowRecovery:
             )
 
 
+class TestStripToolCallNarration:
+    """Tests for _strip_tool_call_narration — removes narration text from
+    AIMessages that carry tool_calls, without mutating originals."""
+
+    def test_strips_narration_from_tool_call_message(self):
+        """AIMessage with text + tool_calls → content cleared."""
+        original = AIMessage(
+            content="mcp_web__search를 사용하여 검색하겠습니다.",
+            tool_calls=[{"name": "mcp_web__search", "args": {"query": "test"}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        assert result[0].content == ""
+        assert result[0].tool_calls == original.tool_calls
+
+    def test_preserves_text_only_message(self):
+        """AIMessage with text only (no tool_calls) → unchanged."""
+        original = AIMessage(content="대한민국은 동아시아에 위치한 나라입니다.")
+        result = _strip_tool_call_narration([original])
+        assert result[0] is original
+        assert result[0].content == "대한민국은 동아시아에 위치한 나라입니다."
+
+    def test_preserves_tool_call_without_narration(self):
+        """AIMessage with empty content + tool_calls → unchanged."""
+        original = AIMessage(
+            content="",
+            tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        assert result[0] is original
+
+    def test_does_not_mutate_original(self):
+        """Original message in session storage must not be modified."""
+        original = AIMessage(
+            content="narration text",
+            tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
+        )
+        result = _strip_tool_call_narration([original])
+        # Original is untouched
+        assert original.content == "narration text"
+        # Result has empty content
+        assert result[0].content == ""
+        assert result[0] is not original
+
+    def test_preserves_non_ai_messages(self):
+        """HumanMessage, ToolMessage, etc. pass through unchanged."""
+        messages = [
+            HumanMessage(content="한국에 대해 알려줘"),
+            AIMessage(
+                content="검색하겠습니다.",
+                tool_calls=[{"name": "search", "args": {}, "id": "c1"}],
+            ),
+            ToolMessage(content="검색 결과...", tool_call_id="c1"),
+            AIMessage(content="대한민국은..."),
+        ]
+        result = _strip_tool_call_narration(messages)
+        assert result[0] is messages[0]  # HumanMessage unchanged
+        assert result[1].content == ""  # narration stripped
+        assert result[1].tool_calls == messages[1].tool_calls
+        assert result[2] is messages[2]  # ToolMessage unchanged
+        assert result[3] is messages[3]  # text-only AI unchanged
+
+
 class TestToolMessageFallback:
     """Tests for Gemini tool-message fallback behavior."""
 
     def test_strip_tool_messages_marks_changed(self):
         """AI tool call + ToolMessage are converted and marked as changed."""
         src = [
-            AIMessage(content="", tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}]),
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}],
+            ),
             ToolMessage(content="Error: failed", tool_call_id="call_1"),
             HumanMessage(content="next"),
         ]
@@ -646,11 +747,18 @@ class TestToolMessageFallback:
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
         svc._maybe_proactive_compact = AsyncMock(return_value=None)
 
+        bash_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run",
+                "parameters": {"type": "object"},
+            },
+        }
         resp = await svc._invoke_with_recovery(
             new_messages=[],
-            tool_names=["bash"],
             session_id=sid,
-            use_tools=True,
+            client_tool_schemas=[bash_schema],
         )
 
         assert resp.content == "Recovered from tool context"
@@ -659,7 +767,9 @@ class TestToolMessageFallback:
         assert calls[0][1] != []
         assert calls[1][1] == []
         assert calls[2][1] == []
-        assert any(isinstance(m, HumanMessage) and "[Tool result]:" in m.content for m in calls[2][0])
+        assert any(
+            isinstance(m, HumanMessage) and "[Tool result]:" in m.content for m in calls[2][0]
+        )
         assert not any(isinstance(m, ToolMessage) for m in calls[2][0])
 
     @pytest.mark.asyncio
@@ -692,15 +802,25 @@ class TestToolMessageFallback:
 
         svc._call_llm = AsyncMock(side_effect=fake_call_llm)
 
+        bash_schema = {
+            "type": "function",
+            "function": {
+                "name": "bash",
+                "description": "Run",
+                "parameters": {"type": "object"},
+            },
+        }
         with patch("app.services.agent_service.asyncio.sleep", new=AsyncMock()) as sleep_mock:
             resp = await svc._invoke_with_recovery(
                 new_messages=[],
-                tool_names=["bash"],
                 session_id=sid,
-                use_tools=True,
+                client_tool_schemas=[bash_schema],
             )
 
-        assert _is_thought_signature_error(Exception("Thought signature is not valid")) is True
+        assert (
+            LLMErrorClassifier.is_thought_signature(Exception("Thought signature is not valid"))
+            is True
+        )
         assert resp.content == "ok"
         assert len(calls) == 2  # initial tools-bound + immediate no-tools fallback
         sleep_mock.assert_not_awaited()
@@ -804,7 +924,6 @@ class TestMultipleToolCalls:
         svc.llm.ainvoke.return_value = resp
         result = await svc.process_messages_with_tools(
             [Message(role=MessageRole.USER, content="run both")],
-            tool_names=["bash"],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 2
@@ -949,13 +1068,21 @@ class TestActualUsageBasedCompaction:
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a1",
-                usage={"input_tokens": 80_000, "output_tokens": 50, "total_tokens": 80_050},
+                usage={
+                    "input_tokens": 80_000,
+                    "output_tokens": 50,
+                    "total_tokens": 80_050,
+                },
             ),
             Message(role=MessageRole.USER, content="q2"),
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a2",
-                usage={"input_tokens": 80_000, "output_tokens": 50, "total_tokens": 80_050},
+                usage={
+                    "input_tokens": 80_000,
+                    "output_tokens": 50,
+                    "total_tokens": 80_050,
+                },
             ),
         ]
 
@@ -988,7 +1115,11 @@ class TestActualUsageBasedCompaction:
             Message(
                 role=MessageRole.ASSISTANT,
                 content="a1",
-                usage={"input_tokens": 30_000, "output_tokens": 50, "total_tokens": 30_050},
+                usage={
+                    "input_tokens": 30_000,
+                    "output_tokens": 50,
+                    "total_tokens": 30_050,
+                },
             ),
         ]
 
@@ -1063,3 +1194,312 @@ class TestActualUsageBasedCompaction:
         """_get_last_input_tokens returns None for unknown session."""
         svc = _create_service()
         assert svc._get_last_input_tokens("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# _platform_message_to_lc
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeContent:
+    """Tests for _normalize_content — structured content extraction."""
+
+    def test_plain_string(self):
+        assert AgentService._normalize_content("hello") == "hello"
+
+    def test_empty_string(self):
+        assert AgentService._normalize_content("") == ""
+
+    def test_input_text_list(self):
+        content = [{"type": "input_text", "text": "ㅎㅇ"}]
+        assert AgentService._normalize_content(content) == "ㅎㅇ"
+
+    def test_output_text_list(self):
+        content = [{"type": "output_text", "text": "응답입니다"}]
+        assert AgentService._normalize_content(content) == "응답입니다"
+
+    def test_multiple_parts(self):
+        content = [
+            {"type": "input_text", "text": "Part 1"},
+            {"type": "input_text", "text": "Part 2"},
+        ]
+        assert AgentService._normalize_content(content) == "Part 1\nPart 2"
+
+    def test_mixed_types_in_list(self):
+        content = [
+            {"type": "output_text", "text": "Hello"},
+            {"type": "refusal", "refusal": "No can do"},
+        ]
+        assert AgentService._normalize_content(content) == "Hello"
+
+    def test_list_with_plain_strings(self):
+        content = ["hello", "world"]
+        assert AgentService._normalize_content(content) == "hello\nworld"
+
+    def test_dict_with_text(self):
+        content = {"type": "input_text", "text": "단일 dict"}
+        assert AgentService._normalize_content(content) == "단일 dict"
+
+    def test_none(self):
+        assert AgentService._normalize_content(None) == ""
+
+    def test_empty_list(self):
+        assert AgentService._normalize_content([]) == ""
+
+
+class TestPlatformMessageToLc:
+    """Tests for converting Platform DB records to LangChain messages."""
+
+    def test_user_message(self):
+        record = {"role": "user", "content": "Hello"}
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "Hello"
+
+    def test_assistant_message(self):
+        record = {"role": "assistant", "content": "Hi there"}
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.content == "Hi there"
+
+    def test_user_message_structured_content(self):
+        """Platform DB stores user text as [{"type": "input_text", "text": "..."}]."""
+        record = {
+            "type": "message",
+            "role": "user",
+            "content": [{"type": "input_text", "text": "ㅎㅇ"}],
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, HumanMessage)
+        assert msg.content == "ㅎㅇ"
+
+    def test_assistant_message_structured_content(self):
+        """Platform DB stores assistant text as [{"type": "output_text", "text": "..."}]."""
+        record = {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "안녕하세요!"}],
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.content == "안녕하세요!"
+
+    def test_function_call_nested_content(self):
+        """Platform DB stores function_call data inside content dict."""
+        record = {
+            "type": "function_call",
+            "role": "tool",
+            "content": {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "bash",
+                "arguments": '{"command": "ls"}',
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert len(msg.tool_calls) == 1
+        assert msg.tool_calls[0]["name"] == "bash"
+        assert msg.tool_calls[0]["args"] == {"command": "ls"}
+        assert msg.tool_calls[0]["id"] == "call_1"
+
+    def test_function_call_flat_fallback(self):
+        """Also supports flat format (call_id/name/args at record level)."""
+        record = {
+            "type": "function_call",
+            "call_id": "call_1",
+            "name": "bash",
+            "arguments": '{"command": "ls"}',
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, AIMessage)
+        assert msg.tool_calls[0]["name"] == "bash"
+        assert msg.tool_calls[0]["id"] == "call_1"
+
+    def test_function_call_output_nested_content(self):
+        """Platform DB stores function_call_output data inside content dict."""
+        record = {
+            "type": "function_call_output",
+            "role": "tool",
+            "content": {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "file.txt\ndir/",
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, ToolMessage)
+        assert msg.content == "file.txt\ndir/"
+        assert msg.tool_call_id == "call_1"
+
+    def test_function_call_output_flat_fallback(self):
+        """Also supports flat format."""
+        record = {
+            "type": "function_call_output",
+            "call_id": "call_1",
+            "output": "file.txt\ndir/",
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert isinstance(msg, ToolMessage)
+        assert msg.content == "file.txt\ndir/"
+        assert msg.tool_call_id == "call_1"
+
+    def test_empty_record(self):
+        msg = AgentService._platform_message_to_lc({})
+        assert msg is None
+
+    def test_system_message(self):
+        record = {"role": "system", "content": "You are helpful."}
+        msg = AgentService._platform_message_to_lc(record)
+        from langchain_core.messages import SystemMessage as SM
+
+        assert isinstance(msg, SM)
+
+    def test_function_call_with_dict_arguments(self):
+        record = {
+            "type": "function_call",
+            "content": {
+                "type": "function_call",
+                "call_id": "call_2",
+                "name": "read",
+                "arguments": {"path": "/a"},
+            },
+        }
+        msg = AgentService._platform_message_to_lc(record)
+        assert msg.tool_calls[0]["args"] == {"path": "/a"}
+
+    def test_permission_grant_skipped(self):
+        record = {
+            "type": "permission_grant",
+            "role": "system",
+            "content": {"tool_name": "bash", "decision": "allow_once"},
+        }
+        assert AgentService._platform_message_to_lc(record) is None
+
+    def test_todo_state_skipped(self):
+        record = {
+            "type": "todo_state",
+            "role": "assistant",
+            "content": {"task": "test", "steps": []},
+        }
+        assert AgentService._platform_message_to_lc(record) is None
+
+
+# ---------------------------------------------------------------------------
+# _rehydrate_session
+# ---------------------------------------------------------------------------
+
+
+class TestRehydrateSession:
+    """Tests for session rehydration from Platform DB."""
+
+    @pytest.mark.asyncio
+    async def test_404_returns_none(self):
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 404
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("unknown-session")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_mixed_messages_restored(self):
+        """Rehydration with actual Platform DB record shapes."""
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        records = [
+            {
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "Hello"}],
+            },
+            {
+                "type": "function_call",
+                "role": "tool",
+                "content": {
+                    "type": "function_call",
+                    "call_id": "c1",
+                    "name": "bash",
+                    "arguments": '{"command": "ls"}',
+                },
+            },
+            {
+                "type": "function_call_output",
+                "role": "tool",
+                "content": {
+                    "type": "function_call_output",
+                    "call_id": "c1",
+                    "output": "file.txt",
+                },
+            },
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "Done"}],
+            },
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = records
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is not None
+        assert len(result) == 4
+        assert isinstance(result[0], HumanMessage)
+        assert isinstance(result[1], AIMessage)
+        assert isinstance(result[2], ToolMessage)
+        assert isinstance(result[3], AIMessage)
+
+    @pytest.mark.asyncio
+    async def test_platform_unreachable_returns_none(self):
+        import httpx
+
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        svc._platform_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+
+        result = await svc._rehydrate_session("s1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_records_returns_none(self):
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = []
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_structured_content_normalized(self):
+        """Open Responses structured content (input_text/output_text) is flattened."""
+        svc = _create_service()
+        svc._platform_client = AsyncMock()
+        records = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "ㅎㅇ"}],
+            },
+            {
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "안녕하세요!"}],
+            },
+        ]
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = records
+        svc._platform_client.get = AsyncMock(return_value=resp)
+
+        result = await svc._rehydrate_session("s1")
+        assert result is not None
+        assert len(result) == 2
+        assert isinstance(result[0], HumanMessage)
+        assert result[0].content == "ㅎㅇ"
+        assert isinstance(result[1], AIMessage)
+        assert result[1].content == "안녕하세요!"

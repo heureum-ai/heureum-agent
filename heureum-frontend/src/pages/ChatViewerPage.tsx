@@ -4,40 +4,9 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { fetchAllSessionMessages } from '../lib/api';
 import type { Message, ToolCallInfo } from '../types';
+import { getToolDisplay } from '../lib/tools';
 import MarkdownMessage from '../components/MarkdownMessage';
 import './ChatPage.css';
-
-const TOOL_DISPLAY_NAMES: Record<string, string> = {
-  bash: 'Bash', read_file: 'Read', write_file: 'Write', delete_file: 'Delete',
-  list_files: 'List Files', browser_navigate: 'Navigate', browser_new_tab: 'New Tab',
-  browser_click: 'Click', browser_type: 'Type', browser_get_content: 'Get Content',
-  ask_question: 'Question', select_cwd: 'Select Directory', manage_todo: 'Todo',
-  manage_periodic_task: 'Periodic Task', notify_user: 'Notify',
-};
-
-function getToolDisplay(tc: ToolCallInfo): { action: string; detail?: string } {
-  const name = tc.toolName || '';
-  const args = tc.toolArgs || {};
-  const action = TOOL_DISPLAY_NAMES[name] || name || tc.command;
-  switch (name) {
-    case 'bash': return { action, detail: tc.command };
-    case 'read_file': case 'write_file': case 'delete_file':
-      return { action, detail: args.path ? String(args.path) : undefined };
-    case 'browser_navigate': case 'browser_new_tab': case 'open_url':
-      return { action, detail: args.url ? String(args.url) : undefined };
-    case 'manage_periodic_task': {
-      const ptAction = args.action ? String(args.action) : '';
-      const ptTitle = args.title ? String(args.title) : '';
-      const detail = ptTitle ? `${ptAction}: ${ptTitle}` : ptAction;
-      return { action, detail: detail || undefined };
-    }
-    case 'notify_user':
-      return { action, detail: args.title ? String(args.title) : undefined };
-    default:
-      if (!name) return { action: tc.command };
-      return { action };
-  }
-}
 
 function ToolBlock({ toolCall }: { toolCall: ToolCallInfo }) {
   const [expanded, setExpanded] = useState(false);

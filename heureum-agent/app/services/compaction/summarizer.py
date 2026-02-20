@@ -25,26 +25,26 @@ import json
 import logging
 from typing import List, Optional
 
-from app.services.prompts.base import COMPACTION_PREFIX, DEFAULT_SUMMARY_FALLBACK
 from app.models import Message
 from app.schemas.open_responses import MessageRole
 from app.services.compaction.repair import repair_tool_use_result_pairing
 from app.services.compaction.settings import CompactionSettings
-from app.services.compaction.tokens import estimate_messages_tokens, estimate_tokens
-from app.services.prompts.base import (
-    COMPACTION_PROMPT,
+from app.services.compaction.tokens import (
+    estimate_message_tokens,
+    estimate_messages_tokens,
+    estimate_tokens,
+)
+from app.services.prompts.compaction import (
+    COMPACTION_MERGE_INSTRUCTIONS,
+    COMPACTION_PREFIX,
     COMPACTION_SYSTEM_PROMPT,
-    COMPACTION_UPDATE_PROMPT,
+    DEFAULT_SUMMARY_FALLBACK,
+    build_compaction_prompt,
 )
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
-
-_MERGE_INSTRUCTIONS = (
-    "Merge these partial summaries into a single cohesive summary. "
-    "Preserve decisions, TODOs, open questions, and any constraints."
-)
 
 
 def _messages_to_text(
@@ -89,10 +89,20 @@ def _messages_to_text(
             if msg.tool_calls:
                 tc_strs: List[str] = []
                 for tc in msg.tool_calls:
-                    name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+                    name = (
+                        tc.get("name", "unknown")
+                        if isinstance(tc, dict)
+                        else getattr(tc, "name", "unknown")
+                    )
                     args = tc.get("args", {}) if isinstance(tc, dict) else getattr(tc, "args", {})
                     try:
-                        pairs = ", ".join(f"{k}={json.dumps(v, ensure_ascii=False)}" for k, v in args.items()) if isinstance(args, dict) else json.dumps(args, ensure_ascii=False)
+                        pairs = (
+                            ", ".join(
+                                f"{k}={json.dumps(v, ensure_ascii=False)}" for k, v in args.items()
+                            )
+                            if isinstance(args, dict)
+                            else json.dumps(args, ensure_ascii=False)
+                        )
                     except (TypeError, ValueError):
                         pairs = str(args)
                     tc_strs.append(f"{name}({pairs})")
@@ -133,13 +143,7 @@ async def _generate_summary(
     if not conversation.strip():
         return previous_summary or DEFAULT_SUMMARY_FALLBACK
 
-    if previous_summary:
-        prompt = COMPACTION_UPDATE_PROMPT.format(
-            previous_summary=previous_summary,
-            conversation=conversation,
-        )
-    else:
-        prompt = COMPACTION_PROMPT.format(conversation=conversation)
+    prompt = build_compaction_prompt(conversation, previous_summary)
 
     response = await llm.ainvoke(
         [
@@ -172,7 +176,7 @@ def _chunk_messages_by_max_tokens(
     current_tokens = 0
 
     for msg in messages:
-        msg_tokens = estimate_tokens(msg.content)
+        msg_tokens = estimate_message_tokens(msg)
 
         if current and current_tokens + msg_tokens > max_tokens:
             chunks.append(current)
@@ -218,7 +222,7 @@ def _split_by_token_share(
     current_tokens = 0
 
     for msg in messages:
-        msg_tokens = estimate_tokens(msg.content)
+        msg_tokens = estimate_message_tokens(msg)
         if len(chunks) < parts - 1 and current and current_tokens + msg_tokens > target:
             chunks.append(current)
             current = []
@@ -440,7 +444,7 @@ async def summarize_in_stages(
         llm,
         settings,
         max_chunk_tokens,
-        _MERGE_INSTRUCTIONS,
+        COMPACTION_MERGE_INSTRUCTIONS,
     )
 
 

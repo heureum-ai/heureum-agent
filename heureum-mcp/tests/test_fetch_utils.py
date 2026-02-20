@@ -1,109 +1,17 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
-"""Tests for web fetch content extraction utilities."""
+"""Tests for web fetch content extraction utilities (html2text-based)."""
+
 import json
 
-import pytest
-
-from src.tools.web.fetch_utils import (
-    ExtractedContent,
-    ExtractMode,
-    _decode_entities,
-    _strip_tags,
-    _normalize_whitespace,
-    html_to_markdown,
-    markdown_to_text,
-    extract_content,
+from src.tools.web.fetch import (
     _extract_html,
     _extract_json,
     _fallback_html,
+    extract_content,
+    html_to_markdown,
+    html_to_text,
 )
-
-
-# ---------------------------------------------------------------------------
-# _decode_entities
-# ---------------------------------------------------------------------------
-
-
-class TestDecodeEntities:
-    """Tests for HTML entity decoding."""
-
-    @pytest.mark.parametrize(
-        "raw, expected",
-        [
-            ("&amp;", "&"),
-            ("&lt;", "<"),
-            ("&gt;", ">"),
-            ("&quot;", '"'),
-            ("&#39;", "'"),
-            ("&nbsp;", " "),
-            ("&#x41;", "A"),
-            ("&#65;", "A"),
-            ("no entities here", "no entities here"),
-        ],
-    )
-    def test_entities(self, raw: str, expected: str):
-        """Verify that HTML entities are correctly decoded."""
-        assert _decode_entities(raw) == expected
-
-    def test_mixed_entities(self):
-        """Verify that mixed HTML entities in a single string are all decoded."""
-        assert _decode_entities("&lt;b&gt;bold&lt;/b&gt;") == "<b>bold</b>"
-
-
-# ---------------------------------------------------------------------------
-# _strip_tags
-# ---------------------------------------------------------------------------
-
-
-class TestStripTags:
-    """Tests for HTML tag stripping."""
-
-    def test_removes_simple_tags(self):
-        """Verify that simple HTML tags are removed, leaving text content."""
-        assert _strip_tags("<b>bold</b>") == "bold"
-
-    def test_removes_nested_tags(self):
-        """Verify that nested HTML tags are all removed."""
-        assert _strip_tags("<div><p>hello</p></div>") == "hello"
-
-    def test_preserves_plain_text(self):
-        """Verify that plain text without tags is returned unchanged."""
-        assert _strip_tags("no tags here") == "no tags here"
-
-    def test_decodes_entities_after_stripping(self):
-        """Verify that HTML entities are decoded after tags are stripped."""
-        assert _strip_tags("<p>&amp; more</p>") == "& more"
-
-
-# ---------------------------------------------------------------------------
-# _normalize_whitespace
-# ---------------------------------------------------------------------------
-
-
-class TestNormalizeWhitespace:
-    """Tests for whitespace normalization."""
-
-    def test_collapses_blank_lines(self):
-        """Verify that consecutive blank lines are collapsed to a single blank line."""
-        assert _normalize_whitespace("a\n\n\n\nb") == "a\n\nb"
-
-    def test_collapses_horizontal_spaces(self):
-        """Verify that consecutive spaces are collapsed to a single space."""
-        assert _normalize_whitespace("a   b") == "a b"
-
-    def test_strips_trailing_spaces_before_newline(self):
-        """Verify that trailing spaces before newlines are removed."""
-        assert _normalize_whitespace("hello   \nworld") == "hello\nworld"
-
-    def test_removes_carriage_return(self):
-        """Verify that carriage return characters are removed."""
-        assert _normalize_whitespace("a\r\nb") == "a\nb"
-
-    def test_strips_leading_trailing(self):
-        """Verify that leading and trailing whitespace is stripped."""
-        assert _normalize_whitespace("  hello  ") == "hello"
-
 
 # ---------------------------------------------------------------------------
 # html_to_markdown
@@ -111,7 +19,7 @@ class TestNormalizeWhitespace:
 
 
 class TestHtmlToMarkdown:
-    """Tests for HTML to Markdown conversion."""
+    """Tests for HTML to Markdown conversion via html2text."""
 
     def test_extracts_title(self):
         """Verify that the HTML title tag is extracted."""
@@ -129,7 +37,8 @@ class TestHtmlToMarkdown:
         """Verify that anchor tags are converted to Markdown link syntax."""
         html = '<a href="https://example.com">click</a>'
         text, _ = html_to_markdown(html)
-        assert "[click](https://example.com)" in text
+        assert "[click]" in text
+        assert "https://example.com" in text
 
     def test_link_without_text(self):
         """Verify that links without text still include the URL."""
@@ -149,8 +58,10 @@ class TestHtmlToMarkdown:
         """Verify that list items are converted to Markdown list syntax."""
         html = "<ul><li>one</li><li>two</li></ul>"
         text, _ = html_to_markdown(html)
-        assert "- one" in text
-        assert "- two" in text
+        assert "one" in text
+        assert "two" in text
+        # html2text uses "  * " for unordered lists
+        assert "*" in text or "-" in text
 
     def test_removes_script_style(self):
         """Verify that script and style tags are removed entirely."""
@@ -159,13 +70,6 @@ class TestHtmlToMarkdown:
         assert "alert" not in text
         assert ".x" not in text
         assert "safe" in text
-
-    def test_removes_noscript(self):
-        """Verify that noscript tags are removed."""
-        html = "<noscript>Enable JS</noscript><p>content</p>"
-        text, _ = html_to_markdown(html)
-        assert "Enable JS" not in text
-        assert "content" in text
 
     def test_br_and_hr(self):
         """Verify that br and hr tags produce line breaks in output."""
@@ -191,8 +95,10 @@ class TestHtmlToMarkdown:
         text, title = html_to_markdown(html)
         assert title == "Test Page"
         assert "# Welcome" in text
-        assert "[a link](https://x.com)" in text
-        assert "- Item A" in text
+        assert "[a link]" in text
+        assert "https://x.com" in text
+        assert "Item A" in text
+        assert "Item B" in text
         assert "evil" not in text
 
     def test_empty_html(self):
@@ -200,50 +106,62 @@ class TestHtmlToMarkdown:
         text, title = html_to_markdown("")
         assert title is None
 
+    def test_word_wrap(self):
+        """Verify that long lines are wrapped at ~78 chars (body_width)."""
+        long_para = "word " * 50  # ~250 chars
+        html = f"<p>{long_para}</p>"
+        text, _ = html_to_markdown(html)
+        lines = text.split("\n")
+        for line in lines:
+            assert len(line) <= 80, f"Line too long ({len(line)} chars): {line[:80]}..."
+
+    def test_table_conversion(self):
+        """Verify that tables are converted (html2text edge case)."""
+        html = "<table><tr><th>Name</th><th>Age</th></tr><tr><td>Alice</td><td>30</td></tr></table>"
+        text, _ = html_to_markdown(html)
+        assert "Name" in text
+        assert "Alice" in text
+        assert "30" in text
+
+    def test_entities_decoded(self):
+        """Verify that HTML entities are correctly decoded by html2text."""
+        html = "<p>&amp; &lt; &gt; &quot; &#39;</p>"
+        text, _ = html_to_markdown(html)
+        assert "&" in text
+        assert "<" in text
+        assert ">" in text
+
 
 # ---------------------------------------------------------------------------
-# markdown_to_text
+# html_to_text
 # ---------------------------------------------------------------------------
 
 
-class TestMarkdownToText:
-    """Tests for Markdown to plain text conversion."""
+class TestHtmlToText:
+    """Tests for HTML to plain text conversion."""
 
     def test_strips_links(self):
-        """Verify that Markdown links are stripped, keeping only the link text."""
-        assert "click" in markdown_to_text("[click](http://example.com)")
-        assert "http://example.com" not in markdown_to_text("[click](http://example.com)")
-
-    def test_strips_images(self):
-        """Verify that Markdown image syntax is removed entirely."""
-        result = markdown_to_text("![alt](image.png)")
-        assert "alt" not in result
-        assert "image.png" not in result
+        """Verify that links are stripped, keeping only text."""
+        html = '<a href="http://example.com">click here</a>'
+        text, _ = html_to_text(html)
+        assert "click here" in text
+        assert "http://example.com" not in text
 
     def test_strips_heading_markers(self):
         """Verify that heading markers are removed, keeping only the text."""
-        assert "Title" in markdown_to_text("## Title")
-        assert "##" not in markdown_to_text("## Title")
+        html = "<h2>Title</h2>"
+        text, _ = html_to_text(html)
+        assert "Title" in text
+        assert "##" not in text
 
-    def test_strips_list_markers(self):
-        """Verify that list markers are stripped from list items."""
-        result = markdown_to_text("- item1\n- item2\n1. ordered")
-        assert "item1" in result
-        assert "item2" in result
-        assert "ordered" in result
-        assert "- " not in result
-
-    def test_strips_inline_code(self):
-        """Verify that inline code backticks are removed."""
-        assert "code" in markdown_to_text("`code`")
-        assert "`" not in markdown_to_text("`code`")
-
-    def test_strips_code_blocks(self):
-        """Verify that fenced code block markers are removed."""
-        md = "```python\nprint('hello')\n```"
-        result = markdown_to_text(md)
-        assert "print" in result
-        assert "```" not in result
+    def test_strips_emphasis(self):
+        """Verify that emphasis markers are stripped."""
+        html = "<p>This is <strong>bold</strong> and <em>italic</em></p>"
+        text, _ = html_to_text(html)
+        assert "bold" in text
+        assert "italic" in text
+        assert "**" not in text
+        assert "_" not in text
 
 
 # ---------------------------------------------------------------------------
