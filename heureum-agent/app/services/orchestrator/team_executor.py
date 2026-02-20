@@ -142,7 +142,7 @@ class TeamExecutor:
         """
         # Check if any dependency failed — skip if so
         for dep_name in step.depends_on:
-            dep_result = self._results.get(dep_name)
+            dep_result = self._result_store.load_step_result(dep_name) if self._result_store else None
             if dep_result and dep_result.status in (StepStatus.FAILED, StepStatus.SKIPPED):
                 logger.info("Skipping step %s: dependency %s is %s", step.step_name, dep_name, dep_result.status)
                 return StepResult(
@@ -170,7 +170,7 @@ class TeamExecutor:
         # Record data flow edges for each dependency
         if self._trace_collector and step.depends_on:
             for dep_name in step.depends_on:
-                dep_result = self._results.get(dep_name)
+                dep_result = self._result_store.load_step_result(dep_name) if self._result_store else None
                 if dep_result and dep_result.output:
                     self._trace_collector.add_data_flow_edge(DataFlowEdge(
                         source_step=dep_name,
@@ -355,7 +355,7 @@ class TeamExecutor:
 
         sections = []
         for dep_name in step.depends_on:
-            dep_result = self._results.get(dep_name)
+            dep_result = self._result_store.load_step_result(dep_name) if self._result_store else None
             if not dep_result:
                 continue
             if dep_result.status == StepStatus.COMPLETED and dep_result.output:

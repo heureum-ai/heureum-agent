@@ -132,6 +132,37 @@ class AgentResultStore:
             logger.warning("Failed to read step result for %s", step_name, exc_info=True)
         return None
 
+    def load_step_result(self, step_name: str) -> Optional["StepResult"]:
+        """Read ``meta.json`` + ``result.md`` and reconstruct a ``StepResult``.
+
+        Unlike :meth:`read_step_result` (which returns raw text only), this
+        method returns a full ``StepResult`` object so callers can inspect
+        status, assigned_agent, error, etc.
+        """
+        try:
+            step_dir = self._root / "steps" / step_name
+            meta_path = step_dir / "meta.json"
+            result_path = step_dir / "result.md"
+
+            if not meta_path.exists():
+                return None
+
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            output = result_path.read_text(encoding="utf-8") if result_path.exists() else ""
+
+            from app.services.orchestrator.models import StepResult, StepStatus
+
+            return StepResult(
+                step_name=meta.get("step_name", step_name),
+                assigned_agent=meta.get("assigned_agent", ""),
+                status=StepStatus(meta.get("status", "pending")),
+                output=output if meta.get("status") != "failed" else "",
+                error=meta.get("error"),
+            )
+        except Exception:
+            logger.warning("Failed to load step result for %s", step_name, exc_info=True)
+            return None
+
     # ------------------------------------------------------------------
     # Sub-agent results (nested under a step)
     # ------------------------------------------------------------------
