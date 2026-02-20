@@ -47,6 +47,7 @@ from app.services.providers.mcp import MCPClient
 from app.services.providers.skill import SkillProvider
 from app.services.providers.tool import ToolChainRegistry
 from app.services.subagent import get_registry as get_subagent_registry
+from app.skills.plan_task.service import WORKFLOW_SIGNAL_PREFIX
 from app.services.tool_hooks import hook_runner
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
@@ -937,6 +938,154 @@ class _AgentLoopRunner:
         )
         return prompts or None
 
+    @staticmethod
+    def _detect_workflow_signal(tool_results: List[Message]) -> Optional[str]:
+        """Check tool results for the workflow signal string.
+
+        Returns the task description if a signal is found, None otherwise.
+        """
+        if not settings.ENABLE_WORKFLOW:
+            return None
+        for msg in tool_results:
+            if msg.content and isinstance(msg.content, str) and msg.content.startswith(WORKFLOW_SIGNAL_PREFIX):
+                return msg.content[len(WORKFLOW_SIGNAL_PREFIX):]
+        return None
+
+    async def _run_workflow(self, task: str, result: Any, iteration: int) -> Optional[ResponseObject]:
+        """Run the workflow orchestration pipeline (non-streaming).
+
+        Returns a completed ResponseObject, or None to fall back to the regular loop.
+        """
+        from app.routers.workflow_runner import WorkflowRunner
+
+        # Exclude client-side tools (e.g. ask_question) — they require
+        # user interaction and cannot be executed in headless sub-agents.
+        server_only_tools = [
+            t for t in self.ctx.tool_names
+            if t not in self.ctx.client_tool_names
+        ]
+
+        runner = WorkflowRunner(
+            llm=agent_service.llm,
+            agent_service=agent_service,
+            execute_tool=_execute_tool,
+            skill_provider=skill_provider,
+            tool_names=server_only_tools,
+            session_id=self.ctx.session_id,
+            user_message=task,
+        )
+
+        final_text = await runner.run()
+        if final_text is None:
+            # Workflow failed — fall back to regular loop
+            return None
+
+        return _build_response(
+            [_text_output(final_text)],
+            ResponseStatus.COMPLETED,
+            self.ctx.session_id,
+            self.ctx.created_at,
+            self.ctx.model,
+            usage=self.ctx.total_usage,
+            iterations=iteration,
+            tool_call_count=self.ctx.tool_call_count,
+            orchestration=True,
+        )
+
+    async def _check_workflow_signal_streaming(self, result: Any) -> Optional[str]:
+        """Check if tool calls contain a TODO create that triggers orchestration.
+
+        Executes only manage_todo(create) calls to check for the workflow signal
+        without running _handle_tool_call_iteration. Returns the task if signal is found.
+        """
+        if not settings.ENABLE_WORKFLOW:
+            return None
+
+        all_tool_calls = result.tool_calls or []
+        for tc in all_tool_calls:
+            if tc.name == "manage_todo":
+                args = tc.args if isinstance(tc.args, dict) else {}
+                if args.get("action") == "create":
+                    # Execute to check for workflow signal
+                    tool_result = await skill_provider.execute_tool(tc.name, args, self.ctx.session_id)
+                    if tool_result.startswith(WORKFLOW_SIGNAL_PREFIX):
+                        # Record the tool call in output items
+                        self.ctx.output_items.append(_tool_call_output(tc.name, args, tc.id))
+                        self.ctx.output_items.append(
+                            FunctionToolResult(
+                                id=f"out_{uuid.uuid4().hex}",
+                                call_id=tc.id,
+                                output=tool_result,
+                            )
+                        )
+                        # Append to history
+                        tool_result_msg = Message(
+                            role=MessageRole.TOOL, content=tool_result,
+                            tool_call_id=tc.id, tool_name=tc.name,
+                        )
+                        await agent_service.append_tool_interaction(
+                            self.ctx.session_id,
+                            self.ctx.messages,
+                            [tc.model_dump() for tc in all_tool_calls],
+                            [tool_result_msg],
+                            usage=result.usage.model_dump() if result.usage else {},
+                            assistant_lc_message=result.assistant_lc_message,
+                        )
+                        return tool_result[len(WORKFLOW_SIGNAL_PREFIX):]
+        return None
+
+    async def _stream_workflow(self, task: str):
+        """Stream workflow orchestration events as SSE."""
+        from app.routers.workflow_runner import WorkflowRunner
+
+        server_only_tools = [
+            t for t in self.ctx.tool_names
+            if t not in self.ctx.client_tool_names
+        ]
+
+        runner = WorkflowRunner(
+            llm=agent_service.llm,
+            agent_service=agent_service,
+            execute_tool=_execute_tool,
+            skill_provider=skill_provider,
+            tool_names=server_only_tools,
+            session_id=self.ctx.session_id,
+            user_message=task,
+        )
+
+        final_text = None
+        async for event in runner.stream_events():
+            yield _sse_event(event)
+            if event.get("type") == "response.orchestration.completed":
+                final_text = event.get("final_text", "")
+            elif event.get("type") == "response.orchestration.failed":
+                # Workflow failed during streaming — emit error
+                yield _sse_event({
+                    "type": "response.failed",
+                    "response": _build_response(
+                        [], ResponseStatus.FAILED, self.ctx.session_id,
+                        self.ctx.created_at, self.ctx.model,
+                        error=ErrorObject(type=ErrorType.SERVER_ERROR, message=event.get("error", "Workflow failed")),
+                    ).model_dump(mode="json"),
+                })
+                return
+
+        # Emit completed response
+        if final_text is not None:
+            response = _build_response(
+                [_text_output(final_text)],
+                ResponseStatus.COMPLETED,
+                self.ctx.session_id,
+                self.ctx.created_at,
+                self.ctx.model,
+                usage=self.ctx.total_usage,
+                orchestration=True,
+            )
+            yield _sse_event({
+                "type": "response.completed",
+                "response": response.model_dump(mode="json"),
+            })
+
     async def _run_tool_iterations(self) -> ResponseObject:
         skill_provider.clear_completed_plans(self.ctx.session_id)
         for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
@@ -1174,6 +1323,23 @@ class _AgentLoopRunner:
             cwd=self.ctx.cwd,
         )
         self.ctx.tool_call_count += len(pipeline_results) + len(client_calls)
+
+        # Check for workflow signal before continuing the regular loop
+        workflow_task = self._detect_workflow_signal(tool_results)
+        if workflow_task:
+            await agent_service.append_tool_interaction(
+                self.ctx.session_id,
+                self.ctx.messages,
+                [tc.model_dump() for tc in all_tool_calls],
+                tool_results,
+                usage=result.usage.model_dump(),
+                assistant_lc_message=result.assistant_lc_message,
+            )
+            workflow_response = await self._run_workflow(workflow_task, result, iteration)
+            if workflow_response:
+                return workflow_response
+            # Workflow failed — fall through to regular loop continuation
+            return None
 
         # Append client-side tool placeholders for the LLM history
         for tc in client_calls:
@@ -1625,6 +1791,24 @@ class _AgentLoopRunner:
             original_call_ids = {tc.id for tc in tool_calls_info}
 
             items_before = len(self.ctx.output_items)
+
+            # Pre-execute tools to check for workflow signal before full handling
+            workflow_task = await self._check_workflow_signal_streaming(result_obj)
+            if workflow_task:
+                # Emit tool results for already-executed tools
+                for item in self.ctx.output_items[items_before:]:
+                    if isinstance(item, FunctionToolResult):
+                        yield _sse_event({
+                            "type": "response.tool_result.done",
+                            "call_id": item.call_id,
+                            "output": item.output,
+                            "status": "completed",
+                        })
+                # Stream workflow pipeline events
+                async for event in self._stream_workflow(workflow_task):
+                    yield event
+                return
+
             response = await self._handle_tool_call_iteration(result_obj, iteration)
 
             # Emit SSE events for newly executed server tools.

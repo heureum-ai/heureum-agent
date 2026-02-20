@@ -6,6 +6,10 @@ Plan skill — manages per-session execution plans (TODO).
 The agent creates a TODO plan for multi-step tasks, then executes each
 step while updating progress.  State is kept in-memory and persisted
 as TODO.md in session files via the Platform API.
+
+When workflow orchestration is enabled, the ``create`` action returns
+a signal that triggers the multi-agent pipeline instead of creating
+a plain sequential plan.
 """
 
 import logging
@@ -15,7 +19,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+WORKFLOW_SIGNAL_PREFIX = "@@WORKFLOW_SIGNAL@@"
 
 MANAGE_TODO_TOOL_SCHEMA = {
     "type": "function",
@@ -74,6 +82,9 @@ class TodoStep:
     description: str
     status: str = "pending"  # pending | in_progress | completed | failed
     result: Optional[str] = None
+    step_name: Optional[str] = None        # unique ID for dependency tracking (workflow mode)
+    depends_on: Optional[List[str]] = None  # step_name values this step depends on
+    assigned_agent: Optional[str] = None    # agent role_type (workflow mode)
 
 
 @dataclass
@@ -85,6 +96,7 @@ class SessionTodo:
     filename: str = "TODO.md"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    is_workflow: bool = False
 
 
 # Type alias for the async write callback:
@@ -117,7 +129,7 @@ class PlanSkill:
                 arguments.get("steps", []),
             )
         elif action == "update_step":
-            return await self._update_step(
+            return await self.update_step(
                 session_id,
                 arguments.get("step_index", 0),
                 arguments.get("status", "completed"),
@@ -139,10 +151,21 @@ class PlanSkill:
         return f"TODO-{slug}-{ts}.md"
 
     async def _create(self, session_id: str, task: str, steps: List[str]) -> str:
+        """Create a new TODO plan.
+
+        When ``ENABLE_WORKFLOW`` is True, returns a signal that triggers the
+        orchestration pipeline.  The pipeline will call
+        ``create_orchestrated()`` to build the enhanced TODO.
+
+        When ``ENABLE_WORKFLOW`` is False, creates a plain sequential TODO.
+        """
         if not task:
             return "Error: task description is required"
         if not steps:
             return "Error: at least one step is required"
+
+        if settings.ENABLE_WORKFLOW:
+            return f"{WORKFLOW_SIGNAL_PREFIX}{task}"
 
         existing = self._session_todos.get(session_id)
         if existing:
@@ -158,13 +181,14 @@ class PlanSkill:
         await self._write_todo_file(session_id, todo)
         return self._format_state(todo)
 
-    async def _update_step(
+    async def update_step(
         self,
         session_id: str,
         step_index: int,
         status: str,
         result: Optional[str] = None,
     ) -> str:
+        """Update a step's status and optional result."""
         todo = self._session_todos.get(session_id)
         if not todo:
             return "Error: no TODO plan exists for this session"
@@ -202,6 +226,57 @@ class PlanSkill:
         todo.updated_at = time.time()
         await self._write_todo_file(session_id, todo)
         return self._format_state(todo)
+
+    # ------------------------------------------------------------------
+    # Workflow orchestration API
+    # ------------------------------------------------------------------
+
+    async def create_orchestrated(
+        self,
+        session_id: str,
+        task: str,
+        workflow_steps,
+    ) -> str:
+        """Create an orchestrated TODO from WorkflowStep objects.
+
+        Called by WorkflowRunner after the planner has produced enhanced
+        steps with agent assignments and dependencies.
+
+        Args:
+            session_id: The session ID.
+            task: Overall task description.
+            workflow_steps: List of WorkflowStep pydantic objects.
+
+        Returns:
+            Formatted state string.
+        """
+        existing = self._session_todos.get(session_id)
+        if existing:
+            self._session_history.setdefault(session_id, []).append(existing)
+
+        filename = self._make_todo_filename(task)
+        steps = [
+            TodoStep(
+                description=f"[{s.assigned_agent}] {s.task}",
+                step_name=s.step_name,
+                depends_on=list(s.depends_on) if s.depends_on else None,
+                assigned_agent=s.assigned_agent,
+            )
+            for s in workflow_steps
+        ]
+        todo = SessionTodo(
+            task=task,
+            steps=steps,
+            filename=filename,
+            is_workflow=True,
+        )
+        self._session_todos[session_id] = todo
+        await self._write_todo_file(session_id, todo)
+        return self._format_state(todo)
+
+    # ------------------------------------------------------------------
+    # State queries
+    # ------------------------------------------------------------------
 
     def get_state(self, session_id: str) -> Optional[SessionTodo]:
         return self._session_todos.get(session_id)
@@ -330,6 +405,10 @@ class PlanSkill:
             todo.updated_at = time.time()
             await self._write_todo_file(session_id, todo)
 
+    # ------------------------------------------------------------------
+    # State prompt for system prompt injection
+    # ------------------------------------------------------------------
+
     def get_state_prompt(self, session_id: str) -> Optional[str]:
         parts: List[str] = []
 
@@ -365,14 +444,15 @@ class PlanSkill:
 
         for i, step in enumerate(todo.steps):
             result_part = f" — {step.result}" if step.result else ""
-            entry = f"  {i}. {step.description}{result_part}"
+            agent_part = f" @{step.assigned_agent}" if step.assigned_agent else ""
+            entry = f"  {i}. {step.description}{agent_part}{result_part}"
             if step.status == "completed":
                 completed_lines.append(entry)
             elif step.status == "in_progress":
                 current_lines.append(entry)
                 in_progress_idx = i
             elif step.status == "failed":
-                current_lines.append(f"  {i}. [FAILED] {step.description}{result_part}")
+                current_lines.append(f"  {i}. [FAILED] {step.description}{agent_part}{result_part}")
                 if failed_idx is None:
                     failed_idx = i
             else:  # pending
@@ -393,8 +473,13 @@ class PlanSkill:
             lines.extend(pending_lines)
             lines.append("</pending_steps>")
 
-        # Action directive
-        if failed_idx is not None:
+        # Action directive — different for workflow vs manual mode
+        if todo.is_workflow:
+            lines.append(
+                "\nThis plan is being executed automatically with parallel orchestration. "
+                "Do NOT manually update steps."
+            )
+        elif failed_idx is not None:
             lines.append(
                 f"\nSTOP: Step {failed_idx} has failed. "
                 "Do NOT continue with remaining steps. "
@@ -444,20 +529,27 @@ class PlanSkill:
         completed = 0
         in_progress = False
         for step in todo.steps:
+            # Build agent badge and dependency info for workflow steps
+            suffix = ""
+            if step.assigned_agent:
+                suffix += f" `@{step.assigned_agent}`"
+            if step.depends_on:
+                suffix += f" (depends: {', '.join(step.depends_on)})"
+
             if step.status == "completed":
                 completed += 1
-                lines.append(f"- [x] ~~{step.description}~~ ✓")
+                lines.append(f"- [x] ~~{step.description}~~{suffix}")
                 if step.result:
                     lines.append(f"  > {step.result}")
             elif step.status == "in_progress":
                 in_progress = True
-                lines.append(f"- [ ] **{step.description}** ← in progress")
+                lines.append(f"- [ ] **{step.description}**{suffix} <- in progress")
             elif step.status == "failed":
-                lines.append(f"- [ ] ~~{step.description}~~ ✗")
+                lines.append(f"- [ ] ~~{step.description}~~{suffix} X")
                 if step.result:
                     lines.append(f"  > {step.result}")
             else:
-                lines.append(f"- [ ] {step.description}")
+                lines.append(f"- [ ] {step.description}{suffix}")
 
         total = len(todo.steps)
         if completed == total:

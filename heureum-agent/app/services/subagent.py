@@ -60,6 +60,11 @@ class SpawnRequest:
     task: str
     tools: Optional[List[str]] = None
     cleanup: str = "delete"  # "keep" or "delete"
+    # Orchestrator integration
+    announce: bool = True  # Whether to announce completion to parent session
+    system_prompt: Optional[str] = None  # Override default subagent instructions
+    orchestrator_mode: bool = False  # Skip depth/children limits
+    max_iterations: Optional[int] = None  # Override default max iterations
 
 
 @dataclass
@@ -203,6 +208,38 @@ def _clear_depth(session_id: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session ↔ step context (for filesystem result persistence)
+# ---------------------------------------------------------------------------
+
+_session_step_context: Dict[str, Dict[str, Any]] = {}
+
+
+def set_session_step_context(
+    session_id: str, step_name: str, result_store: Any,
+) -> None:
+    """Register which orchestration step a supervisor session belongs to.
+
+    Called by TeamExecutor after spawning a step sub-agent so that
+    ``_persist_subagent_to_store`` can locate the correct result store
+    and step directory.
+    """
+    _session_step_context[session_id] = {
+        "step_name": step_name,
+        "result_store": result_store,
+    }
+
+
+def get_session_step_context(session_id: str) -> Optional[Dict[str, Any]]:
+    """Return the step context for *session_id*, or *None*."""
+    return _session_step_context.get(session_id)
+
+
+def clear_session_step_context(session_id: str) -> None:
+    """Remove the step context for *session_id*."""
+    _session_step_context.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
 # Spawn
 # ---------------------------------------------------------------------------
 
@@ -211,7 +248,9 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
     """Spawn a sub-agent task.
 
     Validates depth and children limits, then creates an async task
-    for the sub-agent execution.
+    for the sub-agent execution.  When ``orchestrator_mode`` is set,
+    depth and children limits are bypassed so the workflow engine can
+    spawn as many parallel steps as needed.
 
     Args:
         request: The spawn request with task description and config.
@@ -219,26 +258,28 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
     Returns:
         SpawnResult with status and child session ID.
     """
-    # Depth check
-    depth = get_subagent_depth(request.parent_session_id)
-    if depth >= settings.SUBAGENT_MAX_SPAWN_DEPTH:
-        return SpawnResult(
-            status="forbidden",
-            message=f"Maximum spawn depth ({settings.SUBAGENT_MAX_SPAWN_DEPTH}) reached. "
-            "Sub-agents cannot spawn their own sub-agents.",
-        )
+    if not request.orchestrator_mode:
+        # Depth check
+        depth = get_subagent_depth(request.parent_session_id)
+        if depth >= settings.SUBAGENT_MAX_SPAWN_DEPTH:
+            return SpawnResult(
+                status="forbidden",
+                message=f"Maximum spawn depth ({settings.SUBAGENT_MAX_SPAWN_DEPTH}) reached. "
+                "Sub-agents cannot spawn their own sub-agents.",
+            )
 
-    # Children limit check
-    active = _registry.count_active(request.parent_session_id)
-    if active >= settings.SUBAGENT_MAX_CHILDREN:
-        return SpawnResult(
-            status="forbidden",
-            message=f"Maximum concurrent children ({settings.SUBAGENT_MAX_CHILDREN}) reached.",
-        )
+        # Children limit check
+        active = _registry.count_active(request.parent_session_id)
+        if active >= settings.SUBAGENT_MAX_CHILDREN:
+            return SpawnResult(
+                status="forbidden",
+                message=f"Maximum concurrent children ({settings.SUBAGENT_MAX_CHILDREN}) reached.",
+            )
 
     # Create child session
     child_session_id = f"subagent_{uuid.uuid4().hex[:12]}"
-    _set_child_depth(child_session_id, request.parent_session_id)
+    if not request.orchestrator_mode:
+        _set_child_depth(child_session_id, request.parent_session_id)
 
     record = SubagentRunRecord(
         child_session_id=child_session_id,
@@ -254,11 +295,13 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
     )
     record.asyncio_task = task
 
+    log_depth = 0 if request.orchestrator_mode else get_subagent_depth(child_session_id)
     logger.info(
-        "Spawned sub-agent %s for parent %s (depth=%d, task=%s)",
+        "Spawned sub-agent %s for parent %s (depth=%d, orchestrator=%s, task=%s)",
         child_session_id,
         request.parent_session_id,
-        depth + 1,
+        log_depth,
+        request.orchestrator_mode,
         request.task[:100],
     )
 
@@ -274,6 +317,29 @@ async def spawn_subagent(request: SpawnRequest) -> SpawnResult:
 # ---------------------------------------------------------------------------
 
 
+def _persist_subagent_to_store(record: SubagentRunRecord) -> None:
+    """Save a sub-agent result to the filesystem if a step context exists.
+
+    No-op when the parent session is not part of an orchestrated workflow
+    (i.e. ``_session_step_context`` has no entry for the parent).
+    """
+    ctx = get_session_step_context(record.parent_session_id)
+    if not ctx:
+        return
+    try:
+        ctx["result_store"].save_subagent_result(
+            step_name=ctx["step_name"],
+            child_session_id=record.child_session_id,
+            task=record.task,
+            status=record.status,
+            result_summary=record.result_summary,
+        )
+    except Exception:
+        logger.warning(
+            "Failed to persist subagent %s to store", record.child_session_id, exc_info=True,
+        )
+
+
 async def _run_subagent(record: SubagentRunRecord, request: SpawnRequest) -> None:
     """Execute the sub-agent task with timeout handling."""
     try:
@@ -282,20 +348,28 @@ async def _run_subagent(record: SubagentRunRecord, request: SpawnRequest) -> Non
             timeout=settings.SUBAGENT_TIMEOUT_SECONDS,
         )
         _registry.mark_completed(record.child_session_id, "completed", result)
-        await _announce_completion(record, result)
+        _persist_subagent_to_store(record)
+        if request.announce:
+            await _announce_completion(record, result)
     except asyncio.TimeoutError:
         logger.warning("Sub-agent %s timed out", record.child_session_id)
         _registry.mark_completed(record.child_session_id, "timeout", "Task timed out")
-        await _announce_completion(record, "Sub-agent task timed out.")
+        _persist_subagent_to_store(record)
+        if request.announce:
+            await _announce_completion(record, "Sub-agent task timed out.")
     except asyncio.CancelledError:
         logger.info("Sub-agent %s cancelled", record.child_session_id)
         _registry.mark_completed(record.child_session_id, "failed", "Cancelled")
+        _persist_subagent_to_store(record)
     except Exception as e:
         logger.warning("Sub-agent %s failed: %s", record.child_session_id, e)
         _registry.mark_completed(record.child_session_id, "failed", str(e))
-        await _announce_completion(record, f"Sub-agent task failed: {e}")
+        _persist_subagent_to_store(record)
+        if request.announce:
+            await _announce_completion(record, f"Sub-agent task failed: {e}")
     finally:
         # Cleanup
+        clear_session_step_context(record.child_session_id)
         if request.cleanup == "delete":
             _clear_depth(record.child_session_id)
             try:
@@ -447,6 +521,38 @@ def _tool_detail(tool_name: str, args: Dict[str, Any]) -> str:
     return ""
 
 
+def _has_active_children(session_id: str) -> bool:
+    """Check if any sub-agents are still running for this session."""
+    return any(r.status == "running" for r in _registry.list_by_parent(session_id))
+
+
+async def _wait_and_inject_children(
+    child_service: AgentService,
+    session_id: str,
+    injected: set,
+) -> None:
+    """Wait for active sub-agents and inject results into the supervisor session."""
+    await await_active_subagents(session_id, timeout=settings.SUBAGENT_TIMEOUT_SECONDS)
+    for record in _registry.list_by_parent(session_id):
+        if record.child_session_id in injected or record.status == "running":
+            continue
+        injected.add(record.child_session_id)
+        label = record.status
+        # Primary: in-memory result; fallback: filesystem
+        summary = record.result_summary
+        if not summary:
+            ctx = get_session_step_context(session_id)
+            if ctx:
+                summary = ctx["result_store"].read_subagent_result(
+                    ctx["step_name"], record.child_session_id,
+                ) or ""
+        content = (
+            f"[Sub-agent {label}] Task: {record.task[:200]}\n"
+            f"Result: {summary[:1000]}"
+        )
+        child_service._lc_sessions[session_id].append(SystemMessage(content=content))
+
+
 async def _execute_subagent_task(
     record: SubagentRunRecord,
     request: SpawnRequest,
@@ -470,7 +576,10 @@ async def _execute_subagent_task(
     )
 
     # Build dynamic instructions
-    instructions = _build_subagent_instructions(request.task, tool_names)
+    if request.system_prompt:
+        instructions = request.system_prompt
+    else:
+        instructions = _build_subagent_instructions(request.task, tool_names)
 
     session_id = record.child_session_id
     # Pre-initialize child session to avoid rehydration network calls.
@@ -483,9 +592,10 @@ async def _execute_subagent_task(
         )
     ]
 
-    max_iterations = min(settings.MAX_AGENT_ITERATIONS, 20)
+    max_iterations = request.max_iterations or min(settings.MAX_AGENT_ITERATIONS, 20)
 
     try:
+        injected_children: set = set()
         for iteration in range(1, max_iterations + 1):
             record.current_iteration = iteration
 
@@ -496,6 +606,13 @@ async def _execute_subagent_task(
             )
 
             if result.type == LLMResultType.TEXT:
+                # Wait for any active sub-agents before returning
+                if _has_active_children(session_id):
+                    await _wait_and_inject_children(
+                        child_service, session_id, injected_children,
+                    )
+                    messages = []
+                    continue  # Re-run LLM to synthesize sub-agent results
                 return result.text or "Task completed."
 
             # Tool calls — execute them
@@ -545,6 +662,12 @@ async def _execute_subagent_task(
                     assistant_lc_message=result.assistant_lc_message,
                 )
                 messages = []  # Continue without new user messages
+
+                # Wait for any spawned sub-agents and inject results
+                if _has_active_children(session_id):
+                    await _wait_and_inject_children(
+                        child_service, session_id, injected_children,
+                    )
 
         return "Sub-agent reached maximum iterations."
     finally:

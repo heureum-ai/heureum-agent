@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     ENABLE_SELF_EVALUATION: bool = False
     MAX_EVAL_RETRIES: int = 2  # max judge retry attempts per response
 
+    # Workflow orchestration
+    ENABLE_WORKFLOW: bool = True
+    AGENT_WORK_DIR: str = "data"  # Base directory for agent result storage
+    ORCHESTRATOR_MAX_ROLES: int = 5
+    ORCHESTRATOR_MAX_STEPS: int = 10
+    MAX_ORCHESTRATOR_STEP_ITERATIONS: int = 15
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
 
