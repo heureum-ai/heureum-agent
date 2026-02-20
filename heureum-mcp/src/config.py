@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """MCP Server configuration."""
+
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -49,13 +50,18 @@ class Settings(BaseSettings):
     )
 
     SERVERS: dict[str, ServerConfig] = {
-        "web": ServerConfig(name="heureum-web", port=3001),
+        "web": ServerConfig(name="web", port=3001),
+        "filesystem": ServerConfig(name="filesystem", port=3002),
     }
+
+    FILESYSTEM_CWD: str = "/tmp"
 
     OPENAI_API_KEY: str = ""
     OPENAI_SEARCH_MODEL: str = "gpt-4o-mini-search-preview"
 
-    WEB_FETCH_MAX_LENGTH: int = 50000
+    TAVILY_API_KEY: str = ""
+
+    WEB_FETCH_MAX_LENGTH: int = 5000
     WEB_FETCH_TIMEOUT: float = 30.0
     WEB_FETCH_USER_AGENT: str = "HeureumMCP/0.1"
 

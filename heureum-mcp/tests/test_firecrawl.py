@@ -1,13 +1,12 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """Tests for Firecrawl fallback content extraction."""
-from unittest.mock import AsyncMock, patch, MagicMock
+
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
-
-from src.tools.web.fetch_utils import fetch_firecrawl
-
+from src.tools.web.fetch import fetch_firecrawl
 
 # ---------------------------------------------------------------------------
 # Fixtures to reduce boilerplate
@@ -17,7 +16,7 @@ from src.tools.web.fetch_utils import fetch_firecrawl
 @pytest.fixture()
 def firecrawl_settings():
     """Patch settings for Firecrawl enabled with API key."""
-    with patch("src.tools.web.fetch_utils.settings") as mock_settings:
+    with patch("src.tools.web.fetch.settings") as mock_settings:
         mock_settings.FIRECRAWL_ENABLED = True
         mock_settings.FIRECRAWL_API_KEY = "fc-test-key"
         mock_settings.FIRECRAWL_BASE_URL = "https://api.firecrawl.dev"
@@ -69,7 +68,7 @@ class TestFirecrawlGuards:
     @pytest.mark.asyncio
     async def test_returns_none_when_disabled(self):
         """Verify that fetch_firecrawl returns None when Firecrawl is disabled."""
-        with patch("src.tools.web.fetch_utils.settings") as mock_settings:
+        with patch("src.tools.web.fetch.settings") as mock_settings:
             mock_settings.FIRECRAWL_ENABLED = False
             mock_settings.FIRECRAWL_API_KEY = "key"
             assert await fetch_firecrawl("https://example.com") is None
@@ -77,7 +76,7 @@ class TestFirecrawlGuards:
     @pytest.mark.asyncio
     async def test_returns_none_when_no_api_key(self):
         """Verify that fetch_firecrawl returns None when the API key is empty."""
-        with patch("src.tools.web.fetch_utils.settings") as mock_settings:
+        with patch("src.tools.web.fetch.settings") as mock_settings:
             mock_settings.FIRECRAWL_ENABLED = True
             mock_settings.FIRECRAWL_API_KEY = ""
             assert await fetch_firecrawl("https://example.com") is None
@@ -145,7 +144,9 @@ class TestFirecrawlFailures:
     @pytest.mark.asyncio
     async def test_api_http_error(self, firecrawl_settings, mock_httpx_client):
         """Verify that an HTTP error response returns None."""
-        mock_httpx_client.post.return_value = _make_firecrawl_response(is_success=False, status_code=500)
+        mock_httpx_client.post.return_value = _make_firecrawl_response(
+            is_success=False, status_code=500
+        )
         assert await fetch_firecrawl("https://example.com") is None
 
     @pytest.mark.asyncio

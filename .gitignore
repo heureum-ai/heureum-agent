@@ -102,3 +102,6 @@ release/
 *.deb
 *.rpm
 *.AppImage
+
+# Skills assets (external repo)
+heureum-client-tools/assets/skills/

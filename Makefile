@@ -1,9 +1,9 @@
-.PHONY: help setup install install-agent install-mcp install-platform install-frontend install-client install-mobile
+.PHONY: help setup install install-agent install-mcp install-platform install-frontend install-client install-client-tools install-mobile
 .PHONY: dev-agent dev-mcp dev-platform dev-frontend dev-client dev-mobile dev-mobile-ios dev-mobile-android dev-all stop
 .PHONY: release-client-mac release-client-win
-.PHONY: build-agent build-mcp build-platform build-frontend build-client build-all
+.PHONY: build-agent build-mcp build-platform build-frontend build-client build-client-tools build-all
 .PHONY: test-agent test-mcp test-platform test-frontend test-client test-all
-.PHONY: lint-frontend lint-client lint-all clean
+.PHONY: lint-frontend lint-client lint-all clean clean-node-modules
 .PHONY: docker-build infra-init infra-plan infra-apply
 
 # Default target
@@ -20,6 +20,7 @@ help:
 	@echo "  make install-mcp          - Install heureum-mcp (MCP server)"
 	@echo "  make install-platform     - Install heureum-platform (Django)"
 	@echo "  make install-frontend     - Install heureum-frontend (React)"
+	@echo "  make install-client-tools  - Install & build heureum-client-tools (coding)"
 	@echo "  make install-client       - Install heureum-client (Electron)"
 	@echo "  make install-mobile       - Install heureum-mobile (Expo)"
 	@echo ""
@@ -77,7 +78,7 @@ setup: install
 	@$(MAKE) dev-all
 
 # Installation targets
-install: install-agent install-mcp install-platform install-frontend install-client install-mobile
+install: install-agent install-mcp install-platform install-frontend install-client-tools install-client install-mobile
 	@echo "✓ All dependencies installed"
 
 install-agent:
@@ -94,11 +95,21 @@ install-platform:
 
 install-frontend:
 	@echo "Installing heureum-frontend dependencies..."
-	cd heureum-frontend && pnpm install --force
+	cd heureum-frontend && pnpm install
 
-install-client:
+install-client-tools:
+	@echo "Installing and building heureum-client-tools..."
+	cd heureum-client-tools/coding && pnpm install && pnpm build
+	# TODO: document tools temporarily excluded
+	# cd heureum-client-tools/word && pnpm install && pnpm build
+	# cd heureum-client-tools/pdf && pnpm install && pnpm build
+	# cd heureum-client-tools/ppt && pnpm install && pnpm build
+	# cd heureum-client-tools/xlsx && pnpm install && pnpm build
+	# cd heureum-client-tools/web && pnpm install && pnpm build
+
+install-client: install-client-tools
 	@echo "Installing heureum-client dependencies..."
-	cd heureum-client && pnpm install --force
+	cd heureum-client && pnpm install
 
 install-mobile:
 	@echo "Installing heureum-mobile dependencies..."
@@ -112,7 +123,7 @@ dev-mcp:
 	cd heureum-mcp && poetry run python -m src.main
 
 dev-platform:
-	cd heureum-platform && poetry run python manage.py runserver
+	cd heureum-platform && poetry run python manage.py runserver 8001
 
 dev-frontend:
 	cd heureum-frontend && pnpm dev
@@ -157,7 +168,16 @@ build-platform:
 build-frontend:
 	cd heureum-frontend && pnpm build
 
-build-client:
+build-client-tools:
+	cd heureum-client-tools/coding && pnpm build
+	# TODO: document tools temporarily excluded
+	# cd heureum-client-tools/word && pnpm build
+	# cd heureum-client-tools/pdf && pnpm build
+	# cd heureum-client-tools/ppt && pnpm build
+	# cd heureum-client-tools/xlsx && pnpm build
+	# cd heureum-client-tools/web && pnpm build
+
+build-client: build-client-tools
 	cd heureum-client && pnpm build
 
 build-all: build-agent build-mcp build-platform build-frontend build-client
@@ -227,5 +247,21 @@ clean:
 	rm -rf heureum-mcp/dist heureum-mcp/.pytest_cache heureum-mcp/__pycache__
 	rm -rf heureum-platform/dist heureum-platform/.pytest_cache heureum-platform/__pycache__
 	rm -rf heureum-frontend/dist heureum-frontend/node_modules/.vite
+	rm -rf heureum-client-tools/coding/dist
+	# TODO: document tools temporarily excluded
+	# rm -rf heureum-client-tools/word/dist heureum-client-tools/pdf/dist heureum-client-tools/ppt/dist heureum-client-tools/xlsx/dist heureum-client-tools/web/dist
 	rm -rf heureum-client/dist heureum-client/out heureum-client/release heureum-client/node_modules/.vite
 	@echo "✓ Clean complete"
+
+clean-node-modules:
+	@echo "Removing node_modules..."
+	rm -rf heureum-client-tools/coding/node_modules
+	# TODO: document tools temporarily excluded
+	# rm -rf heureum-client-tools/word/node_modules
+	# rm -rf heureum-client-tools/pdf/node_modules
+	# rm -rf heureum-client-tools/ppt/node_modules
+	# rm -rf heureum-client-tools/xlsx/node_modules
+	# rm -rf heureum-client-tools/web/node_modules
+	rm -rf heureum-frontend/node_modules
+	rm -rf heureum-client/node_modules
+	@echo "✓ node_modules removed — run 'make install' to reinstall"

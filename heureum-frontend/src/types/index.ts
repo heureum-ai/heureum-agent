@@ -36,6 +36,7 @@ export interface FunctionToolCall {
   name: string;
   arguments: string;
   status?: ItemStatus;
+  display_name?: string;
 }
 
 export interface FunctionToolResult {
@@ -50,6 +51,8 @@ export interface ToolDefinition {
   name: string;
   description?: string;
   parameters?: Record<string, any>;
+  guide?: string;
+  display_name?: string;
 }
 
 export type OutputItem = MessageItem | FunctionToolCall;
@@ -113,6 +116,7 @@ export interface ToolCallInfo {
   command: string;
   toolName?: string;
   toolArgs?: Record<string, unknown>;
+  displayName?: string;
   output?: string;
   status: 'running' | 'completed' | 'failed';
   exitCode?: number;
@@ -152,6 +156,23 @@ export type QuestionAnswer = {
   type: 'cancelled';
 };
 
+// Sub-agent progress types
+export interface SubagentProgressStep {
+  toolName: string;
+  detail: string;
+  status: 'running' | 'completed' | 'failed';
+}
+
+export interface SubagentProgress {
+  childSessionId: string;
+  task: string;
+  status: 'running' | 'completed' | 'failed' | 'timeout';
+  elapsedSeconds: number;
+  currentIteration?: number;
+  resultSummary?: string | null;
+  steps: SubagentProgressStep[];
+}
+
 // Legacy interfaces for backward compatibility
 export interface PeriodicRunInfo {
   taskId: string;
@@ -164,6 +185,7 @@ export interface Message {
   content: string;
   toolCall?: ToolCallInfo;
   todo?: TodoState;
+  subagentProgress?: SubagentProgress;
   question?: QuestionRequest;
   questionAnswer?: QuestionAnswer;
   cancelled?: 'permission' | 'question';
@@ -302,6 +324,11 @@ export interface StreamEventTodoUpdated {
   todo: TodoState;
 }
 
+export interface StreamEventTextAbandoned {
+  type: 'response.output_text.abandoned';
+  reason: string;
+}
+
 export type StreamEvent =
   | StreamEventCreated
   | StreamEventTextDelta
@@ -311,7 +338,8 @@ export type StreamEvent =
   | StreamEventCompleted
   | StreamEventIncomplete
   | StreamEventFailed
-  | StreamEventTodoUpdated;
+  | StreamEventTodoUpdated
+  | StreamEventTextAbandoned;
 
 // Periodic task types
 export interface PeriodicTask {

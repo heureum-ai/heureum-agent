@@ -14,6 +14,16 @@ const api = {
     return ipcRenderer.invoke('get-client-id')
   },
   canExecuteTools: true,
+  getCodingTools: (): Promise<Array<{ type: string; name: string; description?: string; parameters?: Record<string, any> }>> => {
+    return ipcRenderer.invoke('get-coding-tools')
+  },
+  codingTool: (
+    toolName: string,
+    args: Record<string, unknown>,
+    cwd?: string
+  ): Promise<{ success: boolean; output: string; images?: Array<{ data: string; mimeType: string }> }> => {
+    return ipcRenderer.invoke('coding-tool', toolName, args, cwd)
+  },
   browserCommand: (
     action: string,
     params: Record<string, unknown>
@@ -23,6 +33,31 @@ const api = {
   isBrowserExtensionConnected: (): Promise<boolean> => {
     return ipcRenderer.invoke('browser-extension-status')
   },
+  // TODO: re-enable when document tools are ready
+  // docxTool: (
+  //   toolName: string,
+  //   params: Record<string, unknown>
+  // ): Promise<{ success: boolean; output: string; error?: string }> => {
+  //   return ipcRenderer.invoke('docx-tool', toolName, params)
+  // },
+  // pdfTool: (
+  //   toolName: string,
+  //   params: Record<string, unknown>
+  // ): Promise<{ success: boolean; output: string; error?: string }> => {
+  //   return ipcRenderer.invoke('pdf-tool', toolName, params)
+  // },
+  // pptTool: (
+  //   toolName: string,
+  //   params: Record<string, unknown>
+  // ): Promise<{ success: boolean; output: string; error?: string }> => {
+  //   return ipcRenderer.invoke('ppt-tool', toolName, params)
+  // },
+  // xlsxTool: (
+  //   toolName: string,
+  //   params: Record<string, unknown>
+  // ): Promise<{ success: boolean; output: string; error?: string }> => {
+  //   return ipcRenderer.invoke('xlsx-tool', toolName, params)
+  // },
   startNotificationStream: (platformUrl: string): Promise<{ success: boolean }> => {
     return ipcRenderer.invoke('start-notification-stream', platformUrl)
   },

@@ -1,8 +1,11 @@
 #!/usr/bin/env python
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 """Test script for Open Responses implementation."""
+
+import json
 import os
 import sys
+
 import django
 
 # Setup Django
@@ -10,15 +13,15 @@ os.environ.setdefault("DJANGO_SETTINGS_MODULE", "heureum_platform.settings")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 django.setup()
 
-from chat_messages.models import Message, Response
-from chat_messages.serializers import (
-    ResponseRequestSerializer,
-    ResponseObjectSerializer,
+import pytest  # noqa: E402
+from chat_messages.models import Message, Response  # noqa: E402
+from chat_messages.serializers import (  # noqa: E402
     MessageItemSerializer,
+    ResponseRequestSerializer,
 )
-import json
 
 
+@pytest.mark.django_db
 def test_models():
     """Test Django models."""
     print("\n=== Testing Django Models ===")
@@ -104,6 +107,7 @@ def test_serializers():
         print(f"✗ ResponseRequestSerializer errors: {req_serializer2.errors}")
 
 
+@pytest.mark.django_db
 def test_response_object():
     """Test complete response object."""
     print("\n=== Testing Response Object ===")
@@ -159,12 +163,8 @@ def test_string_input_conversion():
 def cleanup():
     """Clean up test data."""
     print("\n=== Cleaning Up Test Data ===")
-    deleted_messages = Message.objects.filter(
-        session_id__startswith="test_session_"
-    ).delete()
-    deleted_responses = Response.objects.filter(
-        session_id__startswith="test_session_"
-    ).delete()
+    deleted_messages = Message.objects.filter(session_id__startswith="test_session_").delete()
+    deleted_responses = Response.objects.filter(session_id__startswith="test_session_").delete()
     print(f"✓ Deleted {deleted_messages[0]} messages")
     print(f"✓ Deleted {deleted_responses[0]} responses")
 

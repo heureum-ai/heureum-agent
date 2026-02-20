@@ -97,7 +97,7 @@ def estimate_message_tokens(msg: Message) -> int:
     """
     extra = _tool_calls_chars(msg)
     if extra:
-        return estimate_tokens(msg.content) + estimate_tokens(" " * extra)
+        return estimate_tokens(msg.content) + max(1, extra // CHARS_PER_TOKEN_FALLBACK)
     return estimate_tokens(msg.content)
 
 

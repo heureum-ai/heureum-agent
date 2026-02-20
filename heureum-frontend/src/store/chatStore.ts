@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import { create } from 'zustand';
-import type { Message, TodoState } from '../types';
+import type { Message, TodoState, SubagentProgress } from '../types';
 import { clearSessionCwd, setSessionCwd } from '../lib/api';
 
 interface ChatState {
@@ -23,6 +23,8 @@ interface ChatState {
   clearMessages: () => void;
   loadSession: (sessionId: string, messages: Message[], cwd: string | null, hasOlderMessages?: boolean) => void;
   updateOrAddTodo: (todo: TodoState) => void;
+  updateOrAddSubagentProgress: (progress: SubagentProgress) => void;
+  updateToolCallStatus: (callId: string, status: 'completed' | 'failed', output?: string) => void;
   setHasOlderMessages: (v: boolean) => void;
   setLoadingOlder: (v: boolean) => void;
   setOldestLoadedPage: (p: number) => void;
@@ -59,18 +61,32 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
     set({ messages, sessionId, cwd, streamingText: '', hasOlderMessages, oldestLoadedPage: 1 });
   },
+  updateToolCallStatus: (callId, status, output) => {
+    const msgs = get().messages;
+    const idx = msgs.findIndex(m => m.toolCall?.callId === callId);
+    if (idx >= 0) {
+      const updated = [...msgs];
+      const tc = { ...msgs[idx].toolCall!, status, ...(output != null ? { output } : {}) };
+      updated[idx] = { ...msgs[idx], toolCall: tc };
+      set({ messages: updated });
+    }
+  },
   updateOrAddTodo: (todo) => {
     const msgs = get().messages;
-    let lastIdx = -1;
-    for (let i = msgs.length - 1; i >= 0; i--) {
-      if (msgs[i].todo != null) { lastIdx = i; break; }
-    }
-    if (lastIdx >= 0) {
+    // Remove previous todo and re-add at the end so it always
+    // appears near the latest activity (like Claude Code's in-place update).
+    const filtered = msgs.filter(m => m.todo == null);
+    set({ messages: [...filtered, { role: 'assistant', content: '', todo }] });
+  },
+  updateOrAddSubagentProgress: (progress) => {
+    const msgs = get().messages;
+    const idx = msgs.findIndex(m => m.subagentProgress?.childSessionId === progress.childSessionId);
+    if (idx >= 0) {
       const updated = [...msgs];
-      updated[lastIdx] = { ...updated[lastIdx], todo };
+      updated[idx] = { ...msgs[idx], subagentProgress: progress };
       set({ messages: updated });
     } else {
-      set({ messages: [...msgs, { role: 'assistant', content: '', todo }] });
+      set({ messages: [...msgs, { role: 'assistant', content: '', subagentProgress: progress }] });
     }
   },
   setHasOlderMessages: (v) => set({ hasOlderMessages: v }),

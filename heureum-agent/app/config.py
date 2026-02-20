@@ -5,49 +5,9 @@ Application configuration using pydantic-settings.
 """
 
 from enum import Enum
-from typing import List, Set
+from typing import List
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-# ---------------------------------------------------------------------------
-# MCP constants
-# ---------------------------------------------------------------------------
-
-# TODO: client-side에서 tool 목록을 관리하도록 이전 필요 (서버가 결정할 사항이 아님)
-CLIENT_TOOLS: Set[str] = {
-    "ask_question",
-    "bash",
-    "select_cwd",
-    "browser_navigate",
-    "browser_new_tab",
-    "browser_click",
-    "browser_type",
-    "browser_get_content",
-    "get_device_info",
-    "get_sensor_data",
-    "get_contacts",
-    "get_location",
-    "take_photo",
-    "send_notification",
-    "get_clipboard",
-    "set_clipboard",
-    "send_sms",
-    "share_content",
-    "trigger_haptic",
-    "open_url",
-}
-
-# Session file tools — executed server-side via Platform API
-SESSION_FILE_TOOLS: Set[str] = {
-    "read_file",
-    "write_file",
-    "list_files",
-    "delete_file",
-}
-
-# Agent-internal tools — executed server-side by the agent itself
-AGENT_TOOLS: Set[str] = {"manage_todo", "manage_periodic_task", "notify_user"}
 
 
 class ApprovalChoice(str, Enum):
@@ -92,7 +52,8 @@ class Settings(BaseSettings):
         CORS_ORIGINS (str): Comma-separated list of allowed CORS origins.
         LANGCHAIN_TRACING_V2 (bool): Whether to enable LangChain tracing.
         LANGCHAIN_API_KEY (str): API key for LangChain/LangSmith.
-        MCP_SERVER_URL (str): URL of the MCP server.
+        PLATFORM_API_URL (str): URL of the MCP server (used for session files, notifications, periodic tasks).
+        MCP_SERVER_URLS (str): Comma-separated MCP server URLs for tool discovery.
         AGENT_MODEL (str): Model identifier for the agent LLM.
         AGENT_TEMPERATURE (float): Sampling temperature for the agent.
         AGENT_MAX_TOKENS (int): Maximum token limit for agent responses.
@@ -119,13 +80,16 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:8001"
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""
-    MCP_SERVER_URL: str = "http://localhost:8001"
+    PLATFORM_API_URL: str = "http://localhost:8001"
+    MCP_SERVER_URLS: str = "http://localhost:3001,http://localhost:3002"
     AGENT_MODEL: str = "gemini-3-flash-preview"
     AGENT_TEMPERATURE: float = 0.7
-    AGENT_MAX_TOKENS: int = 2000
+    AGENT_MAX_TOKENS: int = 32768
+    AGENT_THINKING_BUDGET: int = 1024  # Gemini 2.5: thinking token budget (0 = disabled)
 
     # Agent loop
     MAX_AGENT_ITERATIONS: int = 50
+    MAX_CHAIN_DEPTH: int = 10  # max consecutive chain steps without returning to LLM
 
     # Session
     SESSION_TTL_SECONDS: int = 3600  # 1 hour
@@ -139,8 +103,31 @@ class Settings(BaseSettings):
     MAX_LLM_RETRIES: int = 2
     LLM_RETRY_BASE_DELAY: float = 1.0  # seconds, doubles each retry
 
+    # Self-evaluation (LLM-as-judge)
+    ENABLE_SELF_EVALUATION: bool = False
+    MAX_EVAL_RETRIES: int = 2  # max judge retry attempts per response
+
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
+
+    # Tool loop detection
+    LOOP_DETECTION_ENABLED: bool = True
+    LOOP_DETECTION_HISTORY_SIZE: int = 30
+    LOOP_DETECTION_WARNING_THRESHOLD: int = 10
+    LOOP_DETECTION_CRITICAL_THRESHOLD: int = 20
+    LOOP_DETECTION_CIRCUIT_BREAKER_THRESHOLD: int = 30
+
+    # Model fallback
+    MODEL_FALLBACK_PRIMARY: str = ""  # empty → inferred from AGENT_MODEL
+    MODEL_FALLBACK_CHAIN: str = ""  # comma-separated "provider/model" specs
+    MODEL_FALLBACK_COOLDOWN_BASE_SECONDS: int = 60
+    MODEL_FALLBACK_COOLDOWN_MAX_SECONDS: int = 3600
+    ANTHROPIC_API_KEY: str = ""
+
+    # Sub-agent
+    SUBAGENT_MAX_SPAWN_DEPTH: int = 1
+    SUBAGENT_MAX_CHILDREN: int = 5
+    SUBAGENT_TIMEOUT_SECONDS: int = 300
 
     def get_cors_origins(self) -> List[str]:
         """Parse CORS origins as list.
@@ -150,6 +137,31 @@ class Settings(BaseSettings):
                 comma-separated CORS_ORIGINS setting.
         """
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    def get_mcp_server_urls(self) -> List[str]:
+        """Parse MCP server URLs as list.
+
+        Returns:
+            List[str]: A list of MCP server URLs for tool discovery.
+        """
+        return [url.strip() for url in self.MCP_SERVER_URLS.split(",") if url.strip()]
+
+    def get_model_fallback_primary(self) -> str:
+        """Infer 'provider/model' from AGENT_MODEL if not explicitly set."""
+        if self.MODEL_FALLBACK_PRIMARY:
+            return self.MODEL_FALLBACK_PRIMARY
+        model = self.AGENT_MODEL
+        if model.startswith("gemini"):
+            return f"google/{model}"
+        if model.startswith(("gpt-", "o1", "o3", "o4")):
+            return f"openai/{model}"
+        if model.startswith("claude"):
+            return f"anthropic/{model}"
+        return f"openai/{model}"
+
+    def get_model_fallback_chain(self) -> List[str]:
+        """Parse MODEL_FALLBACK_CHAIN as comma-separated list."""
+        return [s.strip() for s in self.MODEL_FALLBACK_CHAIN.split(",") if s.strip()]
 
 
 settings = Settings()

@@ -96,6 +96,11 @@ class Command(BaseCommand):
 
             try:
                 result = self._call_agent(task)
+                status = result.get("status", "completed")
+                if status in ("failed", "incomplete"):
+                    raise RuntimeError(
+                        result.get("error", f"Agent returned status '{status}'")
+                    )
                 self._handle_success(task, run, result)
                 return
             except Exception as e:
