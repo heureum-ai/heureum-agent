@@ -568,6 +568,31 @@ class TestResolveChildTools:
         assert len(mcp_tools) == 2
         assert "write" not in names
 
+    def test_empty_whitelist_blocks_all_tools(self):
+        mock_svc = MagicMock()
+        mock_svc.mcp_tools = [
+            {"function": {"name": "bash"}},
+            {"function": {"name": "read"}},
+        ]
+        mock_mcp = MagicMock()
+        mock_mcp._approval_required_tools = set()
+        mock_skill = MagicMock()
+        mock_skill.get_all_tool_schemas.return_value = [
+            {"function": {"name": "plan_task"}},
+        ]
+
+        request = SpawnRequest(parent_session_id="p1", task="t", tools=[])
+
+        with (
+            patch("app.routers.agent.agent_service", mock_svc),
+            patch("app.routers.agent.mcp_client", mock_mcp),
+            patch("app.routers.agent.skill_provider", mock_skill),
+        ):
+            mcp_tools, sp, names = _resolve_child_tools(request)
+
+        assert len(mcp_tools) == 0
+        assert names == []
+
     def test_excludes_approval_required_tools(self):
         mock_svc = MagicMock()
         mock_svc.mcp_tools = [

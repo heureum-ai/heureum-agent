@@ -496,7 +496,7 @@ def _resolve_child_tools(
         else getattr(mcp_client, "_approval_required_tools", set())
     )
 
-    if request.tools:
+    if request.tools is not None:
         # Filter MCP tools to whitelist, excluding approval-required
         allowed = set(request.tools)
         child_mcp_tools = [

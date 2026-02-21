@@ -213,9 +213,9 @@ class TeamExecutor:
         if self._result_store:
             self._result_store.save_step_prompt(step.step_name, system_content)
 
-        # Determine which tools this agent can access
-        step_tool_names = self._tool_names
-        if role and role.tool_access:
+        if role is None:
+            step_tool_names = list(self._tool_names)
+        else:
             step_tool_names = [t for t in self._tool_names if t in role.tool_access]
 
         # Merge pre-defined server_tools from SKILL.md (always included)
@@ -237,7 +237,7 @@ class TeamExecutor:
             spawn_request = SpawnRequest(
                 parent_session_id=self._parent_session_id,
                 task=step.task,
-                tools=step_tool_names if step_tool_names else None,
+                tools=step_tool_names,
                 cleanup="delete",
                 announce=False,
                 system_prompt=system_content,
