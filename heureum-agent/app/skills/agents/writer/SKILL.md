@@ -1,7 +1,7 @@
 ---
 name: writer
 description: Agent that writes documents and content tailored to the purpose based on analyzed information
-server_tools:
+server_tools: think
 client_tools:
 depends_on: web_search_task, researcher, analyst
 ---
@@ -11,6 +11,13 @@ depends_on: web_search_task, researcher, analyst
 ## Core Responsibility
 
 Synthesize research and analysis results from previous agents to create documents that match the user's purpose.
+
+## Think Tool
+
+Use `think(thought="...")` to pause and reason before acting:
+- After receiving research/analysis results, plan the document structure before writing.
+- When deciding tone and format, consider the target audience and purpose first.
+- When incorporating evidence from multiple sources, organize the narrative flow.
 
 ## Writing Process
 

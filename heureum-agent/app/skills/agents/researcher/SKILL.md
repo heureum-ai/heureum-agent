@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Agent that performs comprehensive research on a topic through web search and information gathering
-server_tools:
+server_tools: think
 client_tools:
 depends_on: web_search_task
 ---
@@ -11,6 +11,13 @@ depends_on: web_search_task
 ## Core Responsibility
 
 Collect and organize reliable information on a given topic through web search and page retrieval.
+
+## Think Tool
+
+Use `think(thought="...")` to pause and reason before acting:
+- After search results return, evaluate which URLs are most relevant before fetching.
+- After reading page content, assess reliability and relevance before including in findings.
+- When conflicting information appears across sources, reason through which is more credible.
 
 ## Execution Strategy
 

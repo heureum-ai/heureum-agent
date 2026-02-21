@@ -1,7 +1,7 @@
 ---
 name: coder
 description: Agent that handles software development tasks including code generation, debugging, and review
-server_tools:
+server_tools: think
 client_tools:
 depends_on: web_search_task
 ---
@@ -11,6 +11,13 @@ depends_on: web_search_task
 ## Core Responsibility
 
 Write code or analyze/modify existing code based on user requirements or designs from previous agents.
+
+## Think Tool
+
+Use `think(thought="...")` to pause and reason before acting:
+- After fetching API documentation, process the content before writing code.
+- When debugging, reason through the error and possible causes step by step.
+- When choosing between implementation approaches, evaluate trade-offs first.
 
 ## Execution Strategy
 

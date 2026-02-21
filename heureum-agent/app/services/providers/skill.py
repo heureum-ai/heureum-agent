@@ -25,6 +25,52 @@ from typing import Any, Dict, List, Optional, Set
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Built-in tools — stateless tools always available to every agent.
+# Registered alongside skill-discovered tools so the rest of the
+# system (router, agent_service, sub-agents) sees them uniformly.
+# ---------------------------------------------------------------------------
+
+THINK_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "function",
+    "display_name": "Think",
+    "function": {
+        "name": "think",
+        "description": (
+            "Use the tool to think about something. "
+            "It will not obtain new information or change the database, "
+            "but just append the thought to the log. "
+            "Use it when complex reasoning or some cache memory is needed."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "thought": {
+                    "type": "string",
+                    "description": "A thought to think about.",
+                },
+            },
+            "required": ["thought"],
+        },
+    },
+}
+
+_BUILTIN_TOOL_SCHEMAS: List[Dict[str, Any]] = [THINK_TOOL_SCHEMA]
+
+
+async def _execute_builtin_tool(name: str, arguments: Dict[str, Any]) -> str:
+    """Execute a built-in tool. Returns the result string.
+
+    The think tool returns a short acknowledgment instead of echoing the
+    full thought.  The thought is already recorded in the AIMessage's
+    ``tool_calls`` args, so echoing it into the ToolMessage would double
+    the token cost in the conversation history.
+    """
+    if name == "think":
+        return "OK"
+    raise KeyError(f"Unknown built-in tool: {name}")
+
+
+# ---------------------------------------------------------------------------
 # SKILL.md loader
 # ---------------------------------------------------------------------------
 
@@ -155,12 +201,32 @@ class SkillProvider:
         await skill_provider.startup(write_tool_fn=mcp_client.call_tool)
     """
 
+    # Sentinel object used in ``_tool_to_skill`` for built-in tools
+    # so ``get_skill_for_tool()`` returns a truthy value.
+    _BUILTIN_SENTINEL = object()
+
     def __init__(self) -> None:
         self._skills: Dict[str, Any] = {}
         self._tool_to_skill: Dict[str, Any] = {}
         self._display_names: Dict[str, str] = {}
         self._agent_skills: List[SkillMeta] = []
+        self._builtin_names: Set[str] = set()
+        self._register_builtin_tools()
         self._discover()
+
+    # ------------------------------------------------------------------
+    # Built-in tools
+    # ------------------------------------------------------------------
+
+    def _register_builtin_tools(self) -> None:
+        """Register built-in tool schemas into the same registry used by skills."""
+        for schema in _BUILTIN_TOOL_SCHEMAS:
+            fn_name = schema["function"]["name"]
+            self._tool_to_skill[fn_name] = self._BUILTIN_SENTINEL
+            self._builtin_names.add(fn_name)
+            dn = schema.get("display_name")
+            if dn:
+                self._display_names[fn_name] = dn
 
     # ------------------------------------------------------------------
     # Discovery
@@ -275,12 +341,16 @@ class SkillProvider:
     # ------------------------------------------------------------------
 
     def get_all_tool_schemas(self) -> List[Dict[str, Any]]:
-        """Return combined tool schemas from all registered skills.
+        """Return combined tool schemas from all registered skills and built-in tools.
 
         Strips ``display_name`` from each schema since it is not part of
         the LLM tool interface.
         """
         schemas: List[Dict[str, Any]] = []
+        # Built-in tools
+        for s in _BUILTIN_TOOL_SCHEMAS:
+            schemas.append({k: v for k, v in s.items() if k != "display_name"})
+        # Skill-discovered tools
         for skill in self._skills.values():
             for s in skill.tool_schemas:
                 clean = {k: v for k, v in s.items() if k != "display_name"}
@@ -300,6 +370,17 @@ class SkillProvider:
     # Guide prompts & agent skill catalog
     # ------------------------------------------------------------------
 
+    def get_agent_predefined_tools(self, agent_name: str) -> Set[str]:
+        """Return server_tools from the matching agent SKILL.md.
+
+        These are tools that should always be available to the agent,
+        regardless of dynamic tool_access decisions by the LLM.
+        """
+        for skill_meta in self._agent_skills:
+            if skill_meta.name == agent_name:
+                return set(skill_meta.server_tools)
+        return set()
+
     def get_agent_skill_catalog(self) -> str:
         """Return a formatted catalog of agent persona skills.
 
@@ -311,8 +392,9 @@ class SkillProvider:
             return ""
         parts: List[str] = []
         for s in self._agent_skills:
+            tools = f" (server_tools: {', '.join(s.server_tools)})" if s.server_tools else ""
             deps = f" (depends_on: {', '.join(s.depends_on)})" if s.depends_on else ""
-            parts.append(f"- **{s.name}**: {s.description}{deps}")
+            parts.append(f"- **{s.name}**: {s.description}{tools}{deps}")
         return "\n".join(parts)
 
     def get_all_guide_prompts(self) -> List[str]:
@@ -340,7 +422,9 @@ class SkillProvider:
         return self._tool_to_skill.get(tool_name)
 
     async def execute_tool(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
-        """Dispatch a tool call to the owning skill."""
+        """Dispatch a tool call to the owning skill or built-in handler."""
+        if name in self._builtin_names:
+            return await _execute_builtin_tool(name, arguments)
         skill = self._tool_to_skill.get(name)
         if skill is None:
             raise KeyError(f"No skill registered for tool: {name}")

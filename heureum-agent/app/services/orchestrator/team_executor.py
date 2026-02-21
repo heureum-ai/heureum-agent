@@ -58,6 +58,7 @@ class TeamExecutor:
         on_step_event: Optional[Callable] = None,
         trace_collector=None,
         result_store: Optional[AgentResultStore] = None,
+        skill_provider=None,
     ) -> None:
         """
         Args:
@@ -73,6 +74,7 @@ class TeamExecutor:
                 ``(event_type, data_dict) -> None``.
             trace_collector: Optional TraceCollector for recording step traces.
             result_store: Optional AgentResultStore for filesystem persistence.
+            skill_provider: Optional SkillProvider for predefined tool lookup.
         """
         self._llm = llm
         self._agent_service = agent_service
@@ -85,6 +87,7 @@ class TeamExecutor:
         self._on_step_event = on_step_event
         self._trace_collector = trace_collector
         self._result_store = result_store
+        self._skill_provider = skill_provider
         self._results: Dict[str, StepResult] = {}
         self._child_session_ids: List[str] = []
 
@@ -214,6 +217,13 @@ class TeamExecutor:
         step_tool_names = self._tool_names
         if role and role.tool_access:
             step_tool_names = [t for t in self._tool_names if t in role.tool_access]
+
+        # Merge pre-defined server_tools from SKILL.md (always included)
+        if self._skill_provider:
+            predefined = self._skill_provider.get_agent_predefined_tools(step.assigned_agent)
+            for t in predefined:
+                if t in self._tool_names and t not in step_tool_names:
+                    step_tool_names.append(t)
 
         # Ensure sessions_spawn is always available for supervisor delegation
         if "sessions_spawn" in self._tool_names and "sessions_spawn" not in step_tool_names:

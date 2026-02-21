@@ -147,6 +147,7 @@ class WorkflowRunner:
                 step_index_map=step_index_map,
                 trace_collector=self._trace,
                 result_store=self._result_store,
+                skill_provider=self._skill_provider,
             )
             step_results = await executor.execute_all_batches(batches)
             executor.cleanup_registry()
@@ -321,6 +322,7 @@ class WorkflowRunner:
                 on_step_event=on_step_event,
                 trace_collector=self._trace,
                 result_store=self._result_store,
+                skill_provider=self._skill_provider,
             )
 
             # Emit synthetic sessions_spawn events to trigger frontend
