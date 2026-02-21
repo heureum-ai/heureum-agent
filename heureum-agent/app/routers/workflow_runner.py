@@ -89,25 +89,60 @@ class WorkflowRunner:
             self._trace.start_phase("role_extraction")
             catalog = self._skill_provider.get_agent_skill_catalog()
             role_extractor = RoleExtractor(self._llm)
+            _t0 = time.time()
             extraction = await role_extractor.extract(
                 self._user_message, self._tool_names, skill_reference=catalog,
             )
+            _role_extraction_ms = (time.time() - _t0) * 1000
             roles = extraction.roles
             self._trace.set_roles([r.role_type for r in roles])
             self._trace.end_phase(
                 "role_extraction",
                 output_summary=f"roles={[r.role_type for r in roles]}",
             )
+            self._result_store.save_orchestrator_phase(
+                phase_name="role_extraction",
+                context={"task": self._user_message, "available_tools": self._tool_names},
+                result_summary={
+                    "roles": [
+                        {"role_type": r.role_type, "objective": r.objective, "tool_access": r.tool_access}
+                        for r in roles
+                    ],
+                },
+                duration_ms=_role_extraction_ms,
+            )
 
             # Phase 2: Workflow planning
             self._trace.start_phase("planning")
             planner = WorkflowPlanner(self._llm)
+            _t0 = time.time()
             plan = await planner.plan(self._user_message, roles)
+            _planning_ms = (time.time() - _t0) * 1000
             batches = WorkflowPlanner.build_team_batches(plan.steps)
             self._trace.set_plan_info(len(plan.steps), len(batches))
             self._trace.end_phase(
                 "planning",
                 output_summary=f"steps={len(plan.steps)}, batches={len(batches)}",
+            )
+            self._result_store.save_orchestrator_phase(
+                phase_name="planning",
+                context={
+                    "task": self._user_message,
+                    "roles": [r.role_type for r in roles],
+                },
+                result_summary={
+                    "steps": [
+                        {
+                            "step_name": s.step_name,
+                            "task": s.task,
+                            "assigned_agent": s.assigned_agent,
+                            "depends_on": list(s.depends_on),
+                        }
+                        for s in plan.steps
+                    ],
+                    "batch_count": len(batches),
+                },
+                duration_ms=_planning_ms,
             )
 
             # Persist workflow plan to filesystem
@@ -159,14 +194,23 @@ class WorkflowRunner:
             # Phase 5: Synthesis
             self._trace.start_phase("synthesis")
             synthesizer = Synthesizer(self._llm)
+            _t0 = time.time()
             final_answer = await synthesizer.synthesize(
                 self._user_message, step_results,
             )
-            self._trace.set_synthesis_input(synthesizer.get_last_synthesis_input())
+            _synthesis_ms = (time.time() - _t0) * 1000
+            synthesis_input = synthesizer.get_last_synthesis_input()
+            self._trace.set_synthesis_input(synthesis_input)
             self._trace.end_phase("synthesis")
 
             # Persist synthesis to filesystem
             self._result_store.save_synthesis(final_answer or "")
+            self._result_store.save_orchestrator_phase(
+                phase_name="synthesis",
+                context={"task": self._user_message, "synthesis_input": synthesis_input},
+                result_summary={"answer_length": len(final_answer or "")},
+                duration_ms=_synthesis_ms,
+            )
 
             # Finalize and persist trace
             self._trace.finalize()
@@ -196,14 +240,27 @@ class WorkflowRunner:
             self._trace.start_phase("role_extraction")
             catalog = self._skill_provider.get_agent_skill_catalog()
             role_extractor = RoleExtractor(self._llm)
+            _t0 = time.time()
             extraction = await role_extractor.extract(
                 self._user_message, self._tool_names, skill_reference=catalog,
             )
+            _role_extraction_ms = (time.time() - _t0) * 1000
             roles = extraction.roles
             self._trace.set_roles([r.role_type for r in roles])
             self._trace.end_phase(
                 "role_extraction",
                 output_summary=f"roles={[r.role_type for r in roles]}",
+            )
+            self._result_store.save_orchestrator_phase(
+                phase_name="role_extraction",
+                context={"task": self._user_message, "available_tools": self._tool_names},
+                result_summary={
+                    "roles": [
+                        {"role_type": r.role_type, "objective": r.objective, "tool_access": r.tool_access}
+                        for r in roles
+                    ],
+                },
+                duration_ms=_role_extraction_ms,
             )
             yield {
                 "type": "response.orchestration.phase_completed",
@@ -214,12 +271,34 @@ class WorkflowRunner:
             # Phase 2: Workflow planning
             self._trace.start_phase("planning")
             planner = WorkflowPlanner(self._llm)
+            _t0 = time.time()
             plan = await planner.plan(self._user_message, roles)
+            _planning_ms = (time.time() - _t0) * 1000
             batches = WorkflowPlanner.build_team_batches(plan.steps)
             self._trace.set_plan_info(len(plan.steps), len(batches))
             self._trace.end_phase(
                 "planning",
                 output_summary=f"steps={len(plan.steps)}, batches={len(batches)}",
+            )
+            self._result_store.save_orchestrator_phase(
+                phase_name="planning",
+                context={
+                    "task": self._user_message,
+                    "roles": [r.role_type for r in roles],
+                },
+                result_summary={
+                    "steps": [
+                        {
+                            "step_name": s.step_name,
+                            "task": s.task,
+                            "assigned_agent": s.assigned_agent,
+                            "depends_on": list(s.depends_on),
+                        }
+                        for s in plan.steps
+                    ],
+                    "batch_count": len(batches),
+                },
+                duration_ms=_planning_ms,
             )
 
             # Persist workflow plan to filesystem
@@ -377,6 +456,7 @@ class WorkflowRunner:
             self._trace.start_phase("synthesis")
             synthesizer = Synthesizer(self._llm)
             full_text_parts: List[str] = []
+            _t0 = time.time()
 
             async for chunk in synthesizer.stream_synthesize(
                 self._user_message, step_results,
@@ -385,11 +465,19 @@ class WorkflowRunner:
                 yield {"type": "response.output_text.delta", "delta": chunk}
 
             full_text = "".join(full_text_parts)
-            self._trace.set_synthesis_input(synthesizer.get_last_synthesis_input())
+            _synthesis_ms = (time.time() - _t0) * 1000
+            synthesis_input = synthesizer.get_last_synthesis_input()
+            self._trace.set_synthesis_input(synthesis_input)
             self._trace.end_phase("synthesis")
 
             # Persist synthesis to filesystem
             self._result_store.save_synthesis(full_text)
+            self._result_store.save_orchestrator_phase(
+                phase_name="synthesis",
+                context={"task": self._user_message, "synthesis_input": synthesis_input},
+                result_summary={"answer_length": len(full_text)},
+                duration_ms=_synthesis_ms,
+            )
 
             yield {"type": "response.output_text.done", "text": full_text}
 

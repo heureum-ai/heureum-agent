@@ -36,10 +36,10 @@ THINK_TOOL_SCHEMA: Dict[str, Any] = {
     "function": {
         "name": "think",
         "description": (
-            "Use the tool to think about something. "
-            "It will not obtain new information or change the database, "
-            "but just append the thought to the log. "
-            "Use it when complex reasoning or some cache memory is needed."
+            "Think through a problem before acting. "
+            "Use freely — before planning, before tool calls, when deciding between approaches, "
+            "or whenever the next step isn't immediately obvious. "
+            "No format required; write naturally."
         ),
         "parameters": {
             "type": "object",

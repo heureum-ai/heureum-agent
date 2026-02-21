@@ -91,6 +91,39 @@ class AgentResultStore:
         except Exception:
             logger.warning("Failed to save step prompt for %s", step_name, exc_info=True)
 
+    def save_step_messages(
+        self,
+        step_name: str,
+        child_session_id: str,
+        task: str,
+        status: str,
+        merged_messages: Optional[List[Dict[str, Any]]] = None,
+        progress_log: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Persist the step agent's own messages to ``steps/{name}/messages.json``.
+
+        This is distinct from ``save_subagent_result`` (which logs sub-sub-agents).
+        Here we log the step agent itself — the "상위 에이전트" for each step.
+        """
+        try:
+            step_dir = self._root / "steps" / step_name
+            step_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "saved_at": time.time(),
+                "child_session_id": child_session_id,
+                "step_name": step_name,
+                "task": task,
+                "status": status,
+                "messages": merged_messages or [],
+                "tool_progress": progress_log or [],
+            }
+            (step_dir / "messages.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.warning("Failed to save step messages for %s", step_name, exc_info=True)
+
     def save_step_result(
         self,
         step_name: str,
@@ -246,3 +279,100 @@ class AgentResultStore:
             (self._root / "synthesis.md").write_text(text or "", encoding="utf-8")
         except Exception:
             logger.warning("Failed to save synthesis.md", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Main agent run (non-workflow interactions)
+    # ------------------------------------------------------------------
+
+    def save_main_agent_run(
+        self,
+        output_items: List[Any],
+        final_text: str,
+        iteration: int,
+        tool_call_count: int,
+        usage: Dict[str, Any],
+        run_ts: Optional[str] = None,
+    ) -> None:
+        """Persist a main agent request run to ``agent_run/{ts}/``.
+
+        Captures all tool calls + results and the final response text so
+        non-workflow interactions are stored alongside orchestration artifacts.
+
+        Args:
+            output_items: FunctionToolCall and FunctionToolResult items from ctx.
+            final_text: The final text response returned to the user.
+            iteration: Number of LLM iterations in this run.
+            tool_call_count: Total tool calls made.
+            usage: Token usage dict.
+            run_ts: Optional HHMMSS timestamp string (auto-generated if None).
+        """
+        try:
+            if run_ts is None:
+                from datetime import datetime, timezone
+                run_ts = datetime.now(timezone.utc).strftime("%H%M%S")
+            run_dir = self._root / "agent_run" / run_ts
+            run_dir.mkdir(parents=True, exist_ok=True)
+
+            items: List[Any] = []
+            for item in output_items:
+                try:
+                    if hasattr(item, "model_dump"):
+                        items.append(item.model_dump())
+                    elif isinstance(item, dict):
+                        items.append(item)
+                except Exception:
+                    items.append({"error": "serialization_failed"})
+
+            payload = {
+                "saved_at": time.time(),
+                "iteration": iteration,
+                "tool_call_count": tool_call_count,
+                "usage": usage,
+                "items": items,
+            }
+            (run_dir / "tool_calls.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (run_dir / "result.md").write_text(final_text or "", encoding="utf-8")
+        except Exception:
+            logger.warning("Failed to save main agent run log", exc_info=True)
+
+    # ------------------------------------------------------------------
+    # Orchestrator phase logs
+    # ------------------------------------------------------------------
+
+    def save_orchestrator_phase(
+        self,
+        phase_name: str,
+        context: Dict[str, Any],
+        result_summary: Any,
+        duration_ms: float,
+    ) -> None:
+        """Persist an orchestrator LLM phase log to ``orchestrator/{phase}.json``.
+
+        Args:
+            phase_name: e.g. "role_extraction", "planning", "synthesis".
+            context: Input context (task, roles, etc.) sent to the LLM.
+            result_summary: Structured result produced by the LLM phase.
+            duration_ms: Wall-clock duration of the LLM call in milliseconds.
+        """
+        try:
+            orch_dir = self._root / "orchestrator"
+            orch_dir.mkdir(parents=True, exist_ok=True)
+
+            payload = {
+                "saved_at": time.time(),
+                "phase": phase_name,
+                "duration_ms": round(duration_ms, 1),
+                "context": context,
+                "result": result_summary,
+            }
+            (orch_dir / f"{phase_name}.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.warning(
+                "Failed to save orchestrator phase log: %s", phase_name, exc_info=True
+            )

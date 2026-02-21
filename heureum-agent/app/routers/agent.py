@@ -43,6 +43,7 @@ from app.services.agent_service import (
     judge_response,
 )
 from app.services.loop_detection import clear_session_loop_state
+from app.services.orchestrator.result_store import AgentResultStore
 from app.services.providers.mcp import MCPClient
 from app.services.providers.skill import SkillProvider
 from app.services.providers.tool import ToolChainRegistry
@@ -884,13 +885,44 @@ class _AgentLoopRunner:
 
     async def run(self) -> ResponseObject:
         if not self.ctx.tool_names:
-            return await self._run_text_only()
+            resp = await self._run_text_only()
+            self._save_run_log(resp)
+            return resp
 
         async with _get_loop_lock(self.ctx.session_id):
             approval_response = await self._resume_pending_approval()
             if approval_response:
                 return approval_response
-            return await self._run_tool_iterations()
+            resp = await self._run_tool_iterations()
+            self._save_run_log(resp)
+            return resp
+
+    def _save_run_log(self, response: ResponseObject) -> None:
+        """Persist the main agent run to the session filesystem.
+
+        Writes ``agent_run/{ts}/tool_calls.json`` + ``result.md`` so
+        non-workflow interactions are traceable alongside orchestration logs.
+        Silently skipped when AGENT_WORK_DIR is not configured.
+        """
+        try:
+            if not settings.AGENT_WORK_DIR:
+                return
+            final_text = ""
+            for item in response.output or []:
+                text = getattr(item, "text", None)
+                if text:
+                    final_text = text
+                    break
+            store = AgentResultStore(settings.AGENT_WORK_DIR, self.ctx.session_id)
+            store.save_main_agent_run(
+                output_items=self.ctx.output_items,
+                final_text=final_text,
+                iteration=getattr(response, "iterations", 0) or 0,
+                tool_call_count=self.ctx.tool_call_count,
+                usage=self.ctx.total_usage.model_dump() if self.ctx.total_usage else {},
+            )
+        except Exception:
+            logger.warning("Failed to save agent run log", exc_info=True)
 
     async def _run_text_only(self) -> ResponseObject:
         resp = await agent_service.process_messages(

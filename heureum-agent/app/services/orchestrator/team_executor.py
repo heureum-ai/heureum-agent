@@ -295,6 +295,27 @@ class TeamExecutor:
             self._child_session_ids.append(spawn_result.child_session_id)
             clear_session_step_context(spawn_result.child_session_id)
 
+            # Persist the step agent's own messages to steps/{step}/messages.json
+            if self._result_store:
+                progress_serialized = [
+                    {
+                        "tool_name": p.tool_name,
+                        "detail": p.detail,
+                        "status": p.status,
+                        "started_at": p.started_at,
+                        "completed_at": p.completed_at,
+                    }
+                    for p in record.progress_log
+                ]
+                self._result_store.save_step_messages(
+                    step_name=step.step_name,
+                    child_session_id=spawn_result.child_session_id,
+                    task=step.task,
+                    status=record.status,
+                    merged_messages=record.merged_messages,
+                    progress_log=progress_serialized,
+                )
+
             result = StepResult(
                 step_name=step.step_name,
                 assigned_agent=step.assigned_agent,

@@ -435,7 +435,13 @@ class PlanSkill:
 
         todo = self._session_todos.get(session_id)
         if not todo:
-            return parts[0] if parts else None
+            reminder = (
+                "No active plan. "
+                "Your first tool call must be manage_todo(action=\"create\", task=\"...\", steps=[...]) "
+                "before doing anything else or responding to the user."
+            )
+            parts.append(reminder)
+            return "\n\n".join(parts) if parts else reminder
 
         lines = ["<current_todo>", f"Task: {todo.task}"]
 
