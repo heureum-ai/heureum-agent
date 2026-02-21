@@ -132,7 +132,7 @@ class AgentResultStore:
             logger.warning("Failed to read step result for %s", step_name, exc_info=True)
         return None
 
-    def load_step_result(self, step_name: str) -> Optional["StepResult"]:
+    def load_step_result(self, step_name: str) -> Optional[Any]:
         """Read ``meta.json`` + ``result.md`` and reconstruct a ``StepResult``.
 
         Unlike :meth:`read_step_result` (which returns raw text only), this
@@ -174,6 +174,8 @@ class AgentResultStore:
         task: str,
         status: str,
         result_summary: str,
+        merged_messages: Optional[List[Dict[str, Any]]] = None,
+        progress_log: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         """Persist a sub-agent result under ``steps/{step}/subagents/{child}/``."""
         try:
@@ -186,12 +188,25 @@ class AgentResultStore:
                 "task": task[:500],
                 "status": status,
                 "saved_at": time.time(),
+                "message_count": len(merged_messages or []),
+                "tool_call_count": len(progress_log or []),
             }
             (sa_dir / "meta.json").write_text(
                 json.dumps(meta, ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
             (sa_dir / "result.md").write_text(result_summary or "", encoding="utf-8")
+            payload = {
+                "saved_at": time.time(),
+                "child_session_id": child_session_id,
+                "step_name": step_name,
+                "messages": merged_messages or [],
+                "tool_progress": progress_log or [],
+            }
+            (sa_dir / "messages.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
         except Exception:
             logger.warning(
                 "Failed to save subagent result for %s/%s",

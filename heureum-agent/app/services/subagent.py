@@ -31,7 +31,7 @@ from app.config import settings
 from app.models import LLMResultType, Message
 from app.schemas.open_responses import MessageRole
 from app.services.agent_service import AgentService
-from langchain_core.messages import SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +92,63 @@ class SubagentRunRecord:
     progress_log: List[ProgressStep] = field(default_factory=list)
     current_iteration: int = 0
     step_name: Optional[str] = None  # Workflow step name for UI mapping
+    merged_messages: List[Dict[str, Any]] = field(default_factory=list)
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v) for v in value]
+    if hasattr(value, "model_dump"):
+        try:
+            return _json_safe(value.model_dump())
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def _serialize_lc_messages(messages: list[Any]) -> List[Dict[str, Any]]:
+    serialized: List[Dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        if isinstance(msg, SystemMessage):
+            role = "system"
+        elif isinstance(msg, HumanMessage):
+            role = "user"
+        elif isinstance(msg, AIMessage):
+            role = "assistant"
+        elif isinstance(msg, ToolMessage):
+            role = "tool"
+        else:
+            role = getattr(msg, "type", "unknown")
+
+        item: Dict[str, Any] = {
+            "idx": i,
+            "role": role,
+            "type": msg.__class__.__name__,
+            "content": _json_safe(getattr(msg, "content", None)),
+        }
+
+        for attr in (
+            "tool_calls",
+            "invalid_tool_calls",
+            "tool_call_id",
+            "name",
+            "status",
+            "usage_metadata",
+            "additional_kwargs",
+            "response_metadata",
+            "id",
+        ):
+            if hasattr(msg, attr):
+                val = getattr(msg, attr)
+                if val is not None and val != [] and val != {}:
+                    item[attr] = _json_safe(val)
+
+        serialized.append(item)
+    return serialized
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +413,17 @@ def _persist_subagent_to_store(record: SubagentRunRecord) -> None:
             task=record.task,
             status=record.status,
             result_summary=record.result_summary,
+            merged_messages=record.merged_messages,
+            progress_log=[
+                {
+                    "tool_name": p.tool_name,
+                    "detail": p.detail,
+                    "status": p.status,
+                    "started_at": p.started_at,
+                    "completed_at": p.completed_at,
+                }
+                for p in record.progress_log
+            ],
         )
     except Exception:
         logger.warning(
@@ -711,6 +779,12 @@ async def _execute_subagent_task(
 
         return "Sub-agent reached maximum iterations."
     finally:
+        try:
+            record.merged_messages = _serialize_lc_messages(
+                child_service._lc_sessions.get(session_id, [])
+            )
+        except Exception:
+            logger.warning("Failed to serialize sub-agent messages", exc_info=True)
         await child_service.aclose()
 
 
