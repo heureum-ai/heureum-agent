@@ -3,8 +3,12 @@
 """Tests for tool hooks."""
 
 import pytest
-from app.services.loop_detection import ToolLoopDetectionConfig
-from app.services.tool_hooks import (
+from unittest.mock import AsyncMock
+
+from app.models import ToolCallInfo
+from app.services.tools.controller import ToolController
+from app.services.tools.loop_detection import ToolLoopDetectionConfig
+from app.services.tools.hooks import (
     BeforeHookResult,
     LoopDetectionHook,
     ToolHook,
@@ -18,7 +22,7 @@ from app.services.tool_hooks import (
 @pytest.fixture(autouse=True)
 def _clean_loop_state():
     yield
-    from app.services.loop_detection import _session_states
+    from app.services.tools.loop_detection import _session_states
 
     _session_states.clear()
 
@@ -220,7 +224,7 @@ class TestLoopDetectionHook:
         await hook.before_tool_call("read", {"path": "/a"}, ctx)
         await hook.after_tool_call("read", {"path": "/a"}, "file content", None, ctx)
 
-        from app.services.loop_detection import get_session_loop_state
+        from app.services.tools.loop_detection import get_session_loop_state
 
         state = get_session_loop_state("test-outcome")
         assert state.records[-1].result_hash is not None
@@ -231,3 +235,160 @@ class TestLoopDetectionHook:
         hook = LoopDetectionHook()
         result = await hook.before_tool_call("read", {}, {})
         assert result.blocked is False
+
+
+# ---------------------------------------------------------------------------
+# ToolController.safe_execute
+# ---------------------------------------------------------------------------
+
+
+def _make_tc(name="bash", args=None, call_id="call_1"):
+    return ToolCallInfo(name=name, args=args or {}, id=call_id)
+
+
+def _bare_controller():
+    """Controller with no default hooks (no loop detection side-effects)."""
+    return ToolController(tool_hook_runner=ToolHookRunner(register_defaults=False))
+
+
+class TestToolControllerSafeExecute:
+    @pytest.mark.asyncio
+    async def test_success(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(return_value="ok")
+        tc, result = await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert result == "ok"
+        assert tc.name == "bash"
+        execute_fn.assert_awaited_once_with("bash", {}, "s1")
+
+    @pytest.mark.asyncio
+    async def test_blocked_by_hook(self):
+        ctrl = _bare_controller()
+        ctrl.register_hook(_BlockingHook())
+        execute_fn = AsyncMock(return_value="ok")
+        tc, result = await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert "blocked" in result.lower()
+        execute_fn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_execute_fn_error(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(side_effect=RuntimeError("boom"))
+        tc, result = await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert "Error executing tool" in result
+        assert "boom" in result
+
+    @pytest.mark.asyncio
+    async def test_empty_result_replaced(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(return_value="")
+        tc, result = await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert "[EMPTY_RESULT]" in result
+
+    @pytest.mark.asyncio
+    async def test_adjusted_params_forwarded(self):
+        ctrl = _bare_controller()
+        ctrl.register_hook(_AdjustingHook())
+        execute_fn = AsyncMock(return_value="ok")
+        await ctrl.safe_execute(_make_tc(args={"original": True}), execute_fn, "s1")
+        execute_fn.assert_awaited_once_with("bash", {"adjusted": True}, "s1")
+
+    @pytest.mark.asyncio
+    async def test_after_hooks_called_on_success(self):
+        ctrl = _bare_controller()
+        hook = _PassthroughHook()
+        ctrl.register_hook(hook)
+        execute_fn = AsyncMock(return_value="ok")
+        await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert hook.after_called is True
+
+    @pytest.mark.asyncio
+    async def test_after_hooks_called_on_error(self):
+        ctrl = _bare_controller()
+        hook = _PassthroughHook()
+        ctrl.register_hook(hook)
+        execute_fn = AsyncMock(side_effect=ValueError("oops"))
+        await ctrl.safe_execute(_make_tc(), execute_fn, "s1")
+        assert hook.after_called is True
+
+
+# ---------------------------------------------------------------------------
+# ToolController.execute_parallel
+# ---------------------------------------------------------------------------
+
+
+class TestToolControllerExecuteParallel:
+    @pytest.mark.asyncio
+    async def test_parallel_execution(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(return_value="ok")
+        tcs = [_make_tc("read", call_id="c1"), _make_tc("write", call_id="c2")]
+        results = await ctrl.execute_parallel(tcs, execute_fn, "s1")
+        assert len(results) == 2
+        assert results[0][0].name == "read"
+        assert results[1][0].name == "write"
+        assert execute_fn.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_empty_list(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(return_value="ok")
+        results = await ctrl.execute_parallel([], execute_fn, "s1")
+        assert results == []
+        execute_fn.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_on_complete_callback(self):
+        ctrl = _bare_controller()
+        execute_fn = AsyncMock(return_value="ok")
+        completed = []
+
+        async def _cb(tc, result_str):
+            completed.append((tc.name, result_str))
+
+        tcs = [_make_tc("a", call_id="c1"), _make_tc("b", call_id="c2")]
+        await ctrl.execute_parallel(tcs, execute_fn, "s1", on_complete=_cb)
+        assert len(completed) == 2
+        names = {c[0] for c in completed}
+        assert names == {"a", "b"}
+
+    @pytest.mark.asyncio
+    async def test_error_still_calls_on_complete(self):
+        ctrl = _bare_controller()
+
+        async def _execute(name, args, sid):
+            if name == "fail":
+                raise RuntimeError("boom")
+            return "ok"
+
+        completed = []
+
+        async def _cb(tc, result_str):
+            completed.append((tc.name, result_str))
+
+        tcs = [_make_tc("fail", call_id="c1"), _make_tc("ok_tool", call_id="c2")]
+        results = await ctrl.execute_parallel(tcs, _execute, "s1", on_complete=_cb)
+        assert len(completed) == 2
+        assert len(results) == 2
+        # The failed one should have an error string
+        fail_result = [r for r in results if r[0].name == "fail"][0]
+        assert "Error" in fail_result[1]
+
+    @pytest.mark.asyncio
+    async def test_preserves_order(self):
+        """Results are returned in the same order as tool_calls."""
+        import asyncio
+
+        ctrl = _bare_controller()
+
+        async def _slow_then_fast(name, args, sid):
+            if name == "slow":
+                await asyncio.sleep(0.05)
+            return f"result_{name}"
+
+        tcs = [_make_tc("slow", call_id="c1"), _make_tc("fast", call_id="c2")]
+        results = await ctrl.execute_parallel(tcs, _slow_then_fast, "s1")
+        assert results[0][0].name == "slow"
+        assert results[1][0].name == "fast"
+        assert results[0][1] == "result_slow"
+        assert results[1][1] == "result_fast"

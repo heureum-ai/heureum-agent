@@ -2,7 +2,6 @@
 
 import { useState } from 'react';
 import type { SubagentProgress } from '../types';
-import { formatToolName } from '../lib/tools';
 import './SubagentProgressCard.css';
 
 interface SubagentProgressCardProps {
@@ -49,7 +48,7 @@ export default function SubagentProgressCard({ progress }: SubagentProgressCardP
                     <span className="ac-subagent-step-icon">
                       {STEP_ICONS[step.status] || STEP_ICONS.running}
                     </span>
-                    <span className="ac-subagent-step-name">{formatToolName(step.toolName)}</span>
+                    <span className="ac-subagent-step-name">{step.displayName}</span>
                     {step.detail && <span className="ac-subagent-step-detail">{step.detail}</span>}
                   </div>
                 ))}

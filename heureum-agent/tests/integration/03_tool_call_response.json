@@ -13,7 +13,8 @@
             "name": "ask_question",
             "arguments": "{\"question\": \"점심으로 무엇을 드셨나요?\", \"choices\": [\"밥\", \"면\", \"샐러드\", \"샌드위치\", \"기타\"], \"allow_user_input\": true}",
             "status": "completed",
-            "usage": null
+            "usage": null,
+            "display_name": "Ask Question"
         }
     ],
     "usage": {

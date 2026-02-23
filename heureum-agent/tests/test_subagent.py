@@ -9,22 +9,28 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from app.models import LLMResult, LLMResultType, ToolCallInfo
 from app.schemas.open_responses import InputTokenDetails, OutputTokenDetails, Usage
-from app.services.subagent import (
+from app.services.skills.controller import _FilteredSkillController
+from app.services.tools.controller import ToolController
+from app.services.tools.hooks import ToolHookRunner
+from app.skills.plan_task.service import (
     ProgressStep,
     SpawnRequest,
     SubagentRegistry,
     SubagentRunRecord,
-    _announce_completion,
-    _build_subagent_instructions,
     _clear_depth,
-    _FilteredSkillProvider,
-    _resolve_child_tools,
     _session_depth,
-    _tool_detail,
     await_active_subagents,
     get_registry,
     get_subagent_depth,
     spawn_subagent,
+)
+from app.services.subagent import (
+    SubagentContext,
+    _announce_completion,
+    _build_subagent_instructions,
+    _resolve_child_tools,
+    _tool_detail,
+    set_context as set_subagent_context,
 )
 
 
@@ -33,9 +39,11 @@ def _clean_state():
     """Clean up module-level state between tests."""
     yield
     _session_depth.clear()
-    from app.services.subagent import _registry
+    from app.skills.plan_task.service import _registry
+    import app.services.subagent as _mod
 
     _registry._runs.clear()
+    _mod._context = None
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +96,7 @@ class TestGetSubagentDepth:
 
     def test_child_increments(self):
         _session_depth["parent"] = 0
-        from app.services.subagent import _set_child_depth
+        from app.skills.plan_task.service import _set_child_depth
 
         _set_child_depth("child", "parent")
         assert get_subagent_depth("child") == 1
@@ -96,7 +104,7 @@ class TestGetSubagentDepth:
     def test_nested_depth(self):
         _session_depth["parent"] = 0
         _session_depth["child"] = 1
-        from app.services.subagent import _set_child_depth
+        from app.skills.plan_task.service import _set_child_depth
 
         _set_child_depth("grandchild", "child")
         assert get_subagent_depth("grandchild") == 2
@@ -120,27 +128,28 @@ class TestSpawnSubagent:
             parent_session_id="parent1",
             task="Find the answer to life",
         )
-        with patch("app.services.subagent._run_subagent", new=AsyncMock()):
-            result = await spawn_subagent(request)
+        mock_create_task = MagicMock(return_value=MagicMock())
+        result = await spawn_subagent(request, mock_create_task)
         assert result.status == "accepted"
         assert result.child_session_id.startswith("subagent_")
+        mock_create_task.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_depth_forbidden(self):
         """Spawn should be forbidden when depth limit reached."""
-        _session_depth["parent1"] = 1  # At max depth (default is 1)
+        _session_depth["parent1"] = 2  # At max depth (default is 2)
         request = SpawnRequest(
             parent_session_id="parent1",
             task="Nested task",
         )
-        result = await spawn_subagent(request)
+        result = await spawn_subagent(request, MagicMock())
         assert result.status == "forbidden"
         assert "depth" in result.message.lower()
 
     @pytest.mark.asyncio
     async def test_max_children_forbidden(self):
         """Spawn should be forbidden when max children reached."""
-        from app.services.subagent import _registry
+        from app.skills.plan_task.service import _registry
 
         # Fill up children
         for i in range(5):
@@ -156,7 +165,7 @@ class TestSpawnSubagent:
             parent_session_id="parent2",
             task="One more task",
         )
-        result = await spawn_subagent(request)
+        result = await spawn_subagent(request, MagicMock())
         assert result.status == "forbidden"
         assert "children" in result.message.lower()
 
@@ -167,6 +176,18 @@ class TestSpawnSubagent:
 
 
 class TestAnnounceCompletion:
+    def _set_mock_context(self, mock_svc):
+        """Install a SubagentContext backed by mock_svc."""
+        set_subagent_context(
+            SubagentContext(
+                agent_service=mock_svc,
+                mcp_client=MagicMock(),
+                skill_controller=MagicMock(),
+                tool_controller=MagicMock(),
+                execute_tool=AsyncMock(),
+            )
+        )
+
     @pytest.mark.asyncio
     async def test_appends_to_parent(self):
         """Completion message is appended to parent session."""
@@ -178,10 +199,10 @@ class TestAnnounceCompletion:
 
         mock_sessions = {"p1": []}
         mock_svc = MagicMock()
-        mock_svc._lc_sessions = mock_sessions
+        mock_svc._sessions = mock_sessions
+        self._set_mock_context(mock_svc)
 
-        with patch("app.routers.agent.agent_service", mock_svc):
-            await _announce_completion(record, "Task done successfully")
+        await _announce_completion(record, "Task done successfully")
 
         assert len(mock_sessions["p1"]) == 1
         assert "Sub-agent completed" in mock_sessions["p1"][0].content
@@ -210,11 +231,11 @@ class TestAnnounceCompletion:
                 return []
 
         mock_svc = MagicMock()
-        mock_svc._lc_sessions = MockSessions()
+        mock_svc._sessions = MockSessions()
+        self._set_mock_context(mock_svc)
 
-        with patch("app.routers.agent.agent_service", mock_svc):
-            with patch("asyncio.sleep", new=AsyncMock()):
-                await _announce_completion(record, "done", max_retries=3)
+        with patch("asyncio.sleep", new=AsyncMock()):
+            await _announce_completion(record, "done", max_retries=3)
 
         # Should have retried
         assert call_count >= 2
@@ -229,11 +250,11 @@ class TestAnnounceCompletion:
         )
 
         mock_svc = MagicMock()
-        mock_svc._lc_sessions = {}
+        mock_svc._sessions = {}
+        self._set_mock_context(mock_svc)
 
-        with patch("app.routers.agent.agent_service", mock_svc):
-            # Should not raise
-            await _announce_completion(record, "done")
+        # Should not raise
+        await _announce_completion(record, "done")
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +264,13 @@ class TestAnnounceCompletion:
 
 class TestProgressStep:
     def test_defaults(self):
-        step = ProgressStep(tool_name="bash", detail="ls -la")
+        step = ProgressStep(tool_name="bash", display_name="Bash", detail="ls -la")
         assert step.status == "running"
         assert step.completed_at is None
         assert step.started_at > 0
 
     def test_status_update(self):
-        step = ProgressStep(tool_name="read", detail="/tmp/file.txt")
+        step = ProgressStep(tool_name="read", display_name="Read", detail="/tmp/file.txt")
         step.status = "completed"
         step.completed_at = 123.0
         assert step.status == "completed"
@@ -311,7 +332,7 @@ class TestProgressLog:
             parent_session_id="p1",
             task="test",
         )
-        step = ProgressStep(tool_name="bash", detail="ls")
+        step = ProgressStep(tool_name="bash", display_name="Bash", detail="ls")
         record.progress_log.append(step)
         assert len(record.progress_log) == 1
         assert record.progress_log[0].tool_name == "bash"
@@ -357,14 +378,7 @@ class TestRegistrySweepStale:
         r.completed_at = time.time() - 700  # older than STALE_TTL_SECONDS (600)
         reg.register(r)
 
-        with (
-            patch("app.services.subagent._clear_depth"),
-            patch("app.routers.agent.mcp_client"),
-            patch("app.routers.agent.chain_registry"),
-            patch("app.routers.agent.skill_provider"),
-            patch("app.services.loop_detection.clear_session_loop_state"),
-        ):
-            swept = reg.sweep_stale()
+        swept = reg.sweep_stale()
 
         assert swept == ["c1"]
         assert reg.get("c1") is None
@@ -391,31 +405,18 @@ class TestRegistrySweepStale:
         assert swept == []
         assert reg.get("c1") is not None
 
-    def test_sweep_cleans_shared_state(self):
+    def test_sweep_returns_stale_ids_for_caller_cleanup(self):
+        """sweep_stale returns IDs; cleanup is caller's responsibility."""
         reg = SubagentRegistry()
         r = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="t1")
         r.status = "failed"
         r.completed_at = time.time() - 700
         reg.register(r)
 
-        mock_mcp = MagicMock()
-        mock_chain = MagicMock()
-        mock_skill = MagicMock()
-        mock_loop_clear = MagicMock()
+        swept = reg.sweep_stale()
 
-        with (
-            patch("app.services.subagent._clear_depth"),
-            patch("app.routers.agent.mcp_client", mock_mcp),
-            patch("app.routers.agent.chain_registry", mock_chain),
-            patch("app.routers.agent.skill_provider", mock_skill),
-            patch("app.services.loop_detection.clear_session_loop_state", mock_loop_clear),
-        ):
-            reg.sweep_stale()
-
-        mock_mcp.clear_session_state.assert_called_once_with("c1")
-        mock_chain.clear_session.assert_called_once_with("c1")
-        mock_skill.clear_session.assert_called_once_with("c1")
-        mock_loop_clear.assert_called_once_with("c1")
+        assert swept == ["c1"]
+        assert reg.get("c1") is None
 
 
 # ---------------------------------------------------------------------------
@@ -456,16 +457,29 @@ class TestBuildSubagentInstructions:
         assert "## Constraints" in result
         assert "autonomously" in result
 
+    def test_no_spawn_constraint_by_default(self):
+        result = _build_subagent_instructions("task", [])
+        assert "Do NOT spawn sub-agents" in result
+
+    def test_can_spawn_removes_constraint(self):
+        result = _build_subagent_instructions("task", [], can_spawn=True)
+        assert "Do NOT spawn sub-agents" not in result
+        assert "## Constraints" in result
+
+    def test_can_spawn_false_keeps_constraint(self):
+        result = _build_subagent_instructions("task", [], can_spawn=False)
+        assert "Do NOT spawn sub-agents" in result
+
 
 # ---------------------------------------------------------------------------
-# _FilteredSkillProvider
+# _FilteredSkillController
 # ---------------------------------------------------------------------------
 
 
 class TestFilteredSkillProvider:
     def setup_method(self):
         self.base = MagicMock()
-        self.provider = _FilteredSkillProvider(self.base, {"tool_a", "tool_b"})
+        self.provider = _FilteredSkillController(self.base, {"tool_a", "tool_b"})
 
     def test_get_all_tool_schemas_filters(self):
         self.base.get_all_tool_schemas.return_value = [
@@ -520,9 +534,20 @@ class TestFilteredSkillProvider:
 
 
 class TestResolveChildTools:
+    def _set_ctx(self, mock_svc, mock_mcp, mock_skill):
+        set_subagent_context(
+            SubagentContext(
+                agent_service=mock_svc,
+                mcp_client=mock_mcp,
+                skill_controller=mock_skill,
+                tool_controller=MagicMock(),
+                execute_tool=AsyncMock(),
+            )
+        )
+
     def test_inherits_all_tools_without_whitelist(self):
         mock_svc = MagicMock()
-        mock_svc.mcp_tools = [
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
             {"function": {"name": "bash"}},
             {"function": {"name": "read"}},
         ]
@@ -531,14 +556,9 @@ class TestResolveChildTools:
         mock_skill = MagicMock()
         mock_skill.get_all_tool_schemas.return_value = []
 
+        self._set_ctx(mock_svc, mock_mcp, mock_skill)
         request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
-
-        with (
-            patch("app.routers.agent.agent_service", mock_svc),
-            patch("app.routers.agent.mcp_client", mock_mcp),
-            patch("app.routers.agent.skill_provider", mock_skill),
-        ):
-            mcp_tools, sp, names = _resolve_child_tools(request)
+        mcp_tools, sp, names = _resolve_child_tools(request)
 
         assert len(mcp_tools) == 2
         assert "bash" in names
@@ -546,7 +566,7 @@ class TestResolveChildTools:
 
     def test_whitelist_filters_tools(self):
         mock_svc = MagicMock()
-        mock_svc.mcp_tools = [
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
             {"function": {"name": "bash"}},
             {"function": {"name": "read"}},
             {"function": {"name": "write"}},
@@ -556,21 +576,16 @@ class TestResolveChildTools:
         mock_skill = MagicMock()
         mock_skill.get_all_tool_schemas.return_value = []
 
+        self._set_ctx(mock_svc, mock_mcp, mock_skill)
         request = SpawnRequest(parent_session_id="p1", task="t", tools=["bash", "read"])
-
-        with (
-            patch("app.routers.agent.agent_service", mock_svc),
-            patch("app.routers.agent.mcp_client", mock_mcp),
-            patch("app.routers.agent.skill_provider", mock_skill),
-        ):
-            mcp_tools, sp, names = _resolve_child_tools(request)
+        mcp_tools, sp, names = _resolve_child_tools(request)
 
         assert len(mcp_tools) == 2
         assert "write" not in names
 
     def test_excludes_approval_required_tools(self):
         mock_svc = MagicMock()
-        mock_svc.mcp_tools = [
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
             {"function": {"name": "bash"}},
             {"function": {"name": "dangerous"}},
         ]
@@ -579,21 +594,16 @@ class TestResolveChildTools:
         mock_skill = MagicMock()
         mock_skill.get_all_tool_schemas.return_value = []
 
+        self._set_ctx(mock_svc, mock_mcp, mock_skill)
         request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
-
-        with (
-            patch("app.routers.agent.agent_service", mock_svc),
-            patch("app.routers.agent.mcp_client", mock_mcp),
-            patch("app.routers.agent.skill_provider", mock_skill),
-        ):
-            mcp_tools, sp, names = _resolve_child_tools(request)
+        mcp_tools, sp, names = _resolve_child_tools(request)
 
         assert len(mcp_tools) == 1
         assert "dangerous" not in names
 
     def test_includes_skill_tool_names(self):
         mock_svc = MagicMock()
-        mock_svc.mcp_tools = []
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = []
         mock_mcp = MagicMock()
         mock_mcp._approval_required_tools = set()
         mock_skill = MagicMock()
@@ -601,14 +611,9 @@ class TestResolveChildTools:
             {"function": {"name": "plan_task"}},
         ]
 
+        self._set_ctx(mock_svc, mock_mcp, mock_skill)
         request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
-
-        with (
-            patch("app.routers.agent.agent_service", mock_svc),
-            patch("app.routers.agent.mcp_client", mock_mcp),
-            patch("app.routers.agent.skill_provider", mock_skill),
-        ):
-            mcp_tools, sp, names = _resolve_child_tools(request)
+        mcp_tools, sp, names = _resolve_child_tools(request)
 
         assert "plan_task" in names
 
@@ -621,11 +626,23 @@ class TestResolveChildTools:
 class TestRunSubagent:
     @pytest.mark.asyncio
     async def test_success_path(self):
-        from app.services.subagent import _registry, _run_subagent
+        from app.skills.plan_task.service import _registry
+        from app.services.subagent import _run_subagent
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
         request = SpawnRequest(parent_session_id="p1", task="test", cleanup="delete")
+        mock_clear_depth = MagicMock()
+
+        set_subagent_context(
+            SubagentContext(
+                agent_service=MagicMock(),
+                mcp_client=MagicMock(),
+                skill_controller=MagicMock(),
+                tool_controller=MagicMock(),
+                execute_tool=AsyncMock(),
+            )
+        )
 
         with (
             patch(
@@ -633,24 +650,20 @@ class TestRunSubagent:
                 new=AsyncMock(return_value="Done"),
             ),
             patch("app.services.subagent._announce_completion", new=AsyncMock()) as mock_announce,
-            patch("app.services.subagent._clear_depth"),
-            patch("app.routers.agent.mcp_client"),
-            patch("app.routers.agent.chain_registry"),
-            patch("app.routers.agent.skill_provider"),
-            patch("app.services.loop_detection.clear_session_loop_state"),
+            patch("app.services.subagent.cleanup_session_state"),
         ):
-            await _run_subagent(record, request)
-
-        from app.services.subagent import _registry
+            await _run_subagent(record, request, _registry, mock_clear_depth)
 
         r = _registry.get("c1")
         # The record gets marked completed by _run_subagent
         assert r is None or r.status == "completed"
         mock_announce.assert_called_once()
+        mock_clear_depth.assert_called_once_with("c1")
 
     @pytest.mark.asyncio
     async def test_timeout_path(self):
-        from app.services.subagent import _registry, _run_subagent
+        from app.skills.plan_task.service import _registry
+        from app.services.subagent import _run_subagent
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
@@ -665,7 +678,7 @@ class TestRunSubagent:
             patch("app.services.subagent.settings") as mock_settings,
         ):
             mock_settings.SUBAGENT_TIMEOUT_SECONDS = 0.01
-            await _run_subagent(record, request)
+            await _run_subagent(record, request, _registry, MagicMock())
 
         assert record.status == "timeout"
         mock_announce.assert_called_once()
@@ -673,7 +686,8 @@ class TestRunSubagent:
 
     @pytest.mark.asyncio
     async def test_error_path(self):
-        from app.services.subagent import _registry, _run_subagent
+        from app.skills.plan_task.service import _registry
+        from app.services.subagent import _run_subagent
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
@@ -686,7 +700,7 @@ class TestRunSubagent:
             patch("app.services.subagent._execute_subagent_task", new=failing_task),
             patch("app.services.subagent._announce_completion", new=AsyncMock()) as mock_announce,
         ):
-            await _run_subagent(record, request)
+            await _run_subagent(record, request, _registry, MagicMock())
 
         assert record.status == "failed"
         mock_announce.assert_called_once()
@@ -694,7 +708,8 @@ class TestRunSubagent:
 
     @pytest.mark.asyncio
     async def test_cancel_path(self):
-        from app.services.subagent import _registry, _run_subagent
+        from app.skills.plan_task.service import _registry
+        from app.services.subagent import _run_subagent
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
@@ -707,7 +722,7 @@ class TestRunSubagent:
             patch("app.services.subagent._execute_subagent_task", new=cancelled_task),
             patch("app.services.subagent._announce_completion", new=AsyncMock()) as mock_announce,
         ):
-            await _run_subagent(record, request)
+            await _run_subagent(record, request, _registry, MagicMock())
 
         assert record.status == "failed"
         # CancelledError does NOT call _announce_completion
@@ -715,11 +730,13 @@ class TestRunSubagent:
 
     @pytest.mark.asyncio
     async def test_cleanup_keep_skips_depth_clear(self):
-        from app.services.subagent import _registry, _run_subagent
+        from app.skills.plan_task.service import _registry
+        from app.services.subagent import _run_subagent
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
         request = SpawnRequest(parent_session_id="p1", task="test", cleanup="keep")
+        mock_clear_depth = MagicMock()
 
         with (
             patch(
@@ -727,9 +744,8 @@ class TestRunSubagent:
                 new=AsyncMock(return_value="Done"),
             ),
             patch("app.services.subagent._announce_completion", new=AsyncMock()),
-            patch("app.services.subagent._clear_depth") as mock_clear_depth,
         ):
-            await _run_subagent(record, request)
+            await _run_subagent(record, request, _registry, mock_clear_depth)
 
         mock_clear_depth.assert_not_called()
 
@@ -769,9 +785,23 @@ class TestExecuteSubagentTask:
             assistant_lc_message=MagicMock(),
         )
 
+    def _set_ctx(self, execute_tool=None):
+        set_subagent_context(
+            SubagentContext(
+                agent_service=MagicMock(),
+                mcp_client=MagicMock(),
+                skill_controller=MagicMock(),
+                tool_controller=ToolController(
+                    tool_hook_runner=ToolHookRunner(register_defaults=False)
+                ),
+                execute_tool=execute_tool or AsyncMock(),
+            )
+        )
+
     @pytest.mark.asyncio
     async def test_text_response_returns_immediately(self):
         from app.services.subagent import _execute_subagent_task
+        from app.skills.plan_task.service import _registry
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="hello")
         request = SpawnRequest(parent_session_id="p1", task="hello")
@@ -780,16 +810,15 @@ class TestExecuteSubagentTask:
         mock_service.process_messages_with_tools = AsyncMock(
             return_value=self._make_text_result("All done")
         )
-        mock_service._lc_sessions = {}
-        mock_service._session_last_access = {}
+        mock_service.message_controller.session_state_controller.set_session = MagicMock()
         mock_service.aclose = AsyncMock()
 
+        self._set_ctx()
         with (
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
-            patch("app.routers.agent._execute_tool", new=AsyncMock()),
         ):
-            result = await _execute_subagent_task(record, request)
+            result = await _execute_subagent_task(record, request, _registry)
 
         assert result == "All done"
         mock_service.aclose.assert_called_once()
@@ -797,6 +826,7 @@ class TestExecuteSubagentTask:
     @pytest.mark.asyncio
     async def test_tool_call_then_text(self):
         from app.services.subagent import _execute_subagent_task
+        from app.skills.plan_task.service import _registry
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="task")
         request = SpawnRequest(parent_session_id="p1", task="task")
@@ -813,16 +843,15 @@ class TestExecuteSubagentTask:
 
         mock_service.process_messages_with_tools = AsyncMock(side_effect=process_side_effect)
         mock_service.append_tool_interaction = AsyncMock()
-        mock_service._lc_sessions = {}
-        mock_service._session_last_access = {}
+        mock_service.message_controller.session_state_controller.set_session = MagicMock()
         mock_service.aclose = AsyncMock()
 
+        self._set_ctx(execute_tool=AsyncMock(return_value="output"))
         with (
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
-            patch("app.routers.agent._execute_tool", new=AsyncMock(return_value="output")),
         ):
-            result = await _execute_subagent_task(record, request)
+            result = await _execute_subagent_task(record, request, _registry)
 
         assert result == "Finished"
         assert record.current_iteration == 2
@@ -833,6 +862,7 @@ class TestExecuteSubagentTask:
     @pytest.mark.asyncio
     async def test_tool_execution_failure_records_error(self):
         from app.services.subagent import _execute_subagent_task
+        from app.skills.plan_task.service import _registry
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="task")
         request = SpawnRequest(parent_session_id="p1", task="task")
@@ -849,19 +879,18 @@ class TestExecuteSubagentTask:
 
         mock_service.process_messages_with_tools = AsyncMock(side_effect=process_side_effect)
         mock_service.append_tool_interaction = AsyncMock()
-        mock_service._lc_sessions = {}
-        mock_service._session_last_access = {}
+        mock_service.message_controller.session_state_controller.set_session = MagicMock()
         mock_service.aclose = AsyncMock()
 
         async def failing_execute(*args, **kwargs):
             raise RuntimeError("tool broke")
 
+        self._set_ctx(execute_tool=failing_execute)
         with (
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
-            patch("app.routers.agent._execute_tool", new=failing_execute),
         ):
-            result = await _execute_subagent_task(record, request)
+            result = await _execute_subagent_task(record, request, _registry)
 
         assert result == "Done anyway"
         assert record.progress_log[0].status == "failed"
@@ -869,6 +898,7 @@ class TestExecuteSubagentTask:
     @pytest.mark.asyncio
     async def test_max_iterations_returns_message(self):
         from app.services.subagent import _execute_subagent_task
+        from app.skills.plan_task.service import _registry
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="task")
         request = SpawnRequest(parent_session_id="p1", task="task")
@@ -879,18 +909,18 @@ class TestExecuteSubagentTask:
             return_value=self._make_tool_result("bash", {}, "c1")
         )
         mock_service.append_tool_interaction = AsyncMock()
-        mock_service._lc_sessions = {}
-        mock_service._session_last_access = {}
+        mock_service.message_controller.session_state_controller.set_session = MagicMock()
         mock_service.aclose = AsyncMock()
 
+        self._set_ctx(execute_tool=AsyncMock(return_value=""))
         with (
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
-            patch("app.routers.agent._execute_tool", new=AsyncMock(return_value="")),
             patch("app.services.subagent.settings") as mock_settings,
         ):
-            mock_settings.MAX_AGENT_ITERATIONS = 3
-            result = await _execute_subagent_task(record, request)
+            mock_settings.SUBAGENT_MAX_ITERATIONS = 3
+            mock_settings.MAX_PLAN_RETRIES = 3
+            result = await _execute_subagent_task(record, request, _registry)
 
         assert "maximum iterations" in result.lower()
         mock_service.aclose.assert_called_once()
@@ -909,7 +939,7 @@ class TestAwaitActiveSubagents:
 
     @pytest.mark.asyncio
     async def test_waits_for_active_tasks(self):
-        from app.services.subagent import _registry
+        from app.skills.plan_task.service import _registry
 
         done = asyncio.Event()
 
@@ -928,7 +958,7 @@ class TestAwaitActiveSubagents:
 
     @pytest.mark.asyncio
     async def test_skips_completed_records(self):
-        from app.services.subagent import _registry
+        from app.skills.plan_task.service import _registry
 
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="t")
         record.status = "completed"
@@ -949,16 +979,22 @@ class TestAnnounceCompletionExhaustedRetries:
     async def test_all_retries_fail(self):
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
 
+        class FailingSessions:
+            def __contains__(self, key):
+                raise RuntimeError("always fail")
+
         mock_svc = MagicMock()
-        mock_svc._lc_sessions = property(lambda self: (_ for _ in ()).throw(RuntimeError("fail")))
-        # Make accessing _lc_sessions always raise
-        type(mock_svc)._lc_sessions = property(
-            lambda self: (_ for _ in ()).throw(RuntimeError("always fail"))
+        mock_svc._sessions = FailingSessions()
+        set_subagent_context(
+            SubagentContext(
+                agent_service=mock_svc,
+                mcp_client=MagicMock(),
+                skill_controller=MagicMock(),
+                tool_controller=MagicMock(),
+                execute_tool=AsyncMock(),
+            )
         )
 
-        with (
-            patch("app.routers.agent.agent_service", mock_svc),
-            patch("asyncio.sleep", new=AsyncMock()),
-        ):
+        with patch("asyncio.sleep", new=AsyncMock()):
             # Should not raise even after all retries exhausted
             await _announce_completion(record, "done", max_retries=2)

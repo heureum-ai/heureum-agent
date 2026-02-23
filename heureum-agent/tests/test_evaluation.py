@@ -1,17 +1,13 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
-"""Tests for LLM-as-judge evaluation module."""
+"""Tests for EvaluateSkill (LLM-as-judge evaluation)."""
 
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app.schemas.open_responses import FunctionToolCall, FunctionToolResult, ItemStatus
-from app.services.agent_service import (
-    _parse_judge_response,
-    build_tool_context,
-    judge_response,
-)
+from app.skills.evaluate_task.service import EvaluateSkill
 
 
 def _make_tool_call(name: str, call_id: str, arguments: str = "{}") -> FunctionToolCall:
@@ -21,6 +17,7 @@ def _make_tool_call(name: str, call_id: str, arguments: str = "{}") -> FunctionT
         name=name,
         arguments=arguments,
         status=ItemStatus.COMPLETED,
+        display_name=name,
     )
 
 
@@ -34,7 +31,7 @@ def _make_tool_result(call_id: str, output: str) -> FunctionToolResult:
 
 class TestBuildToolContext:
     def test_empty_items(self):
-        result = build_tool_context([])
+        result = EvaluateSkill._build_tool_context([])
         assert result == "(no tools used)"
 
     def test_successful_tool(self):
@@ -42,7 +39,7 @@ class TestBuildToolContext:
             _make_tool_call("web_search", "c1", '{"query": "ai developer"}'),
             _make_tool_result("c1", "Found 10 results"),
         ]
-        result = build_tool_context(items)
+        result = EvaluateSkill._build_tool_context(items)
         assert "web_search" in result
         assert "ok" in result
 
@@ -51,7 +48,7 @@ class TestBuildToolContext:
             _make_tool_call("web_fetch", "c1", '{"url": "https://example.com"}'),
             _make_tool_result("c1", "Error executing tool 'web_fetch': 404 not found"),
         ]
-        result = build_tool_context(items)
+        result = EvaluateSkill._build_tool_context(items)
         assert "web_fetch" in result
         assert "FAILED" in result
 
@@ -62,7 +59,7 @@ class TestBuildToolContext:
             _make_tool_call("web_fetch", "c2", '{"url": "https://bad.com"}'),
             _make_tool_result("c2", "Error executing tool 'web_fetch': 404"),
         ]
-        result = build_tool_context(items)
+        result = EvaluateSkill._build_tool_context(items)
         lines = result.strip().split("\n")
         assert len(lines) == 3  # header + 2 tools
         assert "ok" in lines[1]
@@ -73,7 +70,7 @@ class TestBuildToolContext:
         for i in range(15):
             items.append(_make_tool_call("tool", f"c{i}"))
             items.append(_make_tool_result(f"c{i}", "ok"))
-        result = build_tool_context(items, limit=5)
+        result = EvaluateSkill._build_tool_context(items, limit=5)
         lines = [
             line
             for line in result.strip().split("\n")
@@ -87,7 +84,7 @@ class TestBuildToolContext:
             _make_tool_call("search", "c1", long_args),
             _make_tool_result("c1", "ok"),
         ]
-        result = build_tool_context(items)
+        result = EvaluateSkill._build_tool_context(items)
         assert "..." in result
 
     def test_empty_result_detected_as_failure(self):
@@ -98,92 +95,60 @@ class TestBuildToolContext:
                 "[EMPTY_RESULT] read_file returned no output. Consider retrying with different parameters.",
             ),
         ]
-        result = build_tool_context(items)
+        result = EvaluateSkill._build_tool_context(items)
         assert "FAILED" in result
 
 
-class TestParseJudgeResponse:
-    def test_pass_response(self):
-        mock = MagicMock(content='{"pass": true, "guidance": null}')
-        result = _parse_judge_response(mock)
-        assert result.passed is True
-        assert result.guidance is None
-
-    def test_fail_response(self):
-        mock = MagicMock(
-            content='{"pass": false, "guidance": "Try using a different search query"}'
-        )
-        result = _parse_judge_response(mock)
-        assert result.passed is False
-        assert result.guidance == "Try using a different search query"
-
-    def test_invalid_json_defaults_to_pass(self):
-        mock = MagicMock(content="This is not JSON")
-        result = _parse_judge_response(mock)
-        assert result.passed is True
-
-    def test_empty_content_defaults_to_pass(self):
-        mock = MagicMock(content="")
-        result = _parse_judge_response(mock)
-        assert result.passed is True
-
-    def test_null_string_guidance(self):
-        mock = MagicMock(content='{"pass": true, "guidance": "null"}')
-        result = _parse_judge_response(mock)
-        assert result.passed is True
-        assert result.guidance is None
-
-    def test_missing_pass_key_defaults_to_pass(self):
-        mock = MagicMock(content='{"guidance": "something"}')
-        result = _parse_judge_response(mock)
-        assert result.passed is True
-
-
-class TestJudgeResponse:
+class TestEvaluateResponse:
     @pytest.mark.asyncio
-    async def test_pass(self):
-        llm = AsyncMock()
-        llm.ainvoke.return_value = MagicMock(content='{"pass": true, "guidance": null}')
+    async def test_pass_via_tool_call(self):
+        llm = MagicMock()
+        resp = MagicMock()
+        resp.tool_calls = [{"args": {"passed": True}}]
+        llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=resp)
 
-        result = await judge_response(
-            llm,
+        skill = EvaluateSkill()
+        result = await skill.evaluate_response(
             "search for AI news",
             "Here are the results...",
-            "Tools used:\n1. web_search -> ok",
+            [],
+            llm,
         )
         assert result.passed is True
 
     @pytest.mark.asyncio
-    async def test_fail(self):
-        llm = AsyncMock()
-        llm.ainvoke.return_value = MagicMock(
-            content='{"pass": false, "guidance": "The tool returned a 404 error. Try searching with different terms."}'
-        )
+    async def test_fail_via_tool_call(self):
+        llm = MagicMock()
+        resp = MagicMock()
+        resp.tool_calls = [{"args": {"passed": False, "guidance": "Try different query"}}]
+        llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=resp)
 
-        result = await judge_response(
+        skill = EvaluateSkill()
+        result = await skill.evaluate_response(
+            "fetch page",
+            "Sorry, couldn't fetch.",
+            [],
             llm,
-            "fetch https://example.com",
-            "Sorry, I couldn't fetch the page.",
-            "Tools used:\n1. web_fetch -> FAILED: 404",
         )
         assert result.passed is False
-        assert "404" in (result.guidance or "")
+        assert "different query" in (result.guidance or "")
 
     @pytest.mark.asyncio
     async def test_llm_error_defaults_to_pass(self):
-        llm = AsyncMock()
-        llm.ainvoke.side_effect = Exception("LLM unavailable")
+        llm = MagicMock()
+        llm.bind_tools.return_value.ainvoke = AsyncMock(side_effect=Exception("LLM down"))
 
-        result = await judge_response(llm, "hello", "Hi!", "(no tools used)")
+        skill = EvaluateSkill()
+        result = await skill.evaluate_response("hello", "Hi!", [], llm)
         assert result.passed is True
 
     @pytest.mark.asyncio
-    async def test_prompt_contains_user_query(self):
-        llm = AsyncMock()
-        llm.ainvoke.return_value = MagicMock(content='{"pass": true, "guidance": null}')
+    async def test_no_tool_calls_defaults_to_pass(self):
+        llm = MagicMock()
+        resp = MagicMock()
+        resp.tool_calls = []
+        llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=resp)
 
-        await judge_response(llm, "my specific query", "response", "context")
-
-        call_args = llm.ainvoke.call_args[0][0]
-        human_msg = call_args[1]
-        assert "my specific query" in human_msg.content
+        skill = EvaluateSkill()
+        result = await skill.evaluate_response("query", "response", [], llm)
+        assert result.passed is True

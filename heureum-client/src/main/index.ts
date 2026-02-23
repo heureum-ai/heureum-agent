@@ -1,20 +1,15 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import { app, BrowserWindow, dialog, ipcMain, session, shell, Notification } from 'electron'
-import { exec } from 'child_process'
 import { join, dirname } from 'path'
-import { readFileSync, writeFileSync, existsSync, mkdirSync, createWriteStream, unlinkSync, watch, statSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, mkdirSync, createWriteStream, watch, statSync } from 'fs'
 import { randomUUID } from 'crypto'
 import { WebSocketServer, WebSocket } from 'ws'
 import { autoUpdater } from 'electron-updater'
 import http from 'http'
 import https from 'https'
-import { handleCodingTool, NON_BASH_CODING_TOOLS } from './tools'
-// TODO: re-enable when document tools are ready
-// import { handleDocxTool } from '@heureum/word'
-// import { handlePdfTool } from '@heureum/pdf'
-// import { handlePptTool } from '@heureum/ppt'
-// import { handleXlsxTool } from '@heureum/xlsx'
+import { getExecutableTools, handleToolExecution, getSkillsSnapshot, writeSkillFiles } from './tools'
+import { BROWSER_TOOLS as BROWSER_TOOL_DEFS } from '@heureum/browser'
 
 // --- Deep link protocol registration ---
 const PROTOCOL = 'heureum'
@@ -367,23 +362,16 @@ ipcMain.handle('get-client-id', async () => {
   return getOrCreateClientId()
 })
 
-ipcMain.handle(
-  'execute-bash',
-  async (_event, command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    return new Promise((resolve) => {
-      exec(command, { timeout: 30000, maxBuffer: 1024 * 1024, cwd: cwd || undefined }, (error, stdout, stderr) => {
-        resolve({
-          stdout: stdout || '',
-          stderr: stderr || '',
-          exitCode: error ? (error as any).code ?? 1 : 0
-        })
-      })
-    })
-  }
-)
-
 ipcMain.handle('get-coding-tools', () => {
-  return NON_BASH_CODING_TOOLS
+  return getExecutableTools()
+})
+
+ipcMain.handle('get-browser-tools', () => {
+  return BROWSER_TOOL_DEFS
+})
+
+ipcMain.handle('get-skills-snapshot', () => {
+  return getSkillsSnapshot()
 })
 
 ipcMain.handle(
@@ -395,10 +383,10 @@ ipcMain.handle(
     cwd?: string
   ): Promise<{ success: boolean; output: string; images?: Array<{ data: string; mimeType: string }> }> => {
     try {
-      const result = await handleCodingTool(toolName, { ...args, working_directory: cwd })
+      const result = await handleToolExecution(toolName, args, cwd)
       return result
     } catch (err: any) {
-      return { success: false, output: err.message || 'Coding tool execution failed' }
+      return { success: false, output: err.message || 'Tool execution failed' }
     }
   }
 )
@@ -425,76 +413,77 @@ ipcMain.handle('browser-extension-status', async () => {
   return extensionSocket !== null && extensionSocket.readyState === WebSocket.OPEN
 })
 
-// TODO: re-enable when document tools are ready
-// --- DOCX tool execution ---
-//
-// function snakeToCamel(s: string): string {
-//   return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase())
-// }
-//
-// function camelizeKeys(obj: Record<string, unknown>): Record<string, unknown> {
-//   const result: Record<string, unknown> = {}
-//   for (const [key, value] of Object.entries(obj)) {
-//     result[snakeToCamel(key)] = value
-//   }
-//   return result
-// }
-//
-// ipcMain.handle(
-//   'docx-tool',
-//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
-//     try {
-//       const camelName = snakeToCamel(toolName)
-//       const camelParams = camelizeKeys(params)
-//       const result = await handleDocxTool(camelName, camelParams)
-//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
-//     } catch (err: any) {
-//       return { success: false, output: '', error: err.message || 'DOCX tool execution failed' }
-//     }
-//   }
-// )
-//
-// --- PDF tool execution ---
-//
-// ipcMain.handle(
-//   'pdf-tool',
-//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
-//     try {
-//       const result = await handlePdfTool(toolName, params)
-//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
-//     } catch (err: any) {
-//       return { success: false, output: '', error: err.message || 'PDF tool execution failed' }
-//     }
-//   }
-// )
-//
-// --- PPT tool execution ---
-//
-// ipcMain.handle(
-//   'ppt-tool',
-//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
-//     try {
-//       const result = await handlePptTool(toolName, params)
-//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
-//     } catch (err: any) {
-//       return { success: false, output: '', error: err.message || 'PPT tool execution failed' }
-//     }
-//   }
-// )
-//
-// --- XLSX tool execution ---
-//
-// ipcMain.handle(
-//   'xlsx-tool',
-//   async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
-//     try {
-//       const result = await handleXlsxTool(toolName, params)
-//       return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
-//     } catch (err: any) {
-//       return { success: false, output: '', error: err.message || 'XLSX tool execution failed' }
-//     }
-//   }
-// )
+ipcMain.handle(
+  'docx-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'DOCX tool execution failed' }
+    }
+  }
+)
+
+ipcMain.handle(
+  'pdf-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'PDF tool execution failed' }
+    }
+  }
+)
+
+ipcMain.handle(
+  'ppt-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'PPT tool execution failed' }
+    }
+  }
+)
+
+ipcMain.handle(
+  'xlsx-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'XLSX tool execution failed' }
+    }
+  }
+)
+
+ipcMain.handle(
+  'md-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'MD tool execution failed' }
+    }
+  }
+)
+
+ipcMain.handle(
+  'hwpx-tool',
+  async (_event, toolName: string, params: Record<string, unknown>): Promise<{ success: boolean; output: string; error?: string }> => {
+    try {
+      const result = await handleToolExecution(toolName, params)
+      return { success: result.success, output: result.output, error: result.success ? undefined : result.output }
+    } catch (err: any) {
+      return { success: false, output: '', error: err.message || 'HWPX tool execution failed' }
+    }
+  }
+)
 
 // SSE notification stream control
 ipcMain.handle('start-notification-stream', async (_event, platformUrl: string) => {
@@ -814,6 +803,9 @@ if (!gotTheLock) {
     if (process.platform === 'win32') {
       app.setAppUserModelId('com.heureum.client')
     }
+
+    // Write SKILL.md files for lazy-read skill catalog
+    writeSkillFiles().catch((err) => console.warn('Failed to write skill files:', err))
 
     startWebSocketServer()
     createWindow()

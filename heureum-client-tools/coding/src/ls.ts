@@ -1,8 +1,8 @@
-import type { CodingTool } from "./types.js";
-import { existsSync, readdirSync, statSync } from "fs";
-import nodePath from "path";
+import { constants } from "fs";
+import { access, readdir } from "fs/promises";
 import { resolveToCwd } from "./path-utils.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead, type TruncationResult } from "./truncate.js";
+import type { CodingTool } from "./types.js";
 
 
 const DEFAULT_LIMIT = 500;
@@ -18,17 +18,21 @@ export interface LsToolDetails {
  */
 export interface LsOperations {
 	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
-	/** Get file/directory stats. Throws if not found. */
-	stat: (absolutePath: string) => Promise<{ isDirectory: () => boolean }> | { isDirectory: () => boolean };
-	/** Read directory entries */
-	readdir: (absolutePath: string) => Promise<string[]> | string[];
+	exists: (absolutePath: string) => Promise<boolean>;
+	/** Read directory entries with type information */
+	readdirWithTypes: (absolutePath: string) => Promise<Array<{ name: string; isDirectory: () => boolean }>>;
 }
 
 const defaultLsOperations: LsOperations = {
-	exists: existsSync,
-	stat: statSync,
-	readdir: readdirSync,
+	exists: async (p) => {
+		try {
+			await access(p, constants.F_OK);
+			return true;
+		} catch {
+			return false;
+		}
+	},
+	readdirWithTypes: (p) => readdir(p, { withFileTypes: true }),
 };
 
 export interface LsToolOptions {
@@ -68,24 +72,17 @@ export function createLsTool(cwd: string, options?: LsToolOptions): CodingTool {
 							return;
 						}
 
-						// Check if path is a directory
-						const stat = await ops.stat(dirPath);
-						if (!stat.isDirectory()) {
-							reject(new Error(`Not a directory: ${dirPath}`));
-							return;
-						}
-
-						// Read directory entries
-						let entries: string[];
+						// Read directory entries with types (no individual stat calls needed)
+						let entries: Array<{ name: string; isDirectory: () => boolean }>;
 						try {
-							entries = await ops.readdir(dirPath);
+							entries = await ops.readdirWithTypes(dirPath);
 						} catch (e: any) {
 							reject(new Error(`Cannot read directory: ${e.message}`));
 							return;
 						}
 
 						// Sort alphabetically (case-insensitive)
-						entries.sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+						entries.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
 
 						// Format entries with directory indicators
 						const results: string[] = [];
@@ -97,20 +94,8 @@ export function createLsTool(cwd: string, options?: LsToolOptions): CodingTool {
 								break;
 							}
 
-							const fullPath = nodePath.join(dirPath, entry);
-							let suffix = "";
-
-							try {
-								const entryStat = await ops.stat(fullPath);
-								if (entryStat.isDirectory()) {
-									suffix = "/";
-								}
-							} catch {
-								// Skip entries we can't stat
-								continue;
-							}
-
-							results.push(entry + suffix);
+							const suffix = entry.isDirectory() ? "/" : "";
+							results.push(entry.name + suffix);
 						}
 
 						signal?.removeEventListener("abort", onAbort);

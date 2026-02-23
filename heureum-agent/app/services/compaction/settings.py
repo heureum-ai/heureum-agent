@@ -12,7 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from app.services.prompts.base import TRUNCATION_SUFFIX as _DEFAULT_TRUNCATION_SUFFIX
+from app.services.prompts import TRUNCATION_SUFFIX as _DEFAULT_TRUNCATION_SUFFIX
 
 
 @dataclass(frozen=True)
@@ -61,8 +61,6 @@ class HardClearConfig:
 
     enabled: bool = True
     placeholder: str = "[Old tool result content cleared]"
-
-
 
 
 @dataclass

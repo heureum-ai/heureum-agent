@@ -13,297 +13,36 @@ This service provides single-call LLM invocation with:
 """
 
 import asyncio
-import json
 import logging
-import os
-import re
 import time
 import uuid
-from collections.abc import MutableMapping
-from dataclasses import dataclass, replace
 from typing import Any, Dict, List, Optional, Tuple
 
-import httpx
 from app.config import settings
-from app.models import AgentResponse, LLMResult, LLMResultType, Message, ToolCallInfo
-from app.schemas.open_responses import (
-    FunctionToolCall,
-    FunctionToolResult,
-    InputTokenDetails,
-    MessageRole,
-    OutputTokenDetails,
-    Usage,
-)
-from app.services.compaction import (
-    CompactionSettings,
-    prune_context_messages,
-    truncate_oversized_tool_results,
-)
-from app.services.compaction.summarizer import compact_history
-from app.services.compaction.tokens import estimate_messages_tokens
+from app.models import AgentResponse, LLMResult, LLMResultType, ToolCallInfo
+from app.schemas.open_responses import Usage
+from app.services.messages import MessageController
+from app.services.compaction import CompactionController
 from app.services.error import LLMErrorClassifier
-from app.services.model_fallback import (
+from app.services.providers import (
+    LLMController,
     MultiProviderLLM,
     is_failover_error,
     resolve_candidates,
     run_with_model_fallback,
 )
-from app.services.prompts.base import build_system_prompt
-from app.services.prompts.compaction import COMPACTION_PREFIX
-from app.services.prompts.evaluation import JUDGE_SYSTEM_PROMPT, JUDGE_USER_TEMPLATE
+from app.services.prompts import PromptController
+from app.services.mcps import MCPToolController
+from app.services.skills import SkillController
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
-    SystemMessage,
+    SystemMessage as LCSystemMessage,
     ToolMessage,
 )
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
 logger = logging.getLogger(__name__)
-
-# Browser tools whose results contain page DOM that becomes stale when
-# the agent navigates to a new page.  Only the most recent page snapshot
-# matters; older ones are replaced with a short summary to save tokens.
-_BROWSER_PAGE_TOOLS = frozenset(
-    {
-        "browser_navigate",
-        "browser_click",
-        "browser_get_content",
-        "browser_new_tab",
-    }
-)
-
-# Regex to extract the first Page/URL line from a browser tool result.
-_PAGE_HEADER_RE = re.compile(
-    r'^(?:Page:\s*"(?P<title>[^"]*)")?\s*(?:URL:\s*(?P<url>\S+))?',
-    re.MULTILINE,
-)
-
-
-def _extract_page_header(content: str) -> str:
-    """Extract a short 'Page: ... URL: ...' summary from browser tool output."""
-    m = _PAGE_HEADER_RE.search(content)
-    if m and (m.group("title") or m.group("url")):
-        title = m.group("title") or ""
-        url = m.group("url") or ""
-        return f'Page: "{title}" URL: {url}'.strip()
-    # Fallback: first line, truncated
-    first_line = content.split("\n", 1)[0][:120]
-    return first_line
-
-
-def _is_browser_page_content(content: str) -> bool:
-    """Check if content looks like a browser page DOM snapshot."""
-    return content.startswith("Page:") or "[Interactive Elements]" in content[:500]
-
-
-def _invalidate_stale_browser_results(lc_history: list) -> int:
-    """Replace older browser page DOM results with short summaries.
-
-    Walks the history backwards.  The most recent ToolMessage containing
-    page content is kept intact; all older ones from browser page tools
-    are replaced with a one-line summary.
-
-    Returns the number of messages replaced.
-    """
-    replaced = 0
-    seen_latest = False
-
-    for i in range(len(lc_history) - 1, -1, -1):
-        msg = lc_history[i]
-
-        if isinstance(msg, ToolMessage):
-            content = msg.content or ""
-            if _is_browser_page_content(content):
-                if not seen_latest:
-                    seen_latest = True
-                    continue
-                # This is an older page snapshot — replace it
-                summary = _extract_page_header(content)
-                lc_history[i] = ToolMessage(
-                    content=f"[Stale page snapshot replaced] {summary}",
-                    tool_call_id=getattr(msg, "tool_call_id", "unknown"),
-                )
-                replaced += 1
-
-        elif isinstance(msg, HumanMessage):
-            # Synthetic tool results stored as HumanMessage:
-            # "[Tool result: browser_click] Page: ..."
-            content = msg.content or ""
-            if content.startswith("[Tool result:"):
-                # Strip prefix to check the actual tool output
-                bracket_end = content.find("]")
-                body = content[bracket_end + 1 :].lstrip() if bracket_end > 0 else content
-                if _is_browser_page_content(body):
-                    if not seen_latest:
-                        seen_latest = True
-                        continue
-                    summary = _extract_page_header(body)
-                    lc_history[i] = HumanMessage(
-                        content=f"[Stale page snapshot replaced] {summary}",
-                    )
-                    replaced += 1
-
-    return replaced
-
-
-def create_llm():
-    """Create LLM instance based on AGENT_MODEL setting.
-
-    Gemini routing:
-      - GOOGLE_API_KEY set → Google AI Studio (simple API key auth)
-      - Otherwise → Vertex AI (GCP service account / ADC)
-    """
-    model = settings.AGENT_MODEL
-    if model.startswith("gemini"):
-        thinking_budget = settings.AGENT_THINKING_BUDGET or None
-        if settings.GOOGLE_API_KEY:
-            return ChatGoogleGenerativeAI(
-                model=model,
-                google_api_key=settings.GOOGLE_API_KEY,
-                temperature=settings.AGENT_TEMPERATURE,
-                max_output_tokens=settings.AGENT_MAX_TOKENS,
-                thinking_budget=thinking_budget,
-            )
-        # Vertex AI: ensure GOOGLE_APPLICATION_CREDENTIALS is visible to
-        # google.auth.default() (pydantic-settings reads .env into its own
-        # fields but does NOT export to os.environ).
-        if settings.GOOGLE_APPLICATION_CREDENTIALS:
-            os.environ.setdefault(
-                "GOOGLE_APPLICATION_CREDENTIALS",
-                settings.GOOGLE_APPLICATION_CREDENTIALS,
-            )
-        return ChatGoogleGenerativeAI(
-            model=model,
-            vertexai=True,
-            project=settings.GOOGLE_CLOUD_PROJECT,
-            location=settings.GOOGLE_CLOUD_LOCATION,
-            temperature=settings.AGENT_TEMPERATURE,
-            max_output_tokens=settings.AGENT_MAX_TOKENS,
-            thinking_budget=thinking_budget,
-        )
-    else:
-        return ChatOpenAI(
-            api_key=SecretStr(settings.OPENAI_API_KEY),
-            model=model,
-            temperature=settings.AGENT_TEMPERATURE,
-            max_completion_tokens=settings.AGENT_MAX_TOKENS,
-        )
-
-
-def _strip_tool_call_narration(lc_messages: list) -> list:
-    """Remove narration text from AIMessages that carry tool_calls.
-
-    When the LLM generates text alongside tool_calls (e.g.
-    "I'll use mcp_web__search to find..."), the narration text
-    pollutes the history and causes the model to repeat the pattern
-    on subsequent turns.
-
-    This creates shallow copies of affected messages (content cleared,
-    tool_calls preserved) so the originals in session storage are not
-    mutated — keeping Gemini thought-signature metadata intact for the
-    stored version.
-
-    If clearing the content causes Gemini to reject the message on
-    replay, the existing ``_strip_tool_messages`` fallback will handle
-    it.
-    """
-    result: list = []
-    for msg in lc_messages:
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None) and msg.content:
-            result.append(
-                AIMessage(
-                    content="",
-                    tool_calls=msg.tool_calls,
-                    response_metadata=getattr(msg, "response_metadata", {}),
-                    usage_metadata=getattr(msg, "usage_metadata", None),
-                    additional_kwargs=getattr(msg, "additional_kwargs", {}),
-                )
-            )
-        else:
-            result.append(msg)
-    return result
-
-
-def _strip_tool_messages(lc_messages: list) -> tuple[list, bool]:
-    """Convert tool-related LangChain messages to plain text equivalents.
-
-    Gemini thinking models may reject replayed AIMessage(tool_calls) +
-    ToolMessage sequences with "Thought signature is not valid".  This
-    helper converts them into plain AI/Human messages so the LLM can
-    still see the context without triggering signature validation.
-    """
-    clean: list = []
-    changed = False
-    for msg in lc_messages:
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            summary = ", ".join(f"{tc['name']}({tc.get('args', {})})" for tc in msg.tool_calls)
-            clean.append(AIMessage(content=f"[Called: {summary}]"))
-            changed = True
-        elif isinstance(msg, ToolMessage):
-            clean.append(HumanMessage(content=f"[Tool result]: {msg.content}"))
-            changed = True
-        else:
-            clean.append(msg)
-    return clean, changed
-
-
-def _normalize_usage_metadata(
-    usage: Optional[Dict[str, Any]],
-) -> Optional[Dict[str, int]]:
-    """Normalize usage dict to LangChain ``usage_metadata`` shape."""
-    if not usage:
-        return None
-    input_tokens = int(usage.get("input_tokens", 0) or 0)
-    output_tokens = int(usage.get("output_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", input_tokens + output_tokens) or 0)
-    return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": total_tokens,
-    }
-
-
-class _SessionMessageView(MutableMapping[str, List[Message]]):
-    """Compatibility mapping exposing app ``Message`` histories.
-
-    Internal canonical storage is ``AgentService._lc_sessions`` (LangChain
-    messages). This adapter keeps existing call sites/tests that access
-    ``service.sessions`` working while avoiding dual-write state.
-    """
-
-    def __init__(self, service: "AgentService") -> None:
-        self._service = service
-
-    def __getitem__(self, session_id: str) -> List[Message]:
-        lc_history = self._service._lc_sessions[session_id]
-        return [self._service._to_app_message(m) for m in lc_history]
-
-    def __setitem__(self, session_id: str, history: List[Message]) -> None:
-        self._service._lc_sessions[session_id] = [self._service._to_lc_message(m) for m in history]
-
-    def __delitem__(self, session_id: str) -> None:
-        del self._service._lc_sessions[session_id]
-
-    def __iter__(self):
-        return iter(self._service._lc_sessions)
-
-    def __len__(self) -> int:
-        return len(self._service._lc_sessions)
-
-    def get(self, session_id: str, default=None):
-        if session_id in self._service._lc_sessions:
-            return self[session_id]
-        return default
-
-    def pop(self, session_id: str, default=None):
-        if session_id in self._service._lc_sessions:
-            lc_history = self._service._lc_sessions.pop(session_id)
-            return [self._service._to_app_message(m) for m in lc_history]
-        return default
 
 
 class AgentService:
@@ -317,28 +56,37 @@ class AgentService:
 
     def __init__(
         self,
-        compaction_settings: Optional[CompactionSettings] = None,
+        compaction_controller: CompactionController | None = None,
         mcp_tools: Optional[List[Dict[str, Any]]] = None,
         skill_provider: Optional[Any] = None,
+        message_controller: MessageController | None = None,
+        llm_controller: LLMController | None = None,
     ) -> None:
         """Initialize the AgentService.
 
         Args:
-            compaction_settings (Optional[CompactionSettings]): Configuration
-                for the 3-layer compaction pipeline. Uses defaults if None.
+            compaction_controller (CompactionController | None):
+                Compaction-domain controller override.
             mcp_tools (Optional[List[Dict[str, Any]]]): Pre-discovered MCP
                 tool schemas. Typically set later via ``mcp_tools`` attribute.
-            skill_provider (Optional[SkillProvider]): Skill registry instance
+            skill_provider (Optional[SkillController]): Skill registry instance
                 for server-side tool schemas and guide prompts.
+            message_controller (MessageController | None):
+                Message-domain composition root override.
+            llm_controller (LLMController | None):
+                Provider-domain LLM controller override.
         """
-        self._lc_sessions: dict[str, List[BaseMessage]] = {}
-        self.sessions: MutableMapping[str, List[Message]] = _SessionMessageView(self)
-        self._session_locks: dict[str, asyncio.Lock] = {}
-        self._session_last_access: dict[str, float] = {}
-        self.compaction_settings = compaction_settings or CompactionSettings()
-        self.mcp_tools = mcp_tools
-        self.skill_provider = skill_provider
-        self.llm = create_llm()
+        self.message_controller = message_controller or MessageController()
+        self.sessions = self.message_controller.session_state_controller.sessions
+        self.compaction_controller = compaction_controller or CompactionController()
+        self.mcp_tool_controller = MCPToolController(mcp_tools)
+        self.skill_provider: SkillController | None = skill_provider
+        self.prompt_controller = PromptController(
+            skill_provider=skill_provider,
+            mcp_tool_controller=self.mcp_tool_controller,
+        )
+        self.llm_controller = llm_controller or LLMController()
+        self.llm = self.llm_controller.create_primary()
 
         # Model fallback infrastructure
         self._fallback_candidates = resolve_candidates(
@@ -350,20 +98,62 @@ class AgentService:
         if self._fallback_candidates:
             self._multi_provider._cache[self._fallback_candidates[0].spec] = self.llm
 
-        self._platform_client = httpx.AsyncClient(
-            base_url=settings.PLATFORM_API_URL,
-            timeout=httpx.Timeout(10.0, connect=3.0),
+        self._platform_message_history_client = (
+            self.message_controller.create_platform_message_history_client(
+                settings.PLATFORM_API_URL
+            )
         )
 
-    def _evict_session(self, session_id: str) -> None:
+        # Middleware runner — injected by AgentLoopController after construction
+        self.middleware_runner: Any = None
+
+    # ------------------------------------------------------------------
+    # Facade properties — shorten deep property chains
+    # ------------------------------------------------------------------
+
+    @property
+    def _sessions(self) -> dict:
+        """Shortcut to LangChain session storage."""
+        return self.message_controller.session_state_controller.sessions
+
+    def _lc_history(self, session_id: str) -> list:
+        """Return the LC history list for a session (empty list if absent)."""
+        return self._sessions.get(session_id, [])
+
+    @property
+    def _normalize(self):
+        """Shortcut to MessageNormalizeController."""
+        return self.message_controller.message_normalize_controller
+
+    @property
+    def responses(self):
+        """Shortcut to ResponseMessageController."""
+        return self.message_controller.response_message_controller
+
+    @property
+    def history(self):
+        """Shortcut to HistoryMessageController."""
+        return self.message_controller.history_message_controller
+
+    def extract_lc_text(self, content: Any) -> str:
+        """Extract plain text from message content (str, list, or LangChain message).
+
+        Public facade for the internal ``_normalize.extract_lc_text()`` method.
+        """
+        return self._normalize.extract_lc_text(content)
+
+    def remove_session(self, session_id: str) -> bool:
         """Remove all data associated with a session.
 
         Args:
             session_id (str): The session to evict.
+
+        Returns:
+            bool: True if the session existed before eviction.
         """
-        self._lc_sessions.pop(session_id, None)
-        self._session_locks.pop(session_id, None)
-        self._session_last_access.pop(session_id, None)
+        existed = session_id in self._sessions
+        self.message_controller.session_state_controller.remove_session(session_id)
+        return existed
 
     def _get_session_lock(self, session_id: str) -> asyncio.Lock:
         """Return the asyncio lock for a session, creating one if needed.
@@ -374,11 +164,11 @@ class AgentService:
         Returns:
             asyncio.Lock: The lock associated with the session.
         """
-        return self._session_locks.setdefault(session_id, asyncio.Lock())
+        return self.message_controller.session_state_controller.get_session_lock(session_id)
 
     def _get_last_input_tokens(self, session_id: str) -> Optional[int]:
         """Read input tokens from the latest assistant LangChain message."""
-        for msg in reversed(self._lc_sessions.get(session_id, [])):
+        for msg in reversed(self._sessions.get(session_id, [])):
             if not isinstance(msg, AIMessage):
                 continue
 
@@ -393,158 +183,34 @@ class AgentService:
                 return int(token_usage["input_tokens"])
         return None
 
-    @staticmethod
-    def _normalize_content(content: Any) -> str:
-        """Extract plain text from Open Responses structured content.
-
-        Platform DB may store content as:
-          - A plain string: "hello"
-          - A structured list: [{"type": "input_text", "text": "hello"}]
-          - A list with multiple parts: [{"type": "output_text", "text": "hi"}, ...]
-
-        LangChain/Gemini only understands plain strings, so we must flatten
-        structured content before constructing BaseMessage objects.
-        """
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            parts: list[str] = []
-            for part in content:
-                if isinstance(part, str):
-                    parts.append(part)
-                elif isinstance(part, dict):
-                    # Open Responses types: input_text, output_text, text, refusal, etc.
-                    text = part.get("text", "")
-                    if text:
-                        parts.append(text)
-            return "\n".join(parts) if parts else ""
-        if isinstance(content, dict):
-            return content.get("text", str(content))
-        return str(content) if content else ""
-
-    @staticmethod
-    def _platform_message_to_lc(record: Dict[str, Any]) -> Optional[BaseMessage]:
-        """Convert a Platform DB message record to a LangChain BaseMessage.
-
-        Platform DB format:
-          - Text messages: {"type": "message", "role": "user|assistant",
-            "content": [{"type": "input_text|output_text", "text": "..."}]}
-          - Function call: {"type": "function_call",
-            "content": {"type": "function_call", "call_id": "...",
-                         "name": "...", "arguments": "..."}}
-          - Function call output: {"type": "function_call_output",
-            "content": {"type": "function_call_output", "call_id": "...",
-                         "output": "..."}}
-          - Skip: permission_grant, todo_state
-
-        Returns None for empty/unrecognized records (caller skips them).
-        """
-        msg_type = record.get("type", "")
-        role = record.get("role", "")
-        raw_content = record.get("content", "")
-
-        # Skip non-conversational record types
-        if msg_type in ("permission_grant", "todo_state"):
-            return None
-
-        # Function call → AIMessage with tool_calls
-        # Data lives inside record["content"] dict
-        if msg_type == "function_call":
-            inner = raw_content if isinstance(raw_content, dict) else {}
-            call_id = inner.get("call_id") or inner.get("id") or record.get("call_id", "unknown")
-            name = inner.get("name") or record.get("name", "")
-            arguments = inner.get("arguments") or record.get("arguments", "{}")
-            if isinstance(arguments, str):
-                try:
-                    args = json.loads(arguments)
-                except (json.JSONDecodeError, TypeError):
-                    args = {}
-            else:
-                args = arguments
-            return AIMessage(
-                content="",
-                tool_calls=[{"name": name, "args": args, "id": call_id}],
-            )
-
-        # Function call output → ToolMessage
-        # Data lives inside record["content"] dict
-        if msg_type == "function_call_output":
-            inner = raw_content if isinstance(raw_content, dict) else {}
-            output = inner.get("output") or record.get("output", "")
-            call_id = inner.get("call_id") or record.get("call_id", "unknown")
-            return ToolMessage(content=output, tool_call_id=call_id)
-
-        # Standard role-based messages — normalize structured content to plain text
-        content = AgentService._normalize_content(raw_content)
-
-        if not content and not role:
-            return None
-
-        if role == "user":
-            return HumanMessage(content=content)
-        if role == "assistant":
-            return AIMessage(content=content)
-        if role == "system":
-            return SystemMessage(content=content)
-        if role == "tool":
-            return ToolMessage(
-                content=content,
-                tool_call_id=record.get("tool_call_id", "unknown"),
-            )
-
-        # Unrecognized — skip
-        return None
-
-    async def _rehydrate_session(self, session_id: str) -> Optional[List[BaseMessage]]:
-        """Rehydrate a session's message history from the Platform DB.
-
-        Calls Platform API to retrieve stored messages and converts them
-        back into LangChain BaseMessage objects.
+    async def generate_title(self, conversation: str) -> str:
+        """Generate a short title for a conversation using the LLM.
 
         Args:
-            session_id: The session to rehydrate from Platform DB.
+            conversation: Formatted conversation text.
 
         Returns:
-            The rehydrated message list, or None if the session does not
-            exist or Platform is unreachable.
+            Title string (max 60 chars).
+
+        Raises:
+            Exception: Propagated from LLM call (caller should handle).
         """
-        try:
-            resp = await self._platform_client.get(
-                "/api/v1/messages/",
-                params={"session_id": session_id, "ordering": "created_at"},
+        prompt = HumanMessage(
+            content=(
+                "Generate a very short title (max 6 words) for this conversation. "
+                "Return ONLY the title, no quotes or punctuation.\n\n"
+                f"{conversation}"
             )
-        except (httpx.ConnectError, httpx.TimeoutException, OSError) as exc:
-            logger.warning("Platform unreachable during rehydration: %s", exc)
-            return None
-
-        if resp.status_code == 404:
-            return None
-        if resp.status_code != 200:
-            logger.warning(
-                "Platform returned %d for session %s rehydration",
-                resp.status_code,
-                session_id,
-            )
-            return None
-
-        try:
-            data = resp.json()
-        except (json.JSONDecodeError, ValueError):
-            logger.warning("Invalid JSON from Platform for session %s", session_id)
-            return None
-
-        records = data if isinstance(data, list) else data.get("results", [])
-        lc_messages: List[BaseMessage] = []
-        for record in records:
-            msg = self._platform_message_to_lc(record)
-            if msg is not None:
-                lc_messages.append(msg)
-
-        return lc_messages if lc_messages else None
+        )
+        result = await self.llm.ainvoke([prompt])
+        title = result.content.strip().strip("\"'")
+        if len(title) > 60:
+            title = title[:57] + "..."
+        return title
 
     async def aclose(self) -> None:
-        """Close the httpx client. Called during application shutdown."""
-        await self._platform_client.aclose()
+        """Close external clients. Called during application shutdown."""
+        await self._platform_message_history_client.aclose()
 
     async def _get_or_create_session(
         self, session_id: Optional[str]
@@ -563,23 +229,30 @@ class AgentService:
         Returns:
             tuple[str, List[BaseMessage]]: A (session_id, history) pair.
         """
-        if session_id and session_id in self._lc_sessions:
-            self._session_last_access[session_id] = time.time()
-            return session_id, self._lc_sessions[session_id]
+        if session_id and session_id in self._sessions:
+            self.message_controller.session_state_controller.last_access[session_id] = time.time()
+            return session_id, self._sessions[session_id]
 
         # Cache miss — attempt rehydration from Platform DB
         if session_id:
             try:
-                rehydrated = await self._rehydrate_session(session_id)
+                rehydrated = (
+                    await self.message_controller.message_rehydration_controller.rehydrate_session(
+                        client=self._platform_message_history_client,
+                        session_id=session_id,
+                    )
+                )
                 if rehydrated is not None:
-                    self._lc_sessions[session_id] = rehydrated
-                    self._session_last_access[session_id] = time.time()
+                    self._sessions[session_id] = rehydrated
+                    self.message_controller.session_state_controller.last_access[session_id] = (
+                        time.time()
+                    )
                     logger.info(
                         "Rehydrated session %s (%d messages)",
                         session_id,
                         len(rehydrated),
                     )
-                    return session_id, self._lc_sessions[session_id]
+                    return session_id, self._sessions[session_id]
             except Exception:
                 logger.warning(
                     "Failed to rehydrate session %s, starting fresh",
@@ -588,9 +261,9 @@ class AgentService:
                 )
 
         new_session_id = session_id or str(uuid.uuid4())
-        self._lc_sessions[new_session_id] = []
-        self._session_last_access[new_session_id] = time.time()
-        return new_session_id, self._lc_sessions[new_session_id]
+        self._sessions[new_session_id] = []
+        self.message_controller.session_state_controller.last_access[new_session_id] = time.time()
+        return new_session_id, self._sessions[new_session_id]
 
     def _is_session_locked(self, session_id: str) -> bool:
         """Check if a session's lock is currently held (in-use).
@@ -601,39 +274,27 @@ class AgentService:
         Returns:
             bool: True if the session lock is currently acquired.
         """
-        lock = self._session_locks.get(session_id)
-        return lock is not None and lock.locked()
+        return self.message_controller.session_state_controller.is_session_locked(session_id)
 
-    def _cleanup_stale_sessions(self) -> None:
+    def cleanup_stale_sessions(self) -> tuple[int, int]:
         """Remove sessions older than TTL and evict oldest if over settings.MAX_SESSIONS.
 
         Safety: never evicts sessions with an active lock (currently in-use).
         """
-        now = time.time()
-        expired = [
-            sid
-            for sid, ts in self._session_last_access.items()
-            if now - ts > settings.SESSION_TTL_SECONDS and not self._is_session_locked(sid)
-        ]
-        for sid in expired:
-            self._evict_session(sid)
-        if expired:
-            logger.info("Evicted %d expired session(s)", len(expired))
-
-        if len(self._lc_sessions) > settings.MAX_SESSIONS:
-            evictable = [
-                (sid, ts)
-                for sid, ts in self._session_last_access.items()
-                if not self._is_session_locked(sid)
-            ]
-            evictable.sort(key=lambda item: item[1])
-            to_evict = len(self._lc_sessions) - settings.MAX_SESSIONS
-            for sid, _ in evictable[:to_evict]:
-                self._evict_session(sid)
+        expired_count, overflow_evicted_count = (
+            self.message_controller.session_state_controller.cleanup_stale_sessions(
+                ttl_seconds=settings.SESSION_TTL_SECONDS,
+                max_sessions=settings.MAX_SESSIONS,
+            )
+        )
+        if expired_count:
+            logger.info("Evicted %d expired session(s)", expired_count)
+        if overflow_evicted_count:
             logger.info(
                 "Evicted %d session(s) over settings.MAX_SESSIONS limit",
-                min(to_evict, len(evictable)),
+                overflow_evicted_count,
             )
+        return expired_count, overflow_evicted_count
 
     async def _ensure_session(
         self,
@@ -648,112 +309,18 @@ class AgentService:
         Returns:
             str: The resolved session ID.
         """
-        self._cleanup_stale_sessions()
+        self.cleanup_stale_sessions()
         session_id, _ = await self._get_or_create_session(session_id)
         return session_id
 
-    @staticmethod
-    def _to_lc_message(msg: Any) -> BaseMessage:
-        """Convert app Message -> LangChain message.
-
-        Args:
-            msg (Message): The application-level message to convert.
-
-        Returns:
-            BaseMessage: The corresponding LangChain message instance.
-        """
-        if isinstance(msg, BaseMessage):
-            return msg
-        if msg.role == MessageRole.USER:
-            return HumanMessage(content=msg.content)
-        if msg.role == MessageRole.ASSISTANT:
-            usage = _normalize_usage_metadata(msg.usage)
-            return AIMessage(
-                content=msg.content,
-                tool_calls=msg.tool_calls or [],
-                usage_metadata=usage,  # type: ignore[arg-type]
-            )
-        if msg.role == MessageRole.SYSTEM:
-            return SystemMessage(content=msg.content)
-        if msg.role == MessageRole.TOOL:
-            return ToolMessage(
-                content=msg.content,
-                tool_call_id=msg.tool_call_id or "unknown",
-            )
-        return HumanMessage(content=msg.content)
-
-    @staticmethod
-    def _to_app_message(msg: BaseMessage) -> Message:
-        """Convert LangChain message -> app Message."""
-        if isinstance(msg, HumanMessage):
-            text = AgentService._extract_text(msg.content)
-            if text.startswith("[Tool result:"):
-                close = text.find("]")
-                label = text[len("[Tool result:") : close].strip() if close > 0 else None
-                body = text[close + 1 :].lstrip() if close > 0 else text
-                return Message(
-                    role=MessageRole.TOOL,
-                    content=body,
-                    tool_name=label or None,
-                )
-            return Message(role=MessageRole.USER, content=text)
-        if isinstance(msg, AIMessage):
-            tc = getattr(msg, "tool_calls", None) or None
-            if not tc:
-                tc = getattr(msg, "additional_kwargs", {}).get("synthetic_tool_calls")
-            usage = getattr(msg, "usage_metadata", None)
-            usage_dict = dict(usage) if isinstance(usage, dict) else None
-            if usage_dict is None:
-                usage_dict = getattr(msg, "additional_kwargs", {}).get("synthetic_usage")
-            return Message(
-                role=MessageRole.ASSISTANT,
-                content=AgentService._extract_text(msg.content),
-                tool_calls=tc,
-                usage=usage_dict,
-            )
-        if isinstance(msg, SystemMessage):
-            return Message(role=MessageRole.SYSTEM, content=AgentService._extract_text(msg.content))
-        if isinstance(msg, ToolMessage):
-            return Message(
-                role=MessageRole.TOOL,
-                content=AgentService._extract_text(msg.content),
-                tool_call_id=getattr(msg, "tool_call_id", None),
-            )
-        return Message(
-            role=MessageRole.USER,
-            content=AgentService._extract_text(getattr(msg, "content", "")),
-        )
-
     def _ensure_lc_session(self, session_id: str) -> None:
         """Ensure an LC history list exists for a session."""
-        if session_id in self._lc_sessions:
-            return
-        self._lc_sessions[session_id] = []
+        self.message_controller.session_state_controller.ensure_session(session_id)
 
-    @staticmethod
-    def _extract_text(content: Any) -> str:
-        """Extract plain text from LLM response content.
-
-        Args:
-            content (Any): Raw content from an LLM response (str, list, or
-                other type).
-
-        Returns:
-            str: The concatenated text representation.
-        """
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            return " ".join(
-                item if isinstance(item, str) else item.get("text", "")
-                for item in content
-                if isinstance(item, (str, dict))
-            )
-        return str(content)
-
-    @staticmethod
-    def _extract_usage(response) -> Usage:
+    def extract_usage(self, response) -> Usage:
         """Extract token usage from LLM response.
+
+        Compatibility wrapper delegating to ``_normalize._extract_usage``.
 
         Args:
             response: The LLM response (AIMessage).
@@ -761,25 +328,11 @@ class AgentService:
         Returns:
             Usage: Token usage statistics including cached token details.
         """
-        meta = getattr(response, "usage_metadata", None) or {}
-        input_details = meta.get("input_token_details") or {}
-        output_details = meta.get("output_token_details") or {}
-        return Usage(
-            input_tokens=meta.get("input_tokens", 0),
-            output_tokens=meta.get("output_tokens", 0),
-            total_tokens=meta.get("total_tokens", 0),
-            input_tokens_details=InputTokenDetails(
-                cached_tokens=input_details.get("cache_read", 0),
-            ),
-            output_tokens_details=OutputTokenDetails(
-                reasoning_tokens=output_details.get("reasoning", 0),
-            ),
-        )
+        return self._normalize._extract_usage(response)
 
-    @staticmethod
-    def _preview_text(content: Any, limit: int = 220) -> str:
+    def _preview_text(self, content: Any, limit: int = 220) -> str:
         """Render message content as a short single-line preview."""
-        text = AgentService._extract_text(content).replace("\n", "\\n")
+        text = self._normalize.extract_lc_text(content).replace("\n", "\\n")
         if len(text) <= limit:
             return text
         return f"{text[:limit]}...(truncated {len(text) - limit} chars)"
@@ -818,7 +371,7 @@ class AgentService:
                 "content_preview": self._preview_text(getattr(msg, "content", "")),
             }
 
-            if isinstance(msg, SystemMessage):
+            if isinstance(msg, LCSystemMessage):
                 item["role"] = "system"
             elif isinstance(msg, HumanMessage):
                 item["role"] = "user"
@@ -892,12 +445,11 @@ class AgentService:
         client_tool_prompts: Optional[List[str]] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         state_prompts: Optional[List[str]] = None,
+        skills_prompt: Optional[str] = None,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
-        Centralises prompt and tool-binding decisions so that future
-        dynamic-prompting logic (e.g. tool filtering, conditional guides)
-        can live in one place.
+        Delegates to :class:`PromptController` for the actual assembly.
 
         Args:
             instructions (Optional[str]): Extra instructions to append
@@ -908,47 +460,24 @@ class AgentService:
                 OpenAI-format tool schemas.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills (wrapped inside ``<session_state>``).
+            skills_prompt (Optional[str]): Pre-built ``<available_skills>``
+                block from a client skills snapshot.
 
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
         """
-        # Build the set of client-provided tool names for skill filtering
-        client_tool_names: set[str] = set()
-        for s in client_tool_schemas or []:
-            func = s.get("function")
-            if isinstance(func, dict) and "name" in func:
-                client_tool_names.add(func["name"])
-        if self.mcp_tools:
-            for s in self.mcp_tools:
-                func = s.get("function")
-                if isinstance(func, dict) and "name" in func:
-                    client_tool_names.add(func["name"])
-
-        if self.skill_provider:
-            server_tool_prompts = self.skill_provider.get_all_guide_prompts()
-            server_tool_schemas = self.skill_provider.get_all_tool_schemas()
-        else:
-            server_tool_prompts = []
-            server_tool_schemas = []
-
-        prompt = build_system_prompt(
-            server_tool_prompts=server_tool_prompts,
-            client_tool_prompts=client_tool_prompts,
+        return self.prompt_controller.prepare_prompt_and_tools(
             instructions=instructions,
+            client_tool_prompts=client_tool_prompts,
+            client_tool_schemas=client_tool_schemas,
             state_prompts=state_prompts,
+            skills_prompt=skills_prompt,
         )
-
-        tools = list(client_tool_schemas or [])
-        tools.extend(server_tool_schemas)
-        if self.mcp_tools:
-            tools.extend(self.mcp_tools)
-
-        return prompt, tools
 
     def _build_lc_messages(
         self,
-        history: List[Message],
-        new_messages: List[Message],
+        history: List[BaseMessage],
+        new_messages: List[BaseMessage],
         instructions: Optional[str] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
@@ -959,8 +488,8 @@ class AgentService:
         so tool availability and instructions stay current.
 
         Args:
-            history (List[Message]): Previously stored session messages.
-            new_messages (List[Message]): Messages from the current request.
+            history (List[BaseMessage]): Previously stored session messages.
+            new_messages (List[BaseMessage]): Messages from the current request.
             instructions (Optional[str]): Extra instructions for the prompt.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for inclusion in the system prompt.
@@ -975,9 +504,9 @@ class AgentService:
             client_tool_prompts=client_tool_prompts,
             state_prompts=state_prompts,
         )
-        lc_messages = [SystemMessage(content=prompt)]
-        lc_messages.extend(self._to_lc_message(msg) for msg in history)
-        lc_messages.extend(self._to_lc_message(msg) for msg in new_messages)
+        lc_messages = [LCSystemMessage(content=prompt)]
+        lc_messages.extend(history)
+        lc_messages.extend(new_messages)
         return lc_messages
 
     async def _call_llm(self, lc_messages: list, tools: list):
@@ -1011,7 +540,7 @@ class AgentService:
             async for chunk in self.llm.astream(lc_messages):
                 yield chunk
 
-    async def _compact_session(self, session_id: str) -> List[Message]:
+    async def _compact_session(self, session_id: str) -> List[BaseMessage]:
         """Run 3-layer compaction on a session and persist the result.
 
         truncation -> pruning -> LLM summarization
@@ -1023,53 +552,43 @@ class AgentService:
             session_id (str): The session whose history should be compacted.
 
         Returns:
-            List[Message]: The compacted history (also saved to
+            List[BaseMessage]: The compacted history (also saved to
                 ``self.sessions``).
         """
+        from app.services.middleware.types import CompactionEvent, MiddlewareContext
+
         history = self.get_history(session_id)
-        original_lc = list(self._lc_sessions.get(session_id, []))
-        s = self.compaction_settings
+        original_lc = list(self._sessions.get(session_id, []))
 
-        history, truncated = truncate_oversized_tool_results(history, s)
-        if truncated:
-            logger.info("Layer 1: truncated %d tool result(s)", truncated)
+        mw = self.middleware_runner
+        event = None
+        if mw:
+            ctx = MiddlewareContext(session_id=session_id)
+            event = CompactionEvent(context=ctx, message_count=len(history))
+            before = await mw.run_before(event)
+            if before.blocked:
+                logger.info("Compaction blocked by middleware: %s", before.reason)
+                return history
 
-        history = prune_context_messages(history, s)
-        history = await compact_history(history, self.llm, s)
+        compacted_history, compacted_lc = await self.compaction_controller.compact_session_history(
+            history=history,
+            original_lc=original_lc,
+            llm=self.llm,
+        )
+        self._sessions[session_id] = compacted_lc
 
-        # Rebuild LC messages, reusing originals for the kept tail to
-        # preserve provider metadata (Gemini thought signatures, etc.).
-        # The compacted history starts with a [compaction] summary system
-        # message, followed by the kept tail from the original history.
-        lc_result: List[BaseMessage] = []
-        original_len = len(original_lc)
-        kept_tail_len = 0
-        for msg in history:
-            if msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX):
-                lc_result.append(self._to_lc_message(msg))
-            else:
-                kept_tail_len += 1
+        if mw and event:
+            event.compacted_count = len(compacted_history)
+            await mw.run_after(event)
 
-        # The kept tail is the last N messages from the original LC history.
-        if kept_tail_len > 0 and kept_tail_len <= original_len:
-            lc_result.extend(original_lc[original_len - kept_tail_len :])
-        else:
-            # Fallback: convert all non-summary messages
-            for msg in history:
-                if not (
-                    msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX)
-                ):
-                    lc_result.append(self._to_lc_message(msg))
-
-        self._lc_sessions[session_id] = lc_result
-        return history
+        return compacted_history
 
     async def _try_overflow_recovery(
         self,
         session_id: str,
         overflow_retries: int,
         truncation_attempted: bool = False,
-    ) -> Tuple[List[Message], int, bool, bool]:
+    ) -> Tuple[List[BaseMessage], int, bool, bool]:
         """Attempt to recover from context overflow.
 
         Strategy (follows OpenClaw pattern):
@@ -1084,7 +603,7 @@ class AgentService:
                 already been tried.
 
         Returns:
-            Tuple[List[Message], int, bool, bool]: A tuple of
+            Tuple[List[BaseMessage], int, bool, bool]: A tuple of
                 (recovered_history, updated_overflow_retries, succeeded,
                 truncation_attempted).
         """
@@ -1094,7 +613,7 @@ class AgentService:
                 overflow_retries + 1,
                 settings.MAX_OVERFLOW_RETRIES,
             )
-            before_tokens = estimate_messages_tokens(
+            before_tokens = self.compaction_controller.estimate_messages_tokens(
                 self.get_history(session_id),
             )
             try:
@@ -1109,7 +628,7 @@ class AgentService:
                         truncation_attempted,
                     )
                 raise
-            after_tokens = estimate_messages_tokens(history)
+            after_tokens = self.compaction_controller.estimate_messages_tokens(history)
             if after_tokens >= before_tokens:
                 logger.warning(
                     "Compaction did not reduce size (%d → %d tokens), "
@@ -1131,20 +650,8 @@ class AgentService:
 
         history = self.get_history(session_id)
         # 1/4 of normal thresholds to truncate further than Layer 1
-        aggressive_settings = replace(
-            self.compaction_settings,
-            max_tool_result_context_share=self.compaction_settings.max_tool_result_context_share
-            / 4,
-            hard_max_tool_result_chars=min(
-                self.compaction_settings.hard_max_tool_result_chars // 4,
-                50_000,
-            ),
-        )
-        history, truncated = truncate_oversized_tool_results(
-            history,
-            aggressive_settings,
-        )
-        self._lc_sessions[session_id] = [self._to_lc_message(m) for m in history]
+        history, truncated = self.compaction_controller.truncate_aggressive(history)
+        self._sessions[session_id] = history
         truncation_attempted = True
         if truncated:
             logger.info(
@@ -1159,7 +666,7 @@ class AgentService:
     async def _maybe_proactive_compact(
         self,
         session_id: str,
-        new_messages: List[Message],
+        new_messages: List[BaseMessage],
     ) -> None:
         """Compact the session proactively if context usage ratio is high.
 
@@ -1171,30 +678,34 @@ class AgentService:
             session_id (str): The session to check.
             new_messages (List[Message]): Pending messages for the next call.
         """
-        ctx_tokens = self.compaction_settings.context_window_tokens
+        compaction_settings = self.compaction_controller.settings
+        ctx_tokens = compaction_settings.context_window_tokens
         last_tokens = self._get_last_input_tokens(session_id)
         if last_tokens is not None:
             ratio = last_tokens / ctx_tokens if ctx_tokens > 0 else 0.0
         else:
             session_history = self.get_history(session_id)
-            est_tokens = estimate_messages_tokens(session_history + new_messages)
+            est_tokens = self.compaction_controller.estimate_messages_tokens(
+                session_history + new_messages
+            )
             ratio = est_tokens / ctx_tokens if ctx_tokens > 0 else 0.0
-        if ratio >= self.compaction_settings.proactive_pruning_ratio:
+        if ratio >= compaction_settings.proactive_pruning_ratio:
             logger.info(
                 "Proactive pruning triggered (ratio %.2f >= %.2f)",
                 ratio,
-                self.compaction_settings.proactive_pruning_ratio,
+                compaction_settings.proactive_pruning_ratio,
             )
             await self._compact_session(session_id)
 
     async def _invoke_with_recovery(
         self,
-        new_messages: List[Message],
+        new_messages: List[BaseMessage],
         session_id: str,
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        skills_prompt: Optional[str] = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -1223,7 +734,7 @@ class AgentService:
             Exception: Re-raised if the error is not a context overflow or
                 recovery is exhausted.
         """
-        ctx_tokens = self.compaction_settings.context_window_tokens
+        ctx_tokens = self.compaction_controller.settings.context_window_tokens
         if ctx_tokens < settings.CONTEXT_WINDOW_HARD_MIN_TOKENS:
             raise ValueError(
                 f"Context window too small: {ctx_tokens} tokens "
@@ -1235,8 +746,9 @@ class AgentService:
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
             state_prompts=state_prompts,
+            skills_prompt=skills_prompt,
         )
-        lc_new_messages = [self._to_lc_message(msg) for msg in new_messages]
+        lc_new_messages = list(new_messages)
         overflow_retries = 0
         truncation_attempted = False
         proactive_done = False
@@ -1250,10 +762,10 @@ class AgentService:
                 proactive_done = True
 
             self._ensure_lc_session(session_id)
-            lc_messages = [SystemMessage(content=prompt)]
-            lc_messages.extend(self._lc_sessions.get(session_id, []))
+            lc_messages = [LCSystemMessage(content=prompt)]
+            lc_messages.extend(self._sessions.get(session_id, []))
             lc_messages.extend(lc_new_messages)
-            lc_messages = _strip_tool_call_narration(lc_messages)
+            lc_messages = self._normalize.strip_tool_call_narration(lc_messages)
             try:
                 self._log_pre_llm_history(
                     stage="primary",
@@ -1315,7 +827,7 @@ class AgentService:
                 # Fallback 2: strip tool messages from history to avoid
                 # Gemini "Thought signature" issues caused by replaying
                 # AIMessage(tool_calls) + ToolMessage sequences.
-                clean, changed = _strip_tool_messages(lc_messages)
+                clean, changed = self._normalize.strip_tool_messages(lc_messages)
                 if changed:
                     logger.warning("Retrying with tool messages stripped from history")
                     try:
@@ -1351,10 +863,10 @@ class AgentService:
 
                 raise
 
-    def _append_to_history(
+    def append_to_history(
         self,
         session_id: str,
-        messages: List[Message],
+        messages: List[BaseMessage],
         response_text: str,
         usage: Optional[Dict[str, Any]] = None,
         assistant_lc_message: Optional[BaseMessage] = None,
@@ -1363,18 +875,17 @@ class AgentService:
 
         Args:
             session_id (str): The target session.
-            messages (List[Message]): User/tool messages to append.
+            messages (List[BaseMessage]): User/tool messages to append.
             response_text (str): The assistant's text response to append.
             usage (Optional[Dict[str, Any]]): Token usage for this LLM call.
         """
         self._ensure_lc_session(session_id)
-        lc_history = self._lc_sessions[session_id]
-        lc_history.extend(self._to_lc_message(msg) for msg in messages)
+        lc_history = self._sessions[session_id]
+        lc_history.extend(messages)
         if assistant_lc_message is not None:
             lc_history.append(assistant_lc_message)
             return
-        usage_metadata = usage or None
-        usage_metadata = _normalize_usage_metadata(usage)
+        usage_metadata = self._normalize.normalize_usage_metadata(usage)
         lc_history.append(
             AIMessage(
                 content=response_text,
@@ -1382,18 +893,19 @@ class AgentService:
             )
         )
 
-    def get_history(self, session_id: str) -> List[Message]:
-        """Return app-level view of session history (empty list if not found)."""
-        return [self._to_app_message(m) for m in self._lc_sessions.get(session_id, [])]
+    def get_history(self, session_id: str) -> List[BaseMessage]:
+        """Return session history (empty list if not found)."""
+        return list(self._sessions.get(session_id, []))
 
     async def append_tool_interaction(
         self,
         session_id: str,
-        messages: List[Message],
+        messages: List[BaseMessage],
         tool_calls: List[Dict[str, Any]],
-        tool_results: List[Message],
+        tool_results: List[BaseMessage],
         usage: Optional[Dict[str, Any]] = None,
         assistant_lc_message: Optional[BaseMessage] = None,
+        snapshot_tools: Optional[frozenset] = None,
     ) -> None:
         """Persist user messages + assistant tool calls + tool results to history.
 
@@ -1407,32 +919,43 @@ class AgentService:
 
         Args:
             session_id (str): The target session.
-            messages (List[Message]): User messages preceding the tool calls.
+            messages (List[BaseMessage]): User messages preceding the tool calls.
             tool_calls (List[Dict[str, Any]]): Tool call dicts from the LLM
                 response (each with ``name``, ``args``, ``id``).
-            tool_results (List[Message]): Tool result messages to append.
+            tool_results (List[BaseMessage]): Tool result messages to append.
             usage (Optional[Dict[str, Any]]): Token usage for this LLM call.
             assistant_lc_message (Optional[BaseMessage]): The original LLM
                 AIMessage.  When provided, stored as-is to preserve provider
                 metadata (e.g. Gemini thought signatures).
+            snapshot_tools: Dynamic set of tool names whose output is
+                subject to stale-snapshot invalidation (from client
+                ``tool_meta.snapshot``).
         """
+        _page_tools: frozenset = snapshot_tools or frozenset()
+
         async with self._get_session_lock(session_id):
             self._ensure_lc_session(session_id)
-            lc_history = self._lc_sessions[session_id]
+            lc_history = self._sessions[session_id]
             # Prevent eviction during long-running agentic loops
-            self._session_last_access[session_id] = time.time()
+            self.message_controller.session_state_controller.last_access[session_id] = time.time()
 
             # Check if any new tool result contains a fresh page snapshot.
             has_new_page = any(
-                _is_browser_page_content(tr.content)
+                self._normalize.is_snapshot_content(self._normalize.extract_lc_text(tr.content))
                 for tr in tool_results
-                if tr.tool_name in _BROWSER_PAGE_TOOLS or _is_browser_page_content(tr.content)
+                if isinstance(tr, ToolMessage)
+                and (
+                    (tr.name or "") in _page_tools
+                    or self._normalize.is_snapshot_content(
+                        self._normalize.extract_lc_text(tr.content)
+                    )
+                )
             )
 
-            lc_history.extend(self._to_lc_message(msg) for msg in messages)
+            lc_history.extend(messages)
             if assistant_lc_message is not None:
                 lc_history.append(assistant_lc_message)
-                lc_history.extend(self._to_lc_message(msg) for msg in tool_results)
+                lc_history.extend(tool_results)
             else:
                 # Synthetic fallback: when the original AIMessage is not
                 # available (e.g. chain follow-ups), store tool interactions
@@ -1443,24 +966,27 @@ class AgentService:
                         content="",
                         additional_kwargs={
                             "synthetic_tool_calls": tool_calls,
-                            "synthetic_usage": _normalize_usage_metadata(usage),
+                            "synthetic_usage": self._normalize.normalize_usage_metadata(usage),
                         },
                     )
                 )
                 for tr in tool_results:
-                    lc_history.append(
-                        ToolMessage(
-                            content=tr.content,
-                            tool_call_id=tr.tool_call_id or "synthetic",
+                    if isinstance(tr, ToolMessage):
+                        lc_history.append(tr)
+                    else:
+                        lc_history.append(
+                            ToolMessage(
+                                content=self._normalize.extract_lc_text(tr.content),
+                                tool_call_id=getattr(tr, "tool_call_id", "synthetic"),
+                            )
                         )
-                    )
 
-            # Invalidate stale browser page snapshots now that the new
+            # Invalidate stale page snapshots now that the new
             # results (including the latest page) are in history.
             if has_new_page:
-                n = _invalidate_stale_browser_results(lc_history)
+                n = self._normalize.invalidate_stale_snapshots(lc_history)
                 if n:
-                    logger.info("Invalidated %d stale browser page snapshot(s)", n)
+                    logger.info("Invalidated %d stale page snapshot(s)", n)
 
     def replace_tool_result(
         self,
@@ -1473,7 +999,7 @@ class AgentService:
         matched = False
 
         self._ensure_lc_session(session_id)
-        lc_history = self._lc_sessions.get(session_id, [])
+        lc_history = self._sessions.get(session_id, [])
         for i, h in enumerate(lc_history):
             if isinstance(h, ToolMessage) and getattr(h, "tool_call_id", None) == tool_call_id:
                 lc_history[i] = ToolMessage(content=output, tool_call_id=tool_call_id)
@@ -1483,7 +1009,7 @@ class AgentService:
 
     async def process_messages(
         self,
-        messages: List[Message],
+        messages: List[BaseMessage],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
     ) -> AgentResponse:
@@ -1512,26 +1038,31 @@ class AgentService:
                 session_id,
                 instructions=instructions,
             )
-            response_text = self._extract_text(response.content)
-            usage = self._extract_usage(response)
-            self._append_to_history(
+            normalized = self._normalize.normalize_llm_response(response)
+            self.append_to_history(
                 session_id,
                 messages,
-                response_text,
-                usage=usage.model_dump(),
-                assistant_lc_message=response,
+                normalized.text,
+                usage=normalized.usage.model_dump(),
+                assistant_lc_message=normalized.raw_message,
             )
 
-        return AgentResponse(message=response_text, session_id=session_id, usage=usage)
+        return AgentResponse(
+            message=normalized.text,
+            session_id=session_id,
+            usage=normalized.usage,
+            reasoning=normalized.reasoning or None,
+        )
 
     async def process_messages_with_tools(
         self,
-        messages: List[Message],
+        messages: List[BaseMessage],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        skills_prompt: Optional[str] = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1562,46 +1093,48 @@ class AgentService:
                 client_tool_schemas=client_tool_schemas,
                 client_tool_prompts=client_tool_prompts,
                 state_prompts=state_prompts,
+                skills_prompt=skills_prompt,
             )
 
-            usage = self._extract_usage(response)
+            normalized = self._normalize.normalize_llm_response(response)
 
-            if response.tool_calls:
+            if normalized.tool_calls:
                 return LLMResult(
                     type=LLMResultType.TOOL_CALL,
                     tool_calls=[
                         ToolCallInfo(name=tc["name"], args=tc["args"], id=tc["id"])
-                        for tc in response.tool_calls
+                        for tc in normalized.tool_calls
                     ],
-                    assistant_lc_message=response,
+                    assistant_lc_message=normalized.raw_message,
                     session_id=session_id,
-                    usage=usage,
+                    usage=normalized.usage,
                 )
 
-            response_text = self._extract_text(response.content)
-            self._append_to_history(
+            self.append_to_history(
                 session_id,
                 messages,
-                response_text,
-                usage=usage.model_dump(),
-                assistant_lc_message=response,
+                normalized.text,
+                usage=normalized.usage.model_dump(),
+                assistant_lc_message=normalized.raw_message,
             )
 
             return LLMResult(
                 type=LLMResultType.TEXT,
-                text=response_text,
+                text=normalized.text,
                 session_id=session_id,
-                usage=usage,
+                usage=normalized.usage,
+                reasoning=normalized.reasoning or None,
             )
 
     async def stream_messages_with_tools(
         self,
-        messages: List[Message],
+        messages: List[BaseMessage],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
         state_prompts: Optional[List[str]] = None,
+        skills_prompt: Optional[str] = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1629,8 +1162,9 @@ class AgentService:
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
             state_prompts=state_prompts,
+            skills_prompt=skills_prompt,
         )
-        lc_new = [self._to_lc_message(msg) for msg in messages]
+        lc_new = list(messages)
         overflow_retries = 0
         truncation_attempted = False
 
@@ -1638,10 +1172,10 @@ class AgentService:
 
         while True:
             self._ensure_lc_session(session_id)
-            lc_messages = [SystemMessage(content=prompt)]
-            lc_messages.extend(self._lc_sessions.get(session_id, []))
+            lc_messages = [LCSystemMessage(content=prompt)]
+            lc_messages.extend(self._sessions.get(session_id, []))
             lc_messages.extend(lc_new)
-            lc_messages = _strip_tool_call_narration(lc_messages)
+            lc_messages = self._normalize.strip_tool_call_narration(lc_messages)
 
             try:
                 self._log_pre_llm_history(
@@ -1666,101 +1200,3 @@ class AgentService:
                     if recovered:
                         continue
                 raise
-
-
-# ---------------------------------------------------------------------------
-# LLM-as-judge response quality evaluation
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class JudgeResult:
-    """Result of the LLM-as-judge evaluation."""
-
-    passed: bool
-    guidance: Optional[str] = None
-
-
-def build_tool_context(output_items: list, limit: int = 10) -> str:
-    """Build a tool execution summary string from output_items.
-
-    Pairs FunctionToolCall with FunctionToolResult to show tool name,
-    arguments summary, and success/failure status.
-    """
-    call_info: dict[str, tuple[str, str]] = {}
-    result_info: dict[str, str] = {}
-
-    for item in output_items:
-        if isinstance(item, FunctionToolCall) and item.call_id:
-            args_str = (
-                item.arguments if isinstance(item.arguments, str) else json.dumps(item.arguments)
-            )
-            if len(args_str) > 80:
-                args_str = args_str[:77] + "..."
-            call_info[item.call_id] = (item.name, args_str)
-        elif isinstance(item, FunctionToolResult) and item.call_id:
-            result_info[item.call_id] = item.output or ""
-
-    if not call_info:
-        return "(no tools used)"
-
-    lines = ["Tools used:"]
-    entries = list(call_info.items())[-limit:]
-    for i, (call_id, (name, args_summary)) in enumerate(entries, 1):
-        output = result_info.get(call_id, "")
-        failed = (
-            "Error executing tool '" in output
-            or "[EMPTY_RESULT]" in output
-            or output.startswith("Error:")
-        )
-        status = "FAILED: " + output[:100] if failed else "ok"
-        lines.append(f"{i}. {name}({args_summary}) -> {status}")
-
-    return "\n".join(lines)
-
-
-async def judge_response(
-    llm,
-    user_query: str,
-    response_text: str,
-    tool_context: str,
-) -> JudgeResult:
-    """Evaluate response quality using LLM-as-judge."""
-    prompt_text = JUDGE_USER_TEMPLATE.format(
-        user_query=user_query,
-        tool_context=tool_context,
-        response_text=response_text,
-    )
-
-    messages = [
-        SystemMessage(content=JUDGE_SYSTEM_PROMPT),
-        HumanMessage(content=prompt_text),
-    ]
-
-    try:
-        response = await llm.ainvoke(messages)
-        return _parse_judge_response(response)
-    except Exception:
-        logger.warning("Judge LLM call failed, passing by default", exc_info=True)
-        return JudgeResult(passed=True)
-
-
-def _parse_judge_response(response) -> JudgeResult:
-    """Parse the judge LLM response into a JudgeResult.
-
-    Falls back to passed=True on any parse error (safe default).
-    """
-    content = response.content if hasattr(response, "content") else str(response)
-    if not content or not content.strip():
-        return JudgeResult(passed=True)
-
-    try:
-        data = json.loads(content.strip())
-        passed = bool(data.get("pass", True))
-        guidance = data.get("guidance")
-        if guidance and isinstance(guidance, str) and guidance.lower() == "null":
-            guidance = None
-        return JudgeResult(passed=passed, guidance=guidance)
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        logger.warning("Judge response parse failed, passing by default: %s", content[:200])
-        return JudgeResult(passed=True)

@@ -8,7 +8,6 @@ import pytest
 from src.common.session_context import (
     SessionContext,
     extract_session_context,
-    get_platform_client,
 )
 
 # ---------------------------------------------------------------------------
@@ -66,30 +65,3 @@ class TestExtractSessionContext:
         sc = SessionContext(session_id="a", platform_api_url="http://x")
         with pytest.raises(AttributeError):
             sc.session_id = "b"
-
-
-# ---------------------------------------------------------------------------
-# get_platform_client
-# ---------------------------------------------------------------------------
-
-
-class TestGetPlatformClient:
-    """Tests for get_platform_client()."""
-
-    def test_returns_platform_file_client(self):
-        sc = SessionContext(session_id="sess_abc", platform_api_url="http://localhost:8001")
-        client = get_platform_client(sc)
-
-        from src.tools.filesystem.platform_ops import PlatformFileClient
-
-        assert isinstance(client, PlatformFileClient)
-        assert client._session_id == "sess_abc"
-        assert "localhost:8001" in client._platform_api_url
-
-    def test_shares_http_client_across_calls(self):
-        sc1 = SessionContext(session_id="s1", platform_api_url="http://localhost:8001")
-        sc2 = SessionContext(session_id="s2", platform_api_url="http://localhost:8001")
-        c1 = get_platform_client(sc1)
-        c2 = get_platform_client(sc2)
-        # Both should share the same httpx.AsyncClient
-        assert c1._http is c2._http

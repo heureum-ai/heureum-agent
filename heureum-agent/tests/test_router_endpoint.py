@@ -6,12 +6,16 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import app.routers.agent as exp_module
+import app.services.agent_loop as agent_loop_pkg
 import pytest
 from app.config import ApprovalChoice
 from app.main import app
 from app.models import LLMResult, LLMResultType, ToolCallInfo
 from app.schemas.open_responses import Usage
-from app.services.providers.mcp import MCPClient
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from app.services.mcps import MCPClientController
+from app.services.mcps.approval import ApprovalState
+from app.services.messages import MessageController
 from httpx import ASGITransport, AsyncClient
 
 # ---------------------------------------------------------------------------
@@ -24,51 +28,66 @@ ENDPOINT = "/api/v1/agent/responses"
 
 @pytest.fixture(autouse=True)
 def _patch_module(monkeypatch):
-    """Patch module-level singletons so no real LLM / MCP calls are made."""
+    """Patch controller instance attributes so no real LLM / MCP calls are made."""
+    ctrl = agent_loop_pkg._default
+
     # Skip MCP initialization
-    monkeypatch.setattr(exp_module, "_initialized", True)
+    monkeypatch.setattr(ctrl, "_initialized", True)
 
     # Mock agent_service
     mock_svc = AsyncMock()
     mock_svc.get_history = MagicMock(return_value=[])
+    mc = MessageController()
+    mock_svc.message_controller = mc
+    # Expose facade shortcuts so router code works with the mock
+    mock_svc.responses = mc.response_message_controller
+    mock_svc.history = mc.history_message_controller
+    mock_svc._normalize = mc.message_normalize_controller
+    mock_svc.extract_lc_text = mc.message_normalize_controller.extract_lc_text
+    mock_svc._sessions = mc.session_state_controller.sessions
+    monkeypatch.setattr(ctrl, "agent_service", mock_svc)
+    monkeypatch.setattr(ctrl.tool_exec, "agent_service", mock_svc)
     monkeypatch.setattr(exp_module, "agent_service", mock_svc)
 
-    # Mock chain_registry (no-op: no chain rules registered)
-    from app.services.providers.tool import ToolChainRegistry
+    # Mock tool_controller (no-op: no chain rules registered)
+    from app.services.tools import ToolController
 
-    mock_chain_registry = ToolChainRegistry()
-    monkeypatch.setattr(exp_module, "chain_registry", mock_chain_registry)
+    mock_tool_controller = ToolController()
+    monkeypatch.setattr(ctrl, "tool_controller", mock_tool_controller)
+    monkeypatch.setattr(ctrl.tool_exec, "tool_controller", mock_tool_controller)
 
-    # Mock mcp_client — use real MCPClient logic for approval methods
+    # Mock mcp_client — use real MCPClientController logic for approval methods
     mock_mcp = AsyncMock()
     mock_mcp.is_server_tool = MagicMock(return_value=False)
-    mock_mcp._pending_tool_calls = {}
-    mock_mcp._auto_approved_tools = {}
-    mock_mcp._approval_required_tools = {"web_search", "web_fetch"}
     mock_mcp.display_names = {}
-    _real = MCPClient.__new__(MCPClient)
-    _real._pending_tool_calls = mock_mcp._pending_tool_calls
-    _real._auto_approved_tools = mock_mcp._auto_approved_tools
-    _real._approval_required_tools = mock_mcp._approval_required_tools
-    _real._display_names = {}
+    _real = MCPClientController.__new__(MCPClientController)
+    _real._approval = ApprovalState(
+        approval_required_tools={"web_search", "web_fetch"},
+        display_names={"web_search": "Web Search", "web_fetch": "Web Fetch"},
+    )
+    mock_mcp._approval_required_tools = _real._approval.approval_required_tools
+    mock_mcp._approval = _real._approval
     mock_mcp.classify_tool_calls = _real.classify_tool_calls
     mock_mcp.needs_approval = _real.needs_approval
     mock_mcp.handle_approval_response = _real.handle_approval_response
     mock_mcp.request_approval = _real.request_approval
     mock_mcp.clear_session_state = _real.clear_session_state
+    mock_mcp.has_pending_approval = _real.has_pending_approval
+    monkeypatch.setattr(ctrl, "mcp_client", mock_mcp)
+    monkeypatch.setattr(ctrl.tool_exec, "mcp_client", mock_mcp)
     monkeypatch.setattr(exp_module, "mcp_client", mock_mcp)
 
 
 @pytest.fixture
 def mock_svc():
     """Return the currently patched agent_service singleton."""
-    return exp_module.agent_service
+    return agent_loop_pkg._default.agent_service
 
 
 @pytest.fixture
 def mock_mcp():
     """Return the currently patched mcp_client singleton."""
-    return exp_module.mcp_client
+    return agent_loop_pkg._default.mcp_client
 
 
 @pytest.fixture
@@ -103,6 +122,7 @@ def _tool_payload(
                     "description": "Ask the user a question",
                     "parameters": {"type": "object", "properties": {}},
                 },
+                "display_name": "Ask Question",
             }
         ]
     body: dict = {"input": text, "tools": tools, **kwargs}
@@ -193,6 +213,7 @@ class TestCreateResponseToolCall:
         """A server (MCP) tool is executed via mcp_client and the final text is returned."""
         # MCP tools are NOT in request.tools — they are discovered server-side
         mock_mcp.server_tool_names = ["calculator"]
+        mock_mcp.display_names = {"calculator": "Calculator"}
         # First call: LLM wants to invoke a server tool
         # Second call: LLM produces the final text answer
         mock_svc.process_messages_with_tools.side_effect = [
@@ -231,6 +252,7 @@ class TestCreateResponseToolCall:
         """Server tool call + result pairs appear as adjacent output items."""
         # MCP tools are NOT in request.tools
         mock_mcp.server_tool_names = ["calculator"]
+        mock_mcp.display_names = {"calculator": "Calculator"}
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
                 type=LLMResultType.TOOL_CALL,
@@ -268,7 +290,7 @@ class TestErrorHandling:
     """Tests for error paths in the endpoint."""
 
     async def test_not_implemented_tool(self, client, mock_svc, mock_mcp):
-        """A tool with no executor returns status=failed, error type=server_error with code."""
+        """Unknown server tools are surfaced as tool-call continuation context."""
         # unknown_tool is NOT a client tool (not in request.tools) — classified as server call
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
@@ -284,9 +306,7 @@ class TestErrorHandling:
         resp = await client.post(ENDPOINT, json=_tool_payload("run it", tools=[]))
         assert resp.status_code == 200
         data = resp.json()
-        assert data["status"] == "failed"
-        assert data["error"]["type"] == "server_error"
-        assert data["error"]["code"] == "tool_not_implemented"
+        assert data["status"] == "incomplete"
 
     async def test_server_error(self, client, mock_svc):
         """A general exception returns status=failed, error type=server_error."""
@@ -373,6 +393,7 @@ WEB_SEARCH_TOOLS = [
             "description": "Search the web",
             "parameters": {"type": "object", "properties": {}},
         },
+        "display_name": "Web Search",
     }
 ]
 
@@ -383,16 +404,17 @@ class TestToolApproval:
     @pytest.fixture(autouse=True)
     def _clear_approval_state(self, mock_mcp):
         """Reset mcp_client approval state between tests."""
-        mock_mcp._pending_tool_calls.clear()
-        mock_mcp._auto_approved_tools.clear()
+        mock_mcp._approval.pending_tool_calls.clear()
+        mock_mcp._approval.auto_approved_tools.clear()
         yield
-        mock_mcp._pending_tool_calls.clear()
-        mock_mcp._auto_approved_tools.clear()
+        mock_mcp._approval.pending_tool_calls.clear()
+        mock_mcp._approval.auto_approved_tools.clear()
 
     async def test_approval_tool_returns_tool_approval(self, client, mock_svc, mock_mcp):
         """web_search triggers a tool_approval instead of executing."""
         # web_search is an MCP server tool, not in request.tools
         mock_mcp.server_tool_names = ["web_search"]
+        mock_mcp.display_names = {"web_search": "Web Search"}
         mock_svc.process_messages_with_tools.return_value = LLMResult(
             type=LLMResultType.TOOL_CALL,
             tool_calls=[
@@ -424,12 +446,12 @@ class TestToolApproval:
         mock_mcp.call_tool.assert_not_called()
 
         # Pending state was saved
-        assert "s1" in mock_mcp._pending_tool_calls
+        assert "s1" in mock_mcp._approval.pending_tool_calls
 
     async def test_approval_allow_once_executes_tool(self, client, mock_svc, mock_mcp):
         """After 'Allow Once', the pending tool is executed and the loop continues."""
         # Seed pending state (simulates a previous ask_question return)
-        mock_mcp._pending_tool_calls["s1"] = {
+        mock_mcp._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_q_1",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "test"}, id="call_ws")],
             "usage": Usage.zero(),
@@ -456,6 +478,7 @@ class TestToolApproval:
                         "name": "ask_question",
                         "call_id": "ask_q_1",
                         "arguments": "{}",
+                        "display_name": "Ask Question",
                     },
                     {
                         "type": "function_call_output",
@@ -470,17 +493,15 @@ class TestToolApproval:
         data = resp.json()
 
         assert data["status"] == "completed"
-        mock_mcp.call_tool.assert_called_once_with(
-            "web_search", {"query": "test"}, session_id="s1", cwd=""
-        )
+        mock_mcp.call_tool.assert_called_once_with("web_search", {"query": "test"}, session_id="s1")
         # Pending state was cleaned up
-        assert "s1" not in mock_mcp._pending_tool_calls
+        assert "s1" not in mock_mcp._approval.pending_tool_calls
         # NOT auto-approved for future calls
-        assert "s1" not in mock_mcp._auto_approved_tools
+        assert "s1" not in mock_mcp._approval.auto_approved_tools
 
     async def test_approval_always_allow_auto_approves_future(self, client, mock_svc, mock_mcp):
         """'Always Allow' approves and remembers the tool for future calls."""
-        mock_mcp._pending_tool_calls["s1"] = {
+        mock_mcp._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_q_2",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "q"}, id="call_ws2")],
             "usage": Usage.zero(),
@@ -504,6 +525,7 @@ class TestToolApproval:
                         "name": "ask_question",
                         "call_id": "ask_q_2",
                         "arguments": "{}",
+                        "display_name": "Ask Question",
                     },
                     {
                         "type": "function_call_output",
@@ -516,11 +538,11 @@ class TestToolApproval:
             },
         )
         assert resp.json()["status"] == "completed"
-        assert "web_search" in mock_mcp._auto_approved_tools.get("s1", set())
+        assert "web_search" in mock_mcp._approval.auto_approved_tools.get("s1", set())
 
     async def test_approval_deny_sends_denial_to_llm(self, client, mock_svc, mock_mcp):
         """'Deny' injects a permission-denied tool result."""
-        mock_mcp._pending_tool_calls["s1"] = {
+        mock_mcp._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_q_3",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "q"}, id="call_ws3")],
             "usage": Usage.zero(),
@@ -542,6 +564,7 @@ class TestToolApproval:
                         "name": "ask_question",
                         "call_id": "ask_q_3",
                         "arguments": "{}",
+                        "display_name": "Ask Question",
                     },
                     {
                         "type": "function_call_output",
@@ -564,8 +587,9 @@ class TestToolApproval:
 
     async def test_auto_approved_tool_skips_approval(self, client, mock_svc, mock_mcp):
         """A tool in _auto_approved_tools is executed without asking."""
-        mock_mcp._auto_approved_tools["s1"] = {"web_search"}
+        mock_mcp._approval.auto_approved_tools["s1"] = {"web_search"}
         mock_mcp.server_tool_names = ["web_search"]
+        mock_mcp.display_names = {"web_search": "Web Search"}
 
         mock_svc.process_messages_with_tools.side_effect = [
             LLMResult(
@@ -595,7 +619,7 @@ class TestToolApproval:
         assert data["status"] == "completed"
         mock_mcp.call_tool.assert_called_once()
         # No pending state was created
-        assert "s1" not in mock_mcp._pending_tool_calls
+        assert "s1" not in mock_mcp._approval.pending_tool_calls
 
 
 # ---------------------------------------------------------------------------
@@ -610,14 +634,10 @@ class TestClientToolContinuation:
         """When client sends tool results + original messages, only tool
         results are applied to history and no duplicate messages are passed
         to the LLM."""
-        from app.models import Message
-        from app.schemas.open_responses import MessageRole
-
         # Simulate existing session history with placeholder ToolMessage
         existing_history = [
-            Message(role=MessageRole.USER, content="Open coupang"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="Open coupang"),
+            AIMessage(
                 content="",
                 tool_calls=[
                     {
@@ -627,11 +647,10 @@ class TestClientToolContinuation:
                     },
                 ],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content='{"url":"https://coupang.com"}',
+            ToolMessage(
                 tool_call_id="call_1",
-                tool_name="browser_new_tab",
+                content='{"url":"https://coupang.com"}',
+                name="browser_new_tab",
             ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
@@ -660,6 +679,7 @@ class TestClientToolContinuation:
                         "name": "browser_new_tab",
                         "call_id": "call_1",
                         "arguments": '{"url":"https://coupang.com"}',
+                        "display_name": "New Tab",
                     },
                     {
                         "type": "function_call_output",
@@ -675,6 +695,7 @@ class TestClientToolContinuation:
                             "description": "Ask",
                             "parameters": {"type": "object", "properties": {}},
                         },
+                        "display_name": "Ask Question",
                     }
                 ],
                 "metadata": {"session_id": "s1"},
@@ -696,27 +717,18 @@ class TestClientToolContinuation:
         self, client, mock_svc, mock_mcp
     ):
         """When a client tool fails, the LLM should see the error and respond."""
-        from app.models import Message
-        from app.schemas.open_responses import MessageRole
-
         existing_history = [
-            Message(role=MessageRole.USER, content="Click the button"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="Click the button"),
+            AIMessage(
                 content="",
                 tool_calls=[
-                    {
-                        "name": "browser_click",
-                        "args": {"selector": "#btn"},
-                        "id": "call_c1",
-                    },
+                    {"name": "browser_click", "args": {"selector": "#btn"}, "id": "call_c1"},
                 ],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content='{"selector":"#btn"}',
+            ToolMessage(
                 tool_call_id="call_c1",
-                tool_name="browser_click",
+                content='{"selector":"#btn"}',
+                name="browser_click",
             ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
@@ -743,6 +755,7 @@ class TestClientToolContinuation:
                         "name": "browser_click",
                         "call_id": "call_c1",
                         "arguments": '{"selector":"#btn"}',
+                        "display_name": "Click",
                     },
                     {
                         "type": "function_call_output",
@@ -758,6 +771,7 @@ class TestClientToolContinuation:
                             "description": "Ask",
                             "parameters": {"type": "object", "properties": {}},
                         },
+                        "display_name": "Ask Question",
                     }
                 ],
                 "metadata": {"session_id": "s1"},
@@ -778,7 +792,6 @@ class TestClientToolContinuation:
         """When session is lost (empty history), echo recovery must produce
         [UserMessage, AIMessage{tool_calls}, ToolMessage] — NOT
         [AIMessage, UserMessage, ToolMessage] which violates the OpenAI API."""
-        from app.schemas.open_responses import MessageRole
 
         # Empty session = echo recovery branch
         mock_svc.get_history = MagicMock(return_value=[])
@@ -805,6 +818,7 @@ class TestClientToolContinuation:
                         "name": "browser_navigate",
                         "call_id": "call_nav1",
                         "arguments": '{"url":"https://coupang.com"}',
+                        "display_name": "Navigate",
                     },
                     {
                         "type": "function_call_output",
@@ -820,6 +834,7 @@ class TestClientToolContinuation:
                             "description": "Ask",
                             "parameters": {"type": "object", "properties": {}},
                         },
+                        "display_name": "Ask Question",
                     }
                 ],
                 "metadata": {"session_id": "s2"},
@@ -832,23 +847,19 @@ class TestClientToolContinuation:
         call_args = mock_svc.process_messages_with_tools.call_args
         messages_arg = call_args.kwargs.get("messages", call_args[0][0] if call_args[0] else None)
         assert len(messages_arg) == 3
-        assert messages_arg[0].role == MessageRole.USER
-        assert messages_arg[1].role == MessageRole.ASSISTANT
+        assert messages_arg[0].type == "human"
+        assert messages_arg[1].type == "ai"
         assert messages_arg[1].tool_calls is not None
-        assert messages_arg[2].role == MessageRole.TOOL
+        assert messages_arg[2].type == "tool"
         assert messages_arg[2].tool_call_id == "call_nav1"
 
     async def test_new_message_not_dropped_when_session_exists(self, client, mock_svc, mock_mcp):
         """When user sends a follow-up message (not continuation), the new
         message must reach the LLM — not be dropped as an 'echo'."""
-        from app.models import Message
-        from app.schemas.open_responses import MessageRole
-
         # Session has history from previous interaction
         existing_history = [
-            Message(role=MessageRole.USER, content="쿠팡 열어줘"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="쿠팡 열어줘"),
+            AIMessage(
                 content="",
                 tool_calls=[
                     {
@@ -858,13 +869,12 @@ class TestClientToolContinuation:
                     },
                 ],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content="Error: extension not connected",
+            ToolMessage(
                 tool_call_id="call_1",
-                tool_name="browser_new_tab",
+                content="Error: extension not connected",
+                name="browser_new_tab",
             ),
-            Message(role=MessageRole.ASSISTANT, content="확장 프로그램을 설치해 주세요."),
+            AIMessage(content="확장 프로그램을 설치해 주세요."),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
 
@@ -912,6 +922,7 @@ class TestClientToolContinuation:
                             "description": "Ask",
                             "parameters": {"type": "object", "properties": {}},
                         },
+                        "display_name": "Ask Question",
                     }
                 ],
                 "metadata": {"session_id": "s1"},
@@ -924,7 +935,7 @@ class TestClientToolContinuation:
         call_args = mock_svc.process_messages_with_tools.call_args
         messages_arg = call_args.kwargs.get("messages", call_args[0][0] if call_args[0] else None)
         assert len(messages_arg) == 1
-        assert messages_arg[0].role == MessageRole.USER
+        assert messages_arg[0].type == "human"
         assert messages_arg[0].content == "연결했어"
 
     async def test_continuation_keeps_tool_path_without_forced_cutoff(
@@ -938,27 +949,18 @@ class TestClientToolContinuation:
         Tool retry decisions are left to the LLM via tool error context,
         and only the overall loop iteration limit should cap the cycle.
         """
-        from app.models import Message
-        from app.schemas.open_responses import MessageRole
-
         existing_history = [
-            Message(role=MessageRole.USER, content="검색해줘"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="검색해줘"),
+            AIMessage(
                 content="",
                 tool_calls=[
-                    {
-                        "name": "browser_click",
-                        "args": {"selector": ".btn"},
-                        "id": "call_r1",
-                    }
+                    {"name": "browser_click", "args": {"selector": ".btn"}, "id": "call_r1"},
                 ],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content='{"selector":".btn"}',
+            ToolMessage(
                 tool_call_id="call_r1",
-                tool_name="browser_click",
+                content='{"selector":".btn"}',
+                name="browser_click",
             ),
         ]
         mock_svc.get_history = MagicMock(return_value=existing_history)
@@ -991,6 +993,7 @@ class TestClientToolContinuation:
                     "name": "browser_click",
                     "call_id": "call_r1",
                     "arguments": '{"selector":".btn"}',
+                    "display_name": "Click",
                 },
                 {
                     "type": "function_call_output",
@@ -1006,6 +1009,7 @@ class TestClientToolContinuation:
                         "description": "Ask",
                         "parameters": {"type": "object", "properties": {}},
                     },
+                    "display_name": "Ask Question",
                 }
             ],
             "metadata": {"session_id": "s1"},

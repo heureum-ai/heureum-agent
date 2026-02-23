@@ -216,7 +216,7 @@ class FunctionToolCall(BaseModel):
     arguments: str
     status: ItemStatus = ItemStatus.COMPLETED
     usage: Optional["Usage"] = None
-    display_name: Optional[str] = None
+    display_name: str
 
 
 class FunctionToolResult(BaseModel):
@@ -253,6 +253,26 @@ class FunctionDefinition(BaseModel):
     parameters: Optional[Dict[str, Any]] = None
 
 
+class ToolMeta(BaseModel):
+    """Optional metadata classifying a tool for server-side behaviour.
+
+    Clients send this alongside each tool definition so that the agent
+    can dynamically classify tools without hard-coding tool names.
+
+    Attributes:
+        snapshot (bool): Tool returns a point-in-time snapshot that
+            becomes stale when newer output arrives (e.g. DOM content).
+        mutating (bool): Tool performs a state-changing action.
+        read_only (bool): Tool is purely observational.
+        poll (bool): Tool is a polling/wait tool (loop detection).
+    """
+
+    snapshot: bool = False
+    mutating: bool = False
+    read_only: bool = False
+    poll: bool = False
+
+
 class ToolDefinition(BaseModel):
     """Definition of a tool the model can use.
 
@@ -266,12 +286,16 @@ class ToolDefinition(BaseModel):
         guide (Optional[str]): System prompt guide text provided by the
             client. Included in the system prompt but excluded from the
             LLM tool schema.
+        tool_meta (Optional[ToolMeta]): Classification metadata for
+            server-side behaviour (stale invalidation, mutation tracking,
+            loop detection).
     """
 
     type: Literal["function"] = "function"
     function: FunctionDefinition
     guide: Optional[str] = None
-    display_name: Optional[str] = None
+    display_name: str
+    tool_meta: Optional[ToolMeta] = None
 
     @model_validator(mode="before")
     @classmethod
@@ -287,6 +311,7 @@ class ToolDefinition(BaseModel):
                 },
                 "guide": values.get("guide"),
                 "display_name": values.get("display_name"),
+                "tool_meta": values.get("tool_meta"),
             }
         return values
 
@@ -321,6 +346,45 @@ InputItem = Union[
 ]
 
 OutputItem = Union[AssistantMessageItem, FunctionToolCall, FunctionToolResult, ReasoningItem]
+
+
+class SkillSnapshotItem(BaseModel):
+    """Single skill entry in the client-provided skill catalog.
+
+    Attributes:
+        name (str): Short skill identifier (e.g. ``coding``, ``docx``).
+        description (str): One-line human-readable description.
+        location (str): Absolute path to the SKILL.md file the model
+            can ``read`` on demand.
+        tools (List[str]): Tool names belonging to this skill.
+    """
+
+    name: str
+    description: str
+    location: str
+    tools: List[str] = Field(default_factory=list)
+
+
+class SkillsSnapshot(BaseModel):
+    """Client-provided skill catalog for the OpenClaw lazy-read pattern.
+
+    Attributes:
+        version (Optional[str]): Cache / change-tracking token.
+        prompt (str): Pre-built ``<available_skills>`` block for the
+            system prompt.
+        skills (List[SkillSnapshotItem]): Individual skill entries.
+    """
+
+    version: Optional[str] = None
+    prompt: str
+    skills: List[SkillSnapshotItem] = Field(default_factory=list)
+
+    @classmethod
+    def extract_prompt(cls, snapshot: Optional["SkillsSnapshot"]) -> Optional[str]:
+        """Extract the skills prompt from a snapshot, or None."""
+        if snapshot and snapshot.prompt:
+            return snapshot.prompt
+        return None
 
 
 class ResponseRequest(BaseModel):
@@ -361,6 +425,9 @@ class ResponseRequest(BaseModel):
     )
     truncation: Optional[Literal["auto", "disabled"]] = Field(
         default=None, description="Context truncation strategy"
+    )
+    skills_snapshot: Optional[SkillsSnapshot] = Field(
+        default=None, description="Client skill catalog"
     )
 
 

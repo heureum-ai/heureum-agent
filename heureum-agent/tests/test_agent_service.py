@@ -8,18 +8,31 @@ import pytest
 
 # TOOL_SCHEMA_MAP removed — use inline schema dicts in tests
 from app.config import settings
-from app.models import LLMResultType, Message
-from app.schemas.open_responses import MessageRole
-from app.services.agent_service import (
-    AgentService,
-    _strip_tool_call_narration,
-    _strip_tool_messages,
-)
+from app.models import LLMResultType
+from app.services.agent_service import AgentService
+from app.services.compaction import CompactionController
 from app.services.compaction.settings import CompactionSettings
 from app.services.error import LLMErrorClassifier
+from app.services.messages import MessageController
 from app.services.prompts.compaction import COMPACTION_PREFIX
-from app.services.providers.skill import SkillProvider
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from app.services.skills import SkillController
+from langchain_core.messages import (
+    AIMessage,
+    HumanMessage,
+    SystemMessage as LCSystemMessage,
+    ToolMessage,
+)
+
+
+message_controller = MessageController()
+strip_tool_call_narration = (
+    message_controller.message_normalize_controller.strip_tool_call_narration
+)
+strip_tool_messages = message_controller.message_normalize_controller.strip_tool_messages
+normalize_content = message_controller.message_normalize_controller.normalize_open_content
+platform_message_to_lc = (
+    message_controller.message_normalize_controller.platform_record_to_lc_message
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -45,10 +58,10 @@ def _mock_tool_call(name="bash", args=None, call_id="call_1"):
 def _create_service(**kwargs) -> AgentService:
     """Instantiate an AgentService with a mocked LLM for unit testing."""
     if "skill_provider" not in kwargs:
-        kwargs["skill_provider"] = SkillProvider()
+        kwargs["skill_provider"] = SkillController()
     mock_llm = AsyncMock()
     mock_llm.bind_tools = MagicMock(return_value=mock_llm)
-    with patch("app.services.agent_service.create_llm", return_value=mock_llm):
+    with patch("app.services.agent_service.LLMController.create_primary", return_value=mock_llm):
         svc = AgentService(**kwargs)
         svc.llm = mock_llm
         return svc
@@ -157,7 +170,6 @@ class TestPreparePromptAndTools:
         assert "manage_todo" in names
         assert "notify_user" in names
         assert "manage_periodic_task" in names
-        assert "sessions_spawn" in names
 
     def test_periodic_task_included_with_web_search(self):
         """When client provides web_search, periodic_task tools are included."""
@@ -272,8 +284,8 @@ class TestPromptReconstruction:
         """Verify the system prompt is always the first message."""
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
-            [Message(role=MessageRole.USER, content="hi")],
-            [Message(role=MessageRole.USER, content="hello")],
+            [HumanMessage(content="hi")],
+            [HumanMessage(content="hello")],
         )
         assert lc_msgs[0].type == "system"
 
@@ -282,7 +294,7 @@ class TestPromptReconstruction:
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
             [],
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
         )
         system_content = lc_msgs[0].content
         # "CRITICAL RULE" may appear via SKILL.md guide (legitimate);
@@ -298,8 +310,8 @@ class TestPromptReconstruction:
         """Verify compaction summary is separated from the fresh system prompt."""
         svc = _create_service()
         history = [
-            Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\nOld summary"),
-            Message(role=MessageRole.USER, content="q"),
+            LCSystemMessage(content=f"{COMPACTION_PREFIX}\nOld summary"),
+            HumanMessage(content="q"),
         ]
         lc_msgs = svc._build_lc_messages(history, [])
 
@@ -312,7 +324,7 @@ class TestPromptReconstruction:
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
             [],
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
             instructions="Be concise.",
         )
         assert "Be concise." in lc_msgs[0].content
@@ -323,7 +335,7 @@ class TestPromptReconstruction:
         svc = _create_service()
         lc_msgs = svc._build_lc_messages(
             [],
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
         )
         assert "<instructions>" not in lc_msgs[0].content
 
@@ -343,10 +355,10 @@ class TestTryOverflowRecovery:
         svc.llm.ainvoke.return_value = MagicMock(content="Summary")
         # Messages must be large enough that compaction actually reduces tokens
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="question one " * 50),
-            Message(role=MessageRole.ASSISTANT, content="answer one " * 50),
-            Message(role=MessageRole.USER, content="question two " * 50),
-            Message(role=MessageRole.ASSISTANT, content="answer two " * 50),
+            HumanMessage(content="question one " * 50),
+            AIMessage(content="answer one " * 50),
+            HumanMessage(content="question two " * 50),
+            AIMessage(content="answer two " * 50),
         ]
         new_history, retries, ok, trunc = await svc._try_overflow_recovery("s1", 0)
         assert ok is True
@@ -358,11 +370,13 @@ class TestTryOverflowRecovery:
     async def test_truncation_fallback(self):
         """After settings.MAX_OVERFLOW_RETRIES, falls back to tool truncation."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(context_window_tokens=500),
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(context_window_tokens=500)
+            ),
         )
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.TOOL, content="x" * 100_000),
+            HumanMessage(content="q"),
+            ToolMessage(tool_call_id="", content="x" * 100_000),
         ]
         new_history, retries, ok, trunc = await svc._try_overflow_recovery(
             "s1",
@@ -378,8 +392,8 @@ class TestTryOverflowRecovery:
         """If compaction exhausted and nothing to truncate, fails."""
         svc = _create_service()
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="small"),
-            Message(role=MessageRole.ASSISTANT, content="small"),
+            HumanMessage(content="small"),
+            AIMessage(content="small"),
         ]
         _, retries, ok, trunc = await svc._try_overflow_recovery(
             "s1",
@@ -403,12 +417,12 @@ class TestCompactSession:
         svc = _create_service()
         svc.llm.ainvoke.return_value = MagicMock(content="Summary")
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(role=MessageRole.ASSISTANT, content="a1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
-            Message(role=MessageRole.USER, content="q3"),
-            Message(role=MessageRole.ASSISTANT, content="a3"),
+            HumanMessage(content="q1"),
+            AIMessage(content="a1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="a2"),
+            HumanMessage(content="q3"),
+            AIMessage(content="a3"),
         ]
         result = await svc._compact_session("s1")
         assert len(result) < 6
@@ -427,13 +441,13 @@ class TestCompactSession:
         svc = _create_service()
         svc.llm.ainvoke.return_value = MagicMock(content="Summary")
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.ASSISTANT, content="a"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
+            HumanMessage(content="q"),
+            AIMessage(content="a"),
+            HumanMessage(content="q2"),
+            AIMessage(content="a2"),
         ]
         await svc._compact_session("s1")
-        assert svc.sessions["s1"][0].role == MessageRole.SYSTEM
+        assert svc.sessions["s1"][0].type == "system"
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +463,7 @@ class TestProcessMessages:
         """Verify a basic user message produces a response with a session ID."""
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("Hi there!")
-        result = await svc.process_messages([Message(role=MessageRole.USER, content="hello")])
+        result = await svc.process_messages([HumanMessage(content="hello")])
         assert result.message == "Hi there!"
         assert result.session_id is not None
 
@@ -458,11 +472,11 @@ class TestProcessMessages:
         """Verify subsequent messages in the same session accumulate history."""
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("r1")
-        r1 = await svc.process_messages([Message(role=MessageRole.USER, content="q1")])
+        r1 = await svc.process_messages([HumanMessage(content="q1")])
 
         svc.llm.ainvoke.return_value = _mock_response("r2")
         await svc.process_messages(
-            [Message(role=MessageRole.USER, content="q2")],
+            [HumanMessage(content="q2")],
             session_id=r1.session_id,
         )
         assert len(svc.sessions[r1.session_id]) == 4  # q1, r1, q2, r2
@@ -473,7 +487,7 @@ class TestProcessMessages:
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("ok")
         await svc.process_messages(
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
             instructions="Answer in English.",
         )
         call_args = svc.llm.ainvoke.call_args[0][0]
@@ -502,11 +516,11 @@ class TestProcessMessages:
 
         svc.llm.ainvoke.side_effect = side_effect
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(role=MessageRole.ASSISTANT, content="a1"),
+            HumanMessage(content="q1"),
+            AIMessage(content="a1"),
         ]
         await svc.process_messages(
-            [Message(role=MessageRole.USER, content="q2")],
+            [HumanMessage(content="q2")],
             session_id="s1",
         )
         # After compaction + response, history should contain new messages
@@ -528,7 +542,7 @@ class TestProcessMessagesWithTools:
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("answer")
         result = await svc.process_messages_with_tools(
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
         )
         assert result.type == LLMResultType.TEXT
         assert result.text == "answer"
@@ -543,7 +557,7 @@ class TestProcessMessagesWithTools:
             call_id="c1",
         )
         result = await svc.process_messages_with_tools(
-            [Message(role=MessageRole.USER, content="list files")],
+            [HumanMessage(content="list files")],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 1
@@ -558,7 +572,7 @@ class TestProcessMessagesWithTools:
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_tool_call()
         result = await svc.process_messages_with_tools(
-            [Message(role=MessageRole.USER, content="run ls")],
+            [HumanMessage(content="run ls")],
         )
         assert len(svc.sessions[result.session_id]) == 0
 
@@ -568,7 +582,7 @@ class TestProcessMessagesWithTools:
         svc = _create_service()
         svc.llm.ainvoke.return_value = _mock_response("done")
         await svc.process_messages_with_tools(
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
             instructions="Be brief.",
         )
         call_args = svc.llm.ainvoke.call_args[0][0]
@@ -598,13 +612,13 @@ class TestOverflowRecovery:
 
         svc.llm.ainvoke.side_effect = side_effect
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(role=MessageRole.ASSISTANT, content="a1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
+            HumanMessage(content="q1"),
+            AIMessage(content="a1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="a2"),
         ]
         result = await svc.process_messages(
-            [Message(role=MessageRole.USER, content="q3")],
+            [HumanMessage(content="q3")],
             session_id="s1",
         )
         assert result.message == "recovered"
@@ -615,7 +629,7 @@ class TestOverflowRecovery:
         svc = _create_service()
         svc.llm.ainvoke.side_effect = Exception("network timeout")
         with pytest.raises(Exception, match="network timeout"):
-            await svc.process_messages([Message(role=MessageRole.USER, content="hi")])
+            await svc.process_messages([HumanMessage(content="hi")])
 
     @pytest.mark.asyncio
     async def test_exhausted_raises(self):
@@ -623,12 +637,12 @@ class TestOverflowRecovery:
         svc = _create_service()
         svc.llm.ainvoke.side_effect = Exception("maximum context length exceeded")
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.ASSISTANT, content="a"),
+            HumanMessage(content="q"),
+            AIMessage(content="a"),
         ]
         with pytest.raises(Exception, match="context length"):
             await svc.process_messages(
-                [Message(role=MessageRole.USER, content="q2")],
+                [HumanMessage(content="q2")],
                 session_id="s1",
             )
 
@@ -643,14 +657,14 @@ class TestStripToolCallNarration:
             content="mcp_web__search를 사용하여 검색하겠습니다.",
             tool_calls=[{"name": "mcp_web__search", "args": {"query": "test"}, "id": "c1"}],
         )
-        result = _strip_tool_call_narration([original])
+        result = strip_tool_call_narration([original])
         assert result[0].content == ""
         assert result[0].tool_calls == original.tool_calls
 
     def test_preserves_text_only_message(self):
         """AIMessage with text only (no tool_calls) → unchanged."""
         original = AIMessage(content="대한민국은 동아시아에 위치한 나라입니다.")
-        result = _strip_tool_call_narration([original])
+        result = strip_tool_call_narration([original])
         assert result[0] is original
         assert result[0].content == "대한민국은 동아시아에 위치한 나라입니다."
 
@@ -660,7 +674,7 @@ class TestStripToolCallNarration:
             content="",
             tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
         )
-        result = _strip_tool_call_narration([original])
+        result = strip_tool_call_narration([original])
         assert result[0] is original
 
     def test_does_not_mutate_original(self):
@@ -669,7 +683,7 @@ class TestStripToolCallNarration:
             content="narration text",
             tool_calls=[{"name": "tool", "args": {}, "id": "c1"}],
         )
-        result = _strip_tool_call_narration([original])
+        result = strip_tool_call_narration([original])
         # Original is untouched
         assert original.content == "narration text"
         # Result has empty content
@@ -687,7 +701,7 @@ class TestStripToolCallNarration:
             ToolMessage(content="검색 결과...", tool_call_id="c1"),
             AIMessage(content="대한민국은..."),
         ]
-        result = _strip_tool_call_narration(messages)
+        result = strip_tool_call_narration(messages)
         assert result[0] is messages[0]  # HumanMessage unchanged
         assert result[1].content == ""  # narration stripped
         assert result[1].tool_calls == messages[1].tool_calls
@@ -699,7 +713,7 @@ class TestToolMessageFallback:
     """Tests for Gemini tool-message fallback behavior."""
 
     def test_strip_tool_messages_marks_changed(self):
-        """AI tool call + ToolMessage are converted and marked as changed."""
+        """AI tool call + ToolMessage are dropped and marked as changed."""
         src = [
             AIMessage(
                 content="",
@@ -709,13 +723,11 @@ class TestToolMessageFallback:
             HumanMessage(content="next"),
         ]
 
-        clean, changed = _strip_tool_messages(src)
+        clean, changed = strip_tool_messages(src)
         assert changed is True
-        assert isinstance(clean[0], AIMessage)
-        assert clean[0].tool_calls == []
-        assert "[Called:" in clean[0].content
-        assert isinstance(clean[1], HumanMessage)
-        assert "[Tool result]:" in clean[1].content
+        assert len(clean) == 1
+        assert isinstance(clean[0], HumanMessage)
+        assert clean[0].content == "next"
 
     @pytest.mark.asyncio
     async def test_invoke_uses_clean_context_fallback(self):
@@ -723,16 +735,14 @@ class TestToolMessageFallback:
         svc = _create_service()
         sid = "s1"
         svc.sessions[sid] = [
-            Message(
-                role=MessageRole.ASSISTANT,
+            AIMessage(
                 content="",
                 tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content="Error: network timeout",
+            ToolMessage(
                 tool_call_id="call_1",
-                tool_name="web_search",
+                content="Error: network timeout",
+                name="web_search",
             ),
         ]
 
@@ -767,10 +777,9 @@ class TestToolMessageFallback:
         assert calls[0][1] != []
         assert calls[1][1] == []
         assert calls[2][1] == []
-        assert any(
-            isinstance(m, HumanMessage) and "[Tool result]:" in m.content for m in calls[2][0]
-        )
+        # Tool messages are dropped entirely in clean-context fallback
         assert not any(isinstance(m, ToolMessage) for m in calls[2][0])
+        assert not any(isinstance(m, AIMessage) and m.tool_calls for m in calls[2][0])
 
     @pytest.mark.asyncio
     async def test_thought_signature_skips_backoff_retries(self):
@@ -778,16 +787,14 @@ class TestToolMessageFallback:
         svc = _create_service()
         sid = "s1"
         svc.sessions[sid] = [
-            Message(
-                role=MessageRole.ASSISTANT,
+            AIMessage(
                 content="",
                 tool_calls=[{"name": "web_search", "args": {"query": "q"}, "id": "call_1"}],
             ),
-            Message(
-                role=MessageRole.TOOL,
-                content="Error: failed",
+            ToolMessage(
                 tool_call_id="call_1",
-                tool_name="web_search",
+                content="Error: failed",
+                name="web_search",
             ),
         ]
         svc._maybe_proactive_compact = AsyncMock(return_value=None)
@@ -838,11 +845,13 @@ class TestTruncationOneShot:
     async def test_truncation_blocked_on_second_attempt(self):
         """Truncation fallback runs at most once (one-shot guard)."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(context_window_tokens=500),
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(context_window_tokens=500)
+            ),
         )
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.TOOL, content="x" * 100_000),
+            HumanMessage(content="q"),
+            ToolMessage(tool_call_id="", content="x" * 100_000),
         ]
         # First truncation attempt succeeds
         _, retries, ok, trunc = await svc._try_overflow_recovery(
@@ -867,8 +876,8 @@ class TestTruncationOneShot:
         svc = _create_service()
         svc.llm.ainvoke.side_effect = Exception("maximum context length exceeded")
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.ASSISTANT, content="a"),
+            HumanMessage(content="q"),
+            AIMessage(content="a"),
         ]
         history, retries, ok, trunc = await svc._try_overflow_recovery("s1", 0)
         assert ok is True
@@ -878,18 +887,20 @@ class TestTruncationOneShot:
     async def test_aggressive_truncation_in_fallback(self):
         """Fallback truncation uses more aggressive settings than Layer 1."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(
-                context_window_tokens=128_000,
-                max_tool_result_context_share=0.3,
-                hard_max_tool_result_chars=400_000,
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(
+                    context_window_tokens=128_000,
+                    max_tool_result_context_share=0.3,
+                    hard_max_tool_result_chars=400_000,
+                )
             ),
         )
         # Tool result that fits Layer 1 threshold (30% of 128k * 4 = 153,600 chars)
         # but exceeds fallback threshold (7.5% of 128k * 4 = 38,400 chars)
         tool_content = "x" * 50_000
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.TOOL, content=tool_content),
+            HumanMessage(content="q"),
+            ToolMessage(tool_call_id="", content=tool_content),
         ]
         _, retries, ok, trunc = await svc._try_overflow_recovery(
             "s1",
@@ -899,7 +910,7 @@ class TestTruncationOneShot:
         assert ok is True
         assert trunc is True
         # Verify the tool result was actually truncated
-        tool_msg = [m for m in svc.sessions["s1"] if m.role == MessageRole.TOOL][0]
+        tool_msg = [m for m in svc.sessions["s1"] if isinstance(m, ToolMessage)][0]
         assert len(tool_msg.content) < len(tool_content)
 
 
@@ -923,7 +934,7 @@ class TestMultipleToolCalls:
         ]
         svc.llm.ainvoke.return_value = resp
         result = await svc.process_messages_with_tools(
-            [Message(role=MessageRole.USER, content="run both")],
+            [HumanMessage(content="run both")],
         )
         assert result.type == LLMResultType.TOOL_CALL
         assert len(result.tool_calls) == 2
@@ -944,12 +955,14 @@ class TestSessionEviction:
         import time as _time
 
         svc = _create_service()
-        svc.sessions["old"] = [Message(role=MessageRole.USER, content="hi")]
-        svc._session_last_access["old"] = _time.time() - settings.SESSION_TTL_SECONDS - 1
-        svc.sessions["new"] = [Message(role=MessageRole.USER, content="hi")]
-        svc._session_last_access["new"] = _time.time()
+        svc.sessions["old"] = [HumanMessage(content="hi")]
+        svc.message_controller.session_state_controller.last_access["old"] = (
+            _time.time() - settings.SESSION_TTL_SECONDS - 1
+        )
+        svc.sessions["new"] = [HumanMessage(content="hi")]
+        svc.message_controller.session_state_controller.last_access["new"] = _time.time()
 
-        svc._cleanup_stale_sessions()
+        svc.cleanup_stale_sessions()
         assert "old" not in svc.sessions
         assert "new" in svc.sessions
 
@@ -962,9 +975,9 @@ class TestSessionEviction:
         for i in range(settings.MAX_SESSIONS + 5):
             sid = f"s{i}"
             svc.sessions[sid] = []
-            svc._session_last_access[sid] = _time.time() + i
+            svc.message_controller.session_state_controller.last_access[sid] = _time.time() + i
 
-        svc._cleanup_stale_sessions()
+        svc.cleanup_stale_sessions()
         assert len(svc.sessions) == settings.MAX_SESSIONS
 
     def test_locked_session_not_evicted_by_ttl(self):
@@ -973,15 +986,17 @@ class TestSessionEviction:
         import time as _time
 
         svc = _create_service()
-        svc.sessions["locked"] = [Message(role=MessageRole.USER, content="hi")]
-        svc._session_last_access["locked"] = _time.time() - settings.SESSION_TTL_SECONDS - 100
+        svc.sessions["locked"] = [HumanMessage(content="hi")]
+        svc.message_controller.session_state_controller.last_access["locked"] = (
+            _time.time() - settings.SESSION_TTL_SECONDS - 100
+        )
 
         # Simulate an active lock
         lock = asyncio.Lock()
         lock._locked = True  # Force locked state for testing
-        svc._session_locks["locked"] = lock
+        svc.message_controller.session_state_controller.locks["locked"] = lock
 
-        svc._cleanup_stale_sessions()
+        svc.cleanup_stale_sessions()
         assert "locked" in svc.sessions  # not evicted
 
     def test_locked_session_not_evicted_by_max(self):
@@ -994,14 +1009,14 @@ class TestSessionEviction:
         for i in range(settings.MAX_SESSIONS + 1):
             sid = f"s{i}"
             svc.sessions[sid] = []
-            svc._session_last_access[sid] = _time.time() + i
+            svc.message_controller.session_state_controller.last_access[sid] = _time.time() + i
 
         # Lock the oldest session
         lock = asyncio.Lock()
         lock._locked = True
-        svc._session_locks["s0"] = lock
+        svc.message_controller.session_state_controller.locks["s0"] = lock
 
-        svc._cleanup_stale_sessions()
+        svc.cleanup_stale_sessions()
         assert "s0" in svc.sessions  # locked, not evicted
 
 
@@ -1023,22 +1038,22 @@ class TestAppendToolInteractionBatch:
             {"name": "bash", "args": {"command": "pwd"}, "id": "c2"},
         ]
         tool_results = [
-            Message(role=MessageRole.TOOL, content="file.txt", tool_call_id="c1"),
-            Message(role=MessageRole.TOOL, content="/home", tool_call_id="c2"),
+            ToolMessage(tool_call_id="c1", content="file.txt"),
+            ToolMessage(tool_call_id="c2", content="/home"),
         ]
         await svc.append_tool_interaction(
             "s1",
-            [Message(role=MessageRole.USER, content="run both")],
+            [HumanMessage(content="run both")],
             tool_calls,
             tool_results,
         )
         history = svc.sessions["s1"]
         assert len(history) == 4  # user + assistant + 2 tool results
-        assert history[0].role == MessageRole.USER
-        assert history[1].role == MessageRole.ASSISTANT
-        assert history[1].tool_calls == tool_calls
-        assert history[2].role == MessageRole.TOOL
-        assert history[3].role == MessageRole.TOOL
+        assert history[0].type == "human"
+        assert history[1].type == "ai"
+        assert history[1].additional_kwargs["synthetic_tool_calls"] == tool_calls
+        assert history[2].type == "tool"
+        assert history[3].type == "tool"
 
 
 # ---------------------------------------------------------------------------
@@ -1057,28 +1072,28 @@ class TestActualUsageBasedCompaction:
     async def test_post_turn_trigger_from_history_usage(self):
         """When history has an assistant message with high input_tokens, compaction triggers."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(
-                context_window_tokens=100_000,
-                proactive_pruning_ratio=0.7,
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(
+                    context_window_tokens=100_000,
+                    proactive_pruning_ratio=0.7,
+                )
             ),
         )
         sid = "s1"
         svc.sessions[sid] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="q1"),
+            AIMessage(
                 content="a1",
-                usage={
+                usage_metadata={
                     "input_tokens": 80_000,
                     "output_tokens": 50,
                     "total_tokens": 80_050,
                 },
             ),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="q2"),
+            AIMessage(
                 content="a2",
-                usage={
+                usage_metadata={
                     "input_tokens": 80_000,
                     "output_tokens": 50,
                     "total_tokens": 80_050,
@@ -1093,7 +1108,7 @@ class TestActualUsageBasedCompaction:
         ]
 
         result = await svc.process_messages(
-            [Message(role=MessageRole.USER, content="q3")],
+            [HumanMessage(content="q3")],
             session_id=sid,
         )
         assert result.message == "done"
@@ -1104,18 +1119,19 @@ class TestActualUsageBasedCompaction:
     async def test_post_turn_no_trigger_when_ratio_low(self):
         """When history usage ratio is below threshold, no compaction."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(
-                context_window_tokens=100_000,
-                proactive_pruning_ratio=0.7,
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(
+                    context_window_tokens=100_000,
+                    proactive_pruning_ratio=0.7,
+                )
             ),
         )
         sid = "s1"
         svc.sessions[sid] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="q1"),
+            AIMessage(
                 content="a1",
-                usage={
+                usage_metadata={
                     "input_tokens": 30_000,
                     "output_tokens": 50,
                     "total_tokens": 30_050,
@@ -1126,7 +1142,7 @@ class TestActualUsageBasedCompaction:
         svc.llm.ainvoke.return_value = _mock_response("ok")
 
         result = await svc.process_messages(
-            [Message(role=MessageRole.USER, content="q2")],
+            [HumanMessage(content="q2")],
             session_id=sid,
         )
         assert result.message == "ok"
@@ -1137,9 +1153,11 @@ class TestActualUsageBasedCompaction:
     async def test_first_call_fallback_uses_tiktoken(self):
         """When no assistant with usage exists in history, tiktoken estimation is used."""
         svc = _create_service(
-            compaction_settings=CompactionSettings(
-                context_window_tokens=100_000,
-                proactive_pruning_ratio=0.7,
+            compaction_controller=CompactionController(
+                settings=CompactionSettings(
+                    context_window_tokens=100_000,
+                    proactive_pruning_ratio=0.7,
+                )
             ),
         )
         sid = "s1"
@@ -1149,7 +1167,7 @@ class TestActualUsageBasedCompaction:
         svc.llm.ainvoke.return_value = _mock_response("hello")
 
         result = await svc.process_messages(
-            [Message(role=MessageRole.USER, content="hi")],
+            [HumanMessage(content="hi")],
             session_id=sid,
         )
         assert result.message == "hello"
@@ -1160,17 +1178,15 @@ class TestActualUsageBasedCompaction:
         """_get_last_input_tokens returns input_tokens from last assistant with usage."""
         svc = _create_service()
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="q1"),
+            AIMessage(
                 content="a1",
-                usage={"input_tokens": 100},
+                usage_metadata={"input_tokens": 100, "output_tokens": 0, "total_tokens": 100},
             ),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(
-                role=MessageRole.ASSISTANT,
+            HumanMessage(content="q2"),
+            AIMessage(
                 content="a2",
-                usage={"input_tokens": 420},
+                usage_metadata={"input_tokens": 420, "output_tokens": 0, "total_tokens": 420},
             ),
         ]
         assert svc._get_last_input_tokens("s1") == 420
@@ -1185,8 +1201,8 @@ class TestActualUsageBasedCompaction:
         """_get_last_input_tokens returns None when assistant has no usage."""
         svc = _create_service()
         svc.sessions["s1"] = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.ASSISTANT, content="a"),
+            HumanMessage(content="q"),
+            AIMessage(content="a"),
         ]
         assert svc._get_last_input_tokens("s1") is None
 
@@ -1202,63 +1218,52 @@ class TestActualUsageBasedCompaction:
 
 
 class TestNormalizeContent:
-    """Tests for _normalize_content — structured content extraction."""
+    """Tests for normalize_open_content — Open Responses content extraction."""
 
     def test_plain_string(self):
-        assert AgentService._normalize_content("hello") == "hello"
+        assert normalize_content("hello") == "hello"
 
     def test_empty_string(self):
-        assert AgentService._normalize_content("") == ""
+        assert normalize_content("") == ""
 
     def test_input_text_list(self):
         content = [{"type": "input_text", "text": "ㅎㅇ"}]
-        assert AgentService._normalize_content(content) == "ㅎㅇ"
+        assert normalize_content(content) == "ㅎㅇ"
 
     def test_output_text_list(self):
         content = [{"type": "output_text", "text": "응답입니다"}]
-        assert AgentService._normalize_content(content) == "응답입니다"
+        assert normalize_content(content) == "응답입니다"
 
     def test_multiple_parts(self):
         content = [
             {"type": "input_text", "text": "Part 1"},
             {"type": "input_text", "text": "Part 2"},
         ]
-        assert AgentService._normalize_content(content) == "Part 1\nPart 2"
+        assert normalize_content(content) == "Part 1\nPart 2"
 
-    def test_mixed_types_in_list(self):
+    def test_mixed_types_skips_non_text(self):
         content = [
             {"type": "output_text", "text": "Hello"},
             {"type": "refusal", "refusal": "No can do"},
         ]
-        assert AgentService._normalize_content(content) == "Hello"
-
-    def test_list_with_plain_strings(self):
-        content = ["hello", "world"]
-        assert AgentService._normalize_content(content) == "hello\nworld"
-
-    def test_dict_with_text(self):
-        content = {"type": "input_text", "text": "단일 dict"}
-        assert AgentService._normalize_content(content) == "단일 dict"
-
-    def test_none(self):
-        assert AgentService._normalize_content(None) == ""
+        assert normalize_content(content) == "Hello"
 
     def test_empty_list(self):
-        assert AgentService._normalize_content([]) == ""
+        assert normalize_content([]) == ""
 
 
 class TestPlatformMessageToLc:
     """Tests for converting Platform DB records to LangChain messages."""
 
     def test_user_message(self):
-        record = {"role": "user", "content": "Hello"}
-        msg = AgentService._platform_message_to_lc(record)
+        record = {"type": "message", "role": "user", "content": "Hello"}
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, HumanMessage)
         assert msg.content == "Hello"
 
     def test_assistant_message(self):
-        record = {"role": "assistant", "content": "Hi there"}
-        msg = AgentService._platform_message_to_lc(record)
+        record = {"type": "message", "role": "assistant", "content": "Hi there"}
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, AIMessage)
         assert msg.content == "Hi there"
 
@@ -1269,7 +1274,7 @@ class TestPlatformMessageToLc:
             "role": "user",
             "content": [{"type": "input_text", "text": "ㅎㅇ"}],
         }
-        msg = AgentService._platform_message_to_lc(record)
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, HumanMessage)
         assert msg.content == "ㅎㅇ"
 
@@ -1280,7 +1285,7 @@ class TestPlatformMessageToLc:
             "role": "assistant",
             "content": [{"type": "output_text", "text": "안녕하세요!"}],
         }
-        msg = AgentService._platform_message_to_lc(record)
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, AIMessage)
         assert msg.content == "안녕하세요!"
 
@@ -1296,24 +1301,11 @@ class TestPlatformMessageToLc:
                 "arguments": '{"command": "ls"}',
             },
         }
-        msg = AgentService._platform_message_to_lc(record)
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, AIMessage)
         assert len(msg.tool_calls) == 1
         assert msg.tool_calls[0]["name"] == "bash"
         assert msg.tool_calls[0]["args"] == {"command": "ls"}
-        assert msg.tool_calls[0]["id"] == "call_1"
-
-    def test_function_call_flat_fallback(self):
-        """Also supports flat format (call_id/name/args at record level)."""
-        record = {
-            "type": "function_call",
-            "call_id": "call_1",
-            "name": "bash",
-            "arguments": '{"command": "ls"}',
-        }
-        msg = AgentService._platform_message_to_lc(record)
-        assert isinstance(msg, AIMessage)
-        assert msg.tool_calls[0]["name"] == "bash"
         assert msg.tool_calls[0]["id"] == "call_1"
 
     def test_function_call_output_nested_content(self):
@@ -1327,30 +1319,18 @@ class TestPlatformMessageToLc:
                 "output": "file.txt\ndir/",
             },
         }
-        msg = AgentService._platform_message_to_lc(record)
+        msg = platform_message_to_lc(record)
         assert isinstance(msg, ToolMessage)
         assert msg.content == "file.txt\ndir/"
         assert msg.tool_call_id == "call_1"
 
-    def test_function_call_output_flat_fallback(self):
-        """Also supports flat format."""
-        record = {
-            "type": "function_call_output",
-            "call_id": "call_1",
-            "output": "file.txt\ndir/",
-        }
-        msg = AgentService._platform_message_to_lc(record)
-        assert isinstance(msg, ToolMessage)
-        assert msg.content == "file.txt\ndir/"
-        assert msg.tool_call_id == "call_1"
-
-    def test_empty_record(self):
-        msg = AgentService._platform_message_to_lc({})
-        assert msg is None
+    def test_empty_record_raises(self):
+        with pytest.raises(KeyError):
+            platform_message_to_lc({})
 
     def test_system_message(self):
-        record = {"role": "system", "content": "You are helpful."}
-        msg = AgentService._platform_message_to_lc(record)
+        record = {"type": "message", "role": "system", "content": "You are helpful."}
+        msg = platform_message_to_lc(record)
         from langchain_core.messages import SystemMessage as SM
 
         assert isinstance(msg, SM)
@@ -1358,6 +1338,7 @@ class TestPlatformMessageToLc:
     def test_function_call_with_dict_arguments(self):
         record = {
             "type": "function_call",
+            "role": "tool",
             "content": {
                 "type": "function_call",
                 "call_id": "call_2",
@@ -1365,7 +1346,7 @@ class TestPlatformMessageToLc:
                 "arguments": {"path": "/a"},
             },
         }
-        msg = AgentService._platform_message_to_lc(record)
+        msg = platform_message_to_lc(record)
         assert msg.tool_calls[0]["args"] == {"path": "/a"}
 
     def test_permission_grant_skipped(self):
@@ -1374,7 +1355,7 @@ class TestPlatformMessageToLc:
             "role": "system",
             "content": {"tool_name": "bash", "decision": "allow_once"},
         }
-        assert AgentService._platform_message_to_lc(record) is None
+        assert platform_message_to_lc(record) is None
 
     def test_todo_state_skipped(self):
         record = {
@@ -1382,11 +1363,11 @@ class TestPlatformMessageToLc:
             "role": "assistant",
             "content": {"task": "test", "steps": []},
         }
-        assert AgentService._platform_message_to_lc(record) is None
+        assert platform_message_to_lc(record) is None
 
 
 # ---------------------------------------------------------------------------
-# _rehydrate_session
+# message_rehydration_controller
 # ---------------------------------------------------------------------------
 
 
@@ -1396,19 +1377,19 @@ class TestRehydrateSession:
     @pytest.mark.asyncio
     async def test_404_returns_none(self):
         svc = _create_service()
-        svc._platform_client = AsyncMock()
-        resp = MagicMock()
-        resp.status_code = 404
-        svc._platform_client.get = AsyncMock(return_value=resp)
+        svc._platform_message_history_client = AsyncMock()
+        svc._platform_message_history_client.list_messages = AsyncMock(return_value=[])
 
-        result = await svc._rehydrate_session("unknown-session")
+        result = await message_controller.message_rehydration_controller.rehydrate_session(
+            client=svc._platform_message_history_client,
+            session_id="unknown-session",
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_mixed_messages_restored(self):
         """Rehydration with actual Platform DB record shapes."""
         svc = _create_service()
-        svc._platform_client = AsyncMock()
         records = [
             {
                 "type": "message",
@@ -1440,12 +1421,13 @@ class TestRehydrateSession:
                 "content": [{"type": "output_text", "text": "Done"}],
             },
         ]
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = records
-        svc._platform_client.get = AsyncMock(return_value=resp)
+        svc._platform_message_history_client = AsyncMock()
+        svc._platform_message_history_client.list_messages = AsyncMock(return_value=records)
 
-        result = await svc._rehydrate_session("s1")
+        result = await message_controller.message_rehydration_controller.rehydrate_session(
+            client=svc._platform_message_history_client,
+            session_id="s1",
+        )
         assert result is not None
         assert len(result) == 4
         assert isinstance(result[0], HumanMessage)
@@ -1458,45 +1440,52 @@ class TestRehydrateSession:
         import httpx
 
         svc = _create_service()
-        svc._platform_client = AsyncMock()
-        svc._platform_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        svc._platform_message_history_client = AsyncMock()
+        svc._platform_message_history_client.list_messages = AsyncMock(
+            side_effect=httpx.ConnectError("Connection refused")
+        )
 
-        result = await svc._rehydrate_session("s1")
+        result = await message_controller.message_rehydration_controller.rehydrate_session(
+            client=svc._platform_message_history_client,
+            session_id="s1",
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_empty_records_returns_none(self):
         svc = _create_service()
-        svc._platform_client = AsyncMock()
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = []
-        svc._platform_client.get = AsyncMock(return_value=resp)
+        svc._platform_message_history_client = AsyncMock()
+        svc._platform_message_history_client.list_messages = AsyncMock(return_value=[])
 
-        result = await svc._rehydrate_session("s1")
+        result = await message_controller.message_rehydration_controller.rehydrate_session(
+            client=svc._platform_message_history_client,
+            session_id="s1",
+        )
         assert result is None
 
     @pytest.mark.asyncio
     async def test_structured_content_normalized(self):
         """Open Responses structured content (input_text/output_text) is flattened."""
         svc = _create_service()
-        svc._platform_client = AsyncMock()
         records = [
             {
+                "type": "message",
                 "role": "user",
                 "content": [{"type": "input_text", "text": "ㅎㅇ"}],
             },
             {
+                "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": "안녕하세요!"}],
             },
         ]
-        resp = MagicMock()
-        resp.status_code = 200
-        resp.json.return_value = records
-        svc._platform_client.get = AsyncMock(return_value=resp)
+        svc._platform_message_history_client = AsyncMock()
+        svc._platform_message_history_client.list_messages = AsyncMock(return_value=records)
 
-        result = await svc._rehydrate_session("s1")
+        result = await message_controller.message_rehydration_controller.rehydrate_session(
+            client=svc._platform_message_history_client,
+            session_id="s1",
+        )
         assert result is not None
         assert len(result) == 2
         assert isinstance(result[0], HumanMessage)

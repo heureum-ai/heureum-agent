@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """Schemas for Open Responses specification."""
+
 from .open_responses import (
     ContentPart,
     InputTextContent,

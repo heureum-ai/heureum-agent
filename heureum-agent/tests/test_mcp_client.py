@@ -10,12 +10,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 # ---------------------------------------------------------------------------
 
 
-def _mock_tool(name="test_tool", description="A test tool", input_schema=None, meta=None):
+def _mock_tool(
+    name="test_tool", description="A test tool", input_schema=None, meta=None, display_name=None
+):
     tool = MagicMock()
     tool.name = name
     tool.description = description
     tool.inputSchema = input_schema or {"type": "object", "properties": {}}
-    tool.meta = meta  # None by default — matches real MCP tools without meta
+    if meta is None:
+        meta = {}
+    if "display_name" not in meta:
+        meta["display_name"] = display_name or name
+    tool.meta = meta
     return tool
 
 
@@ -52,7 +58,7 @@ def _setup_connection(client, url, server_name="test"):
 # Ensure the real `mcp` package is never imported.
 _fake_mcp = MagicMock()
 _fake_mcp.ClientSession = MagicMock
-_fake_mcp.client.streamable_http.streamablehttp_client = MagicMock()
+_fake_mcp.client.streamable_http.streamable_http_client = MagicMock()
 
 sys.modules.setdefault("mcp", _fake_mcp)
 sys.modules.setdefault("mcp.client", _fake_mcp.client)
@@ -60,12 +66,9 @@ sys.modules.setdefault("mcp.client.streamable_http", _fake_mcp.client.streamable
 
 from app.config import ApprovalChoice  # noqa: E402
 from app.config import settings  # noqa: E402
-from app.models import Message, ToolCallInfo  # noqa: E402
-from app.schemas.open_responses import MessageRole  # noqa: E402
-from app.services.providers.mcp import (  # noqa: E402
-    MCPClient,
-    _ServerConnection,
-)
+from app.models import ToolCallInfo  # noqa: E402
+from langchain_core.messages import HumanMessage, ToolMessage  # noqa: E402
+from app.services.mcps import MCPClientController  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 1. TestMCPClientInit
@@ -74,12 +77,12 @@ from app.services.providers.mcp import (  # noqa: E402
 
 class TestMCPClientInit:
     def test_default_server_urls(self):
-        with patch("app.services.providers.mcp.settings") as mock_settings:
+        with patch("app.services.mcps.controller.settings") as mock_settings:
             mock_settings.get_mcp_server_urls.return_value = [
                 "http://localhost:3001",
                 "http://localhost:3002",
             ]
-            client = MCPClient()
+            client = MCPClientController()
             assert client._server_urls == [
                 "http://localhost:3001",
                 "http://localhost:3002",
@@ -87,7 +90,7 @@ class TestMCPClientInit:
 
     def test_custom_server_urls(self):
         urls = ["http://a:8000", "http://b:9000"]
-        client = MCPClient(server_urls=urls)
+        client = MCPClientController(server_urls=urls)
         assert client._server_urls == urls
 
 
@@ -98,7 +101,7 @@ class TestMCPClientInit:
 
 class TestDiscoverTools:
     async def test_returns_tool_list(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_test__alpha", "First", {"type": "object"}),
@@ -122,7 +125,7 @@ class TestDiscoverTools:
         assert tools[1]["function"]["name"] == "mcp_test__beta"
 
     async def test_cache_hit(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session()
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv")
@@ -134,7 +137,7 @@ class TestDiscoverTools:
         assert session.list_tools.await_count == 1
 
     async def test_cache_expired(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session()
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv")
@@ -149,7 +152,7 @@ class TestDiscoverTools:
         assert session.list_tools.await_count == 2
 
     async def test_server_failure_graceful(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client._get_session = AsyncMock(side_effect=ConnectionError("down"))
         client._disconnect_server = AsyncMock()
 
@@ -159,7 +162,7 @@ class TestDiscoverTools:
         client._disconnect_server.assert_awaited_once_with("http://srv")
 
     async def test_populates_server_tool_names(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(tools=[_mock_tool("mcp_web__fetch"), _mock_tool("mcp_web__search")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
@@ -172,7 +175,7 @@ class TestDiscoverTools:
 
     async def test_collects_requires_approval_from_meta(self):
         """Tools with meta.requires_approval are added to _approval_required_tools."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_web__search", meta={"requires_approval": True}),
@@ -185,11 +188,11 @@ class TestDiscoverTools:
 
         await client.discover_tools()
 
-        assert client._approval_required_tools == {"mcp_web__search", "mcp_web__fetch"}
+        assert client._approval.approval_required_tools == {"mcp_web__search", "mcp_web__fetch"}
 
     async def test_no_approval_without_meta(self):
         """Tools without meta or with requires_approval=False are not approval-required."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("tool_a"),
@@ -202,13 +205,13 @@ class TestDiscoverTools:
 
         await client.discover_tools()
 
-        assert client._approval_required_tools == set()
+        assert client._approval.approval_required_tools == set()
 
     async def test_multiple_servers(self):
         session_a = _make_session(tools=[_mock_tool("mcp_srv_a__tool_a")])
         session_b = _make_session(tools=[_mock_tool("mcp_srv_b__tool_b")])
 
-        client = MCPClient(server_urls=["http://a", "http://b"])
+        client = MCPClientController(server_urls=["http://a", "http://b"])
 
         async def fake_get_session(url):
             return session_a if url == "http://a" else session_b
@@ -234,14 +237,14 @@ class TestDiscoverTools:
 class TestGetSession:
     async def test_session_creation(self):
         """_get_session creates a new connection when none exists."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
         mock_session = _make_session()
-        mock_conn = MagicMock(spec=_ServerConnection)
+        mock_conn = MagicMock(spec=MCPClientController._ServerConnection)
         mock_conn.session = mock_session
         mock_conn.connect = AsyncMock(return_value=mock_session)
 
-        with patch("app.services.providers.mcp._ServerConnection", return_value=mock_conn):
+        with patch.object(MCPClientController, "_ServerConnection", return_value=mock_conn):
             session = await client._get_session("http://srv")
 
         assert session is mock_session
@@ -250,10 +253,10 @@ class TestGetSession:
 
     async def test_session_reuse(self):
         """_get_session returns the existing session if already connected."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
         mock_session = _make_session()
-        mock_conn = MagicMock(spec=_ServerConnection)
+        mock_conn = MagicMock(spec=MCPClientController._ServerConnection)
         mock_conn.session = mock_session
         mock_conn.connect = AsyncMock()
 
@@ -266,24 +269,88 @@ class TestGetSession:
 
     async def test_reconnection_after_session_lost(self):
         """_get_session reconnects when connection exists but session is None."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
-        old_conn = MagicMock(spec=_ServerConnection)
+        old_conn = MagicMock(spec=MCPClientController._ServerConnection)
         old_conn.session = None  # session was lost
         old_conn.close = AsyncMock()
         client._connections["http://srv"] = old_conn
 
         new_session = _make_session()
-        new_conn = MagicMock(spec=_ServerConnection)
+        new_conn = MagicMock(spec=MCPClientController._ServerConnection)
         new_conn.session = new_session
         new_conn.connect = AsyncMock(return_value=new_session)
 
-        with patch("app.services.providers.mcp._ServerConnection", return_value=new_conn):
+        with patch.object(MCPClientController, "_ServerConnection", return_value=new_conn):
             session = await client._get_session("http://srv")
 
         old_conn.close.assert_awaited_once()
         new_conn.connect.assert_awaited_once()
         assert session is new_session
+
+    async def test_retry_on_cancelled_error(self):
+        """_get_session retries on CancelledError and succeeds on second attempt."""
+        import asyncio
+
+        client = MCPClientController(server_urls=["http://srv"])
+
+        mock_session = _make_session()
+        fail_conn = MagicMock(spec=MCPClientController._ServerConnection)
+        fail_conn.connect = AsyncMock(side_effect=asyncio.CancelledError())
+        fail_conn.close = AsyncMock()
+
+        ok_conn = MagicMock(spec=MCPClientController._ServerConnection)
+        ok_conn.session = mock_session
+        ok_conn.connect = AsyncMock(return_value=mock_session)
+        ok_conn.close = AsyncMock()
+
+        call_count = 0
+
+        def make_conn(**kwargs):
+            nonlocal call_count
+            call_count += 1
+            return fail_conn if call_count == 1 else ok_conn
+
+        with (
+            patch.object(MCPClientController, "_ServerConnection", side_effect=make_conn),
+            patch("app.services.mcps.controller.settings") as mock_settings,
+            patch("app.services.mcps.controller.asyncio") as mock_asyncio,
+        ):
+            mock_settings.MCP_CONNECT_MAX_RETRIES = 2
+            mock_settings.MCP_CONNECT_RETRY_DELAY = 0.0
+            mock_asyncio.sleep = AsyncMock()
+            session = await client._get_session("http://srv")
+
+        assert session is mock_session
+        assert call_count == 2
+        fail_conn.close.assert_awaited_once()
+
+    async def test_retry_exhausted_raises(self):
+        """_get_session raises after all retries are exhausted."""
+        import asyncio
+        import pytest
+
+        client = MCPClientController(server_urls=["http://srv"])
+
+        fail_conn = MagicMock(spec=MCPClientController._ServerConnection)
+        fail_conn.connect = AsyncMock(side_effect=asyncio.CancelledError())
+        fail_conn.close = AsyncMock()
+
+        with (
+            patch.object(
+                MCPClientController, "_ServerConnection", return_value=fail_conn
+            ),
+            patch("app.services.mcps.controller.settings") as mock_settings,
+            patch("app.services.mcps.controller.asyncio") as mock_asyncio,
+        ):
+            mock_settings.MCP_CONNECT_MAX_RETRIES = 1
+            mock_settings.MCP_CONNECT_RETRY_DELAY = 0.0
+            mock_asyncio.sleep = AsyncMock()
+            with pytest.raises(asyncio.CancelledError):
+                await client._get_session("http://srv")
+
+        # 1 initial + 1 retry = 2 attempts
+        assert fail_conn.connect.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -294,20 +361,20 @@ class TestGetSession:
 class TestCallTool:
     async def test_normal_call(self):
         """call_tool dispatches with the tool name as-is."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(call_result=_mock_call_result("hello world"))
         client._get_session = AsyncMock(return_value=session)
-        client._tool_to_server["mcp_filesystem__read"] = "http://srv"
+        client._tool_to_server["mcp_filesystem__bash"] = "http://srv"
 
-        result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp"})
+        result = await client.call_tool("mcp_filesystem__bash", {"path": "/tmp"})
 
         assert result == "hello world"
         session.call_tool.assert_awaited_once_with(
-            "mcp_filesystem__read", {"path": "/tmp"}, meta=None
+            "mcp_filesystem__bash", {"path": "/tmp"}, meta=None
         )
 
     async def test_tool_not_found(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
         result = await client.call_tool("nonexistent", {})
 
@@ -316,7 +383,7 @@ class TestCallTool:
 
     async def test_failure_returns_retry_hint(self):
         """On failure, returns error with retry guidance for the LLM."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client._tool_to_server["flaky"] = "http://srv"
 
         fail_session = AsyncMock()
@@ -340,14 +407,14 @@ class TestCallTool:
         c2.text = "part two"
         result.content = [c1, c2]
 
-        assert MCPClient._extract_text(result) == "part one\npart two"
+        assert MCPClientController._extract_text(result) == "part one\npart two"
 
     async def test_extract_text_no_text(self):
         result = MagicMock()
         content_item = MagicMock(spec=[])  # no .text attribute
         result.content = [content_item]
 
-        assert MCPClient._extract_text(result) == "(no output)"
+        assert MCPClientController._extract_text(result) == "(no output)"
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +424,7 @@ class TestCallTool:
 
 class TestIsServerTool:
     async def test_known_tool(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(tools=[_mock_tool("mcp_web__fetch")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
@@ -367,7 +434,7 @@ class TestIsServerTool:
         assert client.is_server_tool("fetch") is False
 
     async def test_unknown_tool(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(tools=[_mock_tool("mcp_web__fetch")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "web")
@@ -376,7 +443,7 @@ class TestIsServerTool:
         assert client.is_server_tool("unknown_tool") is False
 
     async def test_before_discovery(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
         assert client.is_server_tool("mcp_web__fetch") is False
 
@@ -388,7 +455,7 @@ class TestIsServerTool:
 
 class TestInvalidateCache:
     async def test_resets_timestamp(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session()
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv")
@@ -401,7 +468,7 @@ class TestInvalidateCache:
         assert client._cache_timestamp == 0
 
     async def test_invalidate_triggers_rediscovery(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session()
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv")
@@ -420,7 +487,7 @@ class TestInvalidateCache:
 
 class TestClose:
     async def test_closes_all_connections(self):
-        client = MCPClient(server_urls=["http://a", "http://b"])
+        client = MCPClientController(server_urls=["http://a", "http://b"])
         client._disconnect_server = AsyncMock()
         client._connections = {"http://a": MagicMock(), "http://b": MagicMock()}
 
@@ -431,7 +498,7 @@ class TestClose:
         client._disconnect_server.assert_any_await("http://b")
 
     async def test_double_close_safe(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client._disconnect_server = AsyncMock()
         client._connections = {"http://srv": MagicMock()}
 
@@ -446,14 +513,14 @@ class TestClose:
 
 class TestAsyncContextManager:
     async def test_aenter_returns_self(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
 
         result = await client.__aenter__()
 
         assert result is client
 
     async def test_aexit_calls_close(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client.close = AsyncMock()
 
         await client.__aexit__(None, None, None)
@@ -461,7 +528,7 @@ class TestAsyncContextManager:
         client.close.assert_awaited_once()
 
     async def test_context_manager_protocol(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client.close = AsyncMock()
 
         async with client as ctx:
@@ -477,7 +544,7 @@ class TestAsyncContextManager:
 
 class TestServerToolNamesProperty:
     async def test_returns_set(self):
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(tools=[_mock_tool("mcp_test__a"), _mock_tool("mcp_test__b")])
         client._get_session = AsyncMock(return_value=session)
         _setup_connection(client, "http://srv", "test")
@@ -494,8 +561,8 @@ class TestServerToolNamesProperty:
 class TestClassifyToolCalls:
     def test_2way_classification(self):
         """Correctly splits tool calls into client and server."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._approval_required_tools = {"web_search", "web_fetch"}
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.approval_required_tools = {"web_search", "web_fetch"}
         tool_calls = [
             ToolCallInfo(name="ask_question", args={}, id="c1"),
             ToolCallInfo(name="web_search", args={"query": "q"}, id="c2"),
@@ -504,7 +571,6 @@ class TestClassifyToolCalls:
 
         client_calls, server_calls = client.classify_tool_calls(
             tool_calls,
-            "s1",
             client_tool_names={"ask_question"},
         )
 
@@ -513,14 +579,14 @@ class TestClassifyToolCalls:
 
     def test_needs_approval(self):
         """needs_approval checks approval state per session."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._approval_required_tools = {"web_search", "web_fetch"}
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.approval_required_tools = {"web_search", "web_fetch"}
 
         assert client.needs_approval("web_search", "s1") is True
         assert client.needs_approval("calculator", "s1") is False
 
         # Auto-approved tools skip approval
-        client._auto_approved_tools["s1"] = {"web_search"}
+        client._approval.auto_approved_tools["s1"] = {"web_search"}
         assert client.needs_approval("web_search", "s1") is False
 
 
@@ -532,8 +598,9 @@ class TestClassifyToolCalls:
 class TestRequestApproval:
     def test_stores_pending_and_returns_question(self):
         """request_approval saves pending state and returns question payload."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._approval_required_tools = {"web_search"}
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.approval_required_tools = {"web_search"}
+        client._approval.display_names = {"web_search": "Web Search", "calculator": "Calculator"}
         server_calls = [
             ToolCallInfo(name="web_search", args={"query": "q"}, id="c1"),
             ToolCallInfo(name="calculator", args={}, id="c2"),
@@ -547,8 +614,8 @@ class TestRequestApproval:
         choice_labels = [c["label"] for c in info["question"]["choices"]]
         assert ApprovalChoice.ALLOW_ONCE.value in choice_labels
         # Pending state was stored
-        assert "s1" in client._pending_tool_calls
-        pending = client._pending_tool_calls["s1"]
+        assert "s1" in client._approval.pending_tool_calls
+        pending = client._approval.pending_tool_calls["s1"]
         assert len(pending["tool_calls"]) == 2  # all server calls
 
 
@@ -560,18 +627,17 @@ class TestRequestApproval:
 class TestHandleApprovalResponse:
     def test_allow_once(self):
         """'Allow Once' returns allow_once decision and does not auto-approve."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._pending_tool_calls["s1"] = {
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_1",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
             "usage": None,
             "input_messages": [],
         }
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALLOW_ONCE,
+            ToolMessage(
                 tool_call_id="ask_1",
+                content=ApprovalChoice.ALLOW_ONCE,
             )
         ]
 
@@ -580,44 +646,41 @@ class TestHandleApprovalResponse:
         assert result is not None
         assert result["decision"] == "allow_once"
         assert len(result["tool_calls"]) == 1
-        assert "s1" not in client._auto_approved_tools
-        assert "s1" not in client._pending_tool_calls
+        assert "s1" not in client._approval.auto_approved_tools
+        assert "s1" not in client._approval.pending_tool_calls
 
     def test_always_allow(self):
         """'Always Allow' returns always_allow decision and adds to auto_approved."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._approval_required_tools = {"web_search", "web_fetch"}
-        client._pending_tool_calls["s1"] = {
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.approval_required_tools = {"web_search", "web_fetch"}
+        client._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_2",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
             "usage": None,
             "input_messages": [],
         }
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALWAYS_ALLOW,
+            ToolMessage(
                 tool_call_id="ask_2",
+                content=ApprovalChoice.ALWAYS_ALLOW,
             )
         ]
 
         result = client.handle_approval_response("s1", messages)
 
         assert result["decision"] == "always_allow"
-        assert "web_search" in client._auto_approved_tools["s1"]
+        assert "web_search" in client._approval.auto_approved_tools["s1"]
 
     def test_deny(self):
         """'Deny' returns deny decision."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._pending_tool_calls["s1"] = {
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_3",
             "tool_calls": [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
             "usage": None,
             "input_messages": [],
         }
-        messages = [
-            Message(role=MessageRole.TOOL, content=ApprovalChoice.DENY, tool_call_id="ask_3")
-        ]
+        messages = [ToolMessage(tool_call_id="ask_3", content=ApprovalChoice.DENY)]
 
         result = client.handle_approval_response("s1", messages)
 
@@ -625,12 +688,11 @@ class TestHandleApprovalResponse:
 
     def test_no_pending(self):
         """Returns None when no pending state exists."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALLOW_ONCE,
+            ToolMessage(
                 tool_call_id="ask_1",
+                content=ApprovalChoice.ALLOW_ONCE,
             )
         ]
 
@@ -640,35 +702,34 @@ class TestHandleApprovalResponse:
 
     def test_no_answer_restores_pending(self):
         """When no matching answer is found, pending state is restored."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._pending_tool_calls["s1"] = {
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_1",
             "tool_calls": [ToolCallInfo(name="web_search", args={}, id="c1")],
             "usage": None,
             "input_messages": [],
         }
-        messages = [Message(role=MessageRole.USER, content="hello")]
+        messages = [HumanMessage(content="hello")]
 
         result = client.handle_approval_response("s1", messages)
 
         assert result is None
-        assert "s1" in client._pending_tool_calls
+        assert "s1" in client._approval.pending_tool_calls
 
     def test_filtered_messages(self):
         """Approval answer message is removed from filtered_messages."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._pending_tool_calls["s1"] = {
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.pending_tool_calls["s1"] = {
             "approval_call_id": "ask_1",
             "tool_calls": [ToolCallInfo(name="web_search", args={}, id="c1")],
             "usage": None,
             "input_messages": [],
         }
         messages = [
-            Message(role=MessageRole.USER, content="hello"),
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALLOW_ONCE,
+            HumanMessage(content="hello"),
+            ToolMessage(
                 tool_call_id="ask_1",
+                content=ApprovalChoice.ALLOW_ONCE,
             ),
         ]
 
@@ -693,7 +754,7 @@ class TestApprovalLifecycle:
 
     async def test_allow_once_still_requires_approval_next_time(self):
         """Allow Once executes the tool but does NOT auto-approve future calls."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_web__search", meta={"requires_approval": True}),
@@ -714,10 +775,9 @@ class TestApprovalLifecycle:
         # 2) User responds "Allow Once"
         info = client.request_approval(server_calls, "s1", None, [])
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALLOW_ONCE,
+            ToolMessage(
                 tool_call_id=info["approval_call_id"],
+                content=ApprovalChoice.ALLOW_ONCE,
             )
         ]
         result = client.handle_approval_response("s1", messages)
@@ -728,7 +788,7 @@ class TestApprovalLifecycle:
 
     async def test_always_allow_skips_approval_on_next_call(self):
         """Always Allow auto-approves the tool for all future calls in the session."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_web__search", meta={"requires_approval": True}),
@@ -749,22 +809,21 @@ class TestApprovalLifecycle:
         # 2) User responds "Always Allow"
         info = client.request_approval(server_calls, "s1", None, [])
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.ALWAYS_ALLOW,
+            ToolMessage(
                 tool_call_id=info["approval_call_id"],
+                content=ApprovalChoice.ALWAYS_ALLOW,
             )
         ]
         result = client.handle_approval_response("s1", messages)
         assert result["decision"] == ApprovalChoice.ALWAYS_ALLOW.decision
-        assert ws in client._auto_approved_tools["s1"]
+        assert ws in client._approval.auto_approved_tools["s1"]
 
         # 3) Next call: web_search no longer needs approval
         assert client.needs_approval(ws, "s1") is False
 
     async def test_deny_does_not_auto_approve(self):
         """Deny does not add tool to auto-approved; next call still requires approval."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_web__search", meta={"requires_approval": True}),
@@ -779,10 +838,9 @@ class TestApprovalLifecycle:
         _, server_calls = client.classify_tool_calls(tc, "s1")
         info = client.request_approval(server_calls, "s1", None, [])
         messages = [
-            Message(
-                role=MessageRole.TOOL,
-                content=ApprovalChoice.DENY,
+            ToolMessage(
                 tool_call_id=info["approval_call_id"],
+                content=ApprovalChoice.DENY,
             )
         ]
         result = client.handle_approval_response("s1", messages)
@@ -793,7 +851,7 @@ class TestApprovalLifecycle:
 
     async def test_tool_without_meta_never_requires_approval(self):
         """Tools without requires_approval meta always go to auto."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("calculator"),
@@ -818,7 +876,7 @@ class TestApprovalLifecycle:
 
     async def test_always_allow_is_per_session(self):
         """Auto-approval for session s1 does not affect session s2."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
             tools=[
                 _mock_tool("mcp_web__search", meta={"requires_approval": True}),
@@ -831,7 +889,7 @@ class TestApprovalLifecycle:
         ws = "mcp_web__search"
 
         # Auto-approve in s1
-        client._auto_approved_tools["s1"] = {ws}
+        client._approval.auto_approved_tools["s1"] = {ws}
 
         # s1: skips approval (auto-approved)
         assert client.needs_approval(ws, "s1") is False
@@ -848,18 +906,18 @@ class TestApprovalLifecycle:
 class TestClearSessionState:
     def test_clears_pending_and_auto(self):
         """clear_session_state removes both pending and auto-approved state."""
-        client = MCPClient(server_urls=["http://srv"])
-        client._pending_tool_calls["s1"] = {"approval_call_id": "x", "tool_calls": []}
-        client._auto_approved_tools["s1"] = {"web_search"}
+        client = MCPClientController(server_urls=["http://srv"])
+        client._approval.pending_tool_calls["s1"] = {"approval_call_id": "x", "tool_calls": []}
+        client._approval.auto_approved_tools["s1"] = {"web_search"}
 
         client.clear_session_state("s1")
 
-        assert "s1" not in client._pending_tool_calls
-        assert "s1" not in client._auto_approved_tools
+        assert "s1" not in client._approval.pending_tool_calls
+        assert "s1" not in client._approval.auto_approved_tools
 
     def test_clear_nonexistent_session_safe(self):
         """Clearing a non-existent session does not raise."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         client.clear_session_state("nonexistent")  # should not raise
 
 
@@ -873,9 +931,9 @@ class TestToolPassthrough:
 
     async def test_discover_then_call_passthrough(self):
         """Full flow: discover → call_tool passes the name through unchanged."""
-        client = MCPClient(server_urls=["http://srv"])
+        client = MCPClientController(server_urls=["http://srv"])
         session = _make_session(
-            tools=[_mock_tool("mcp_filesystem__read", "Read a file")],
+            tools=[_mock_tool("mcp_filesystem__bash", "Read a file")],
             call_result=_mock_call_result("file content"),
         )
         client._get_session = AsyncMock(return_value=session)
@@ -883,18 +941,18 @@ class TestToolPassthrough:
 
         await client.discover_tools()
 
-        assert client.is_server_tool("mcp_filesystem__read")
+        assert client.is_server_tool("mcp_filesystem__bash")
 
-        result = await client.call_tool("mcp_filesystem__read", {"path": "/tmp/x"})
+        result = await client.call_tool("mcp_filesystem__bash", {"path": "/tmp/x"})
         assert result == "file content"
         session.call_tool.assert_awaited_once_with(
-            "mcp_filesystem__read", {"path": "/tmp/x"}, meta=None
+            "mcp_filesystem__bash", {"path": "/tmp/x"}, meta=None
         )
 
     async def test_distinct_names_from_different_servers(self):
         """Two servers register tools with their own namespaced names."""
-        client = MCPClient(server_urls=["http://a", "http://b"])
-        session_a = _make_session(tools=[_mock_tool("mcp_filesystem__read")])
+        client = MCPClientController(server_urls=["http://a", "http://b"])
+        session_a = _make_session(tools=[_mock_tool("mcp_filesystem__bash")])
         session_b = _make_session(tools=[_mock_tool("mcp_cloud__read")])
 
         async def fake_get_session(url):
@@ -907,4 +965,4 @@ class TestToolPassthrough:
         tools = await client.discover_tools()
 
         names = {t["function"]["name"] for t in tools}
-        assert names == {"mcp_filesystem__read", "mcp_cloud__read"}
+        assert names == {"mcp_filesystem__bash", "mcp_cloud__read"}

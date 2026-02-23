@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@heureum/bash':
+        specifier: file:../bash
+        version: file:../bash
       '@silvia-odwyer/photon-node':
         specifier: ^0.3.0
         version: 0.3.4
@@ -194,6 +197,9 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@heureum/bash@file:../bash':
+    resolution: {directory: ../bash, type: directory}
 
   '@isaacs/cliui@9.0.0':
     resolution: {integrity: sha512-AokJm4tuBHillT+FpMtxQ60n8ObyXBatq7jD2/JA9dxbDDokKQm8KMht5ibGzLVU9IJDIKK4TPKgMHEYMn3lMg==}
@@ -942,6 +948,8 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.3':
     optional: true
+
+  '@heureum/bash@file:../bash': {}
 
   '@isaacs/cliui@9.0.0': {}
 

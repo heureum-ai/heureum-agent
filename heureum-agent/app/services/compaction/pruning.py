@@ -34,14 +34,11 @@ import fnmatch
 import logging
 from typing import List, Optional
 
-from app.models import Message
-from app.schemas.open_responses import MessageRole
 from app.services.compaction.settings import CompactionSettings, ToolPruningConfig
-from app.services.compaction.tokens import estimate_message_chars
+from app.services.compaction.tokens import _text_content, estimate_message_chars
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
-
-_TOOL_ROLES = frozenset({MessageRole.TOOL})
 
 
 def _is_tool_prunable(tool_name: Optional[str], config: ToolPruningConfig) -> bool:
@@ -77,7 +74,7 @@ def _is_tool_prunable(tool_name: Optional[str], config: ToolPruningConfig) -> bo
 
 
 def _find_assistant_cutoff_index(
-    messages: List[Message],
+    messages: List[BaseMessage],
     keep_last_assistants: int,
 ) -> int:
     """Index of the Nth-from-last assistant message.
@@ -87,7 +84,7 @@ def _find_assistant_cutoff_index(
     protected tail, so we return 0 to allow pruning of older tool results.
 
     Args:
-        messages (List[Message]): Conversation message list to scan.
+        messages (List[BaseMessage]): Conversation message list to scan.
         keep_last_assistants (int): Number of recent assistant messages to
             protect from pruning.
 
@@ -100,7 +97,7 @@ def _find_assistant_cutoff_index(
 
     remaining = keep_last_assistants
     for i in range(len(messages) - 1, -1, -1):
-        if messages[i].role == MessageRole.ASSISTANT:
+        if isinstance(messages[i], AIMessage):
             remaining -= 1
             if remaining == 0:
                 return i
@@ -109,18 +106,18 @@ def _find_assistant_cutoff_index(
     return 0
 
 
-def _find_first_user_index(messages: List[Message]) -> Optional[int]:
+def _find_first_user_index(messages: List[BaseMessage]) -> Optional[int]:
     """Index of the first user message (identity/bootstrap messages before it are protected).
 
     Args:
-        messages (List[Message]): Conversation message list to scan.
+        messages (List[BaseMessage]): Conversation message list to scan.
 
     Returns:
-        Optional[int]: Index of the first message with role ``"user"``,
+        Optional[int]: Index of the first HumanMessage,
             or ``None`` if no user message exists.
     """
     for i, msg in enumerate(messages):
-        if msg.role == MessageRole.USER:
+        if isinstance(msg, HumanMessage):
             return i
     return None
 
@@ -151,40 +148,40 @@ def _soft_trim_content(
 
 
 def _soft_trim_message(
-    msg: Message,
+    msg: BaseMessage,
     settings: CompactionSettings,
-) -> Optional[Message]:
+) -> Optional[BaseMessage]:
     """Soft-trim a tool result message. Returns None if no trimming needed.
 
     Args:
-        msg (Message): Tool result message to potentially trim.
+        msg (BaseMessage): Tool result message to potentially trim.
         settings (CompactionSettings): Compaction configuration containing
             soft-trim thresholds.
 
     Returns:
-        Optional[Message]: A new ``Message`` with trimmed content, or ``None``
+        Optional[BaseMessage]: A new message with trimmed content, or ``None``
             if the message is already within the size limit.
     """
-    if len(msg.content) <= settings.soft_trim.max_chars:
+    text = _text_content(msg.content)
+    if len(text) <= settings.soft_trim.max_chars:
         return None
 
     head = settings.soft_trim.head_chars
     tail = settings.soft_trim.tail_chars
-    if head + tail >= len(msg.content):
+    if head + tail >= len(text):
         return None
 
-    trimmed = _soft_trim_content(msg.content, head, tail)
-    return Message(role=msg.role, content=trimmed, tool_call_id=msg.tool_call_id, tool_name=msg.tool_name)
+    trimmed = _soft_trim_content(text, head, tail)
+    if isinstance(msg, ToolMessage):
+        return ToolMessage(content=trimmed, tool_call_id=msg.tool_call_id, name=msg.name)
+    return msg
 
 
-def _estimate_chars(msg: Message) -> int:
+def _estimate_chars(msg: BaseMessage) -> int:
     """Estimate the character count of a message including tool_calls.
 
-    Mirrors OpenClaw's estimateMessageChars which includes serialised
-    tool_calls JSON in the character budget.
-
     Args:
-        msg (Message): Message to measure.
+        msg (BaseMessage): Message to measure.
 
     Returns:
         int: Character count of content plus tool_calls metadata.
@@ -192,11 +189,11 @@ def _estimate_chars(msg: Message) -> int:
     return estimate_message_chars(msg)
 
 
-def _total_chars(messages: List[Message]) -> int:
+def _total_chars(messages: List[BaseMessage]) -> int:
     """Compute total character count across all messages including tool_calls.
 
     Args:
-        messages (List[Message]): Messages to measure.
+        messages (List[BaseMessage]): Messages to measure.
 
     Returns:
         int: Sum of character counts of all messages (content + tool_calls).
@@ -205,9 +202,9 @@ def _total_chars(messages: List[Message]) -> int:
 
 
 def prune_context_messages(
-    messages: List[Message],
+    messages: List[BaseMessage],
     settings: CompactionSettings,
-) -> List[Message]:
+) -> List[BaseMessage]:
     """Prune context messages using a 2-phase strategy.
 
     Phase 1 — soft trim (ratio >= soft_trim_ratio):
@@ -219,12 +216,12 @@ def prune_context_messages(
     first user message are always protected.
 
     Args:
-        messages (List[Message]): Full conversation message list to prune.
+        messages (List[BaseMessage]): Full conversation message list to prune.
         settings (CompactionSettings): Compaction configuration containing
             pruning thresholds and trim parameters.
 
     Returns:
-        List[Message]: Pruned message list. May be the original list if no
+        List[BaseMessage]: Pruned message list. May be the original list if no
             pruning was needed, or a new list with trimmed/cleared tool
             results.
     """
@@ -246,13 +243,13 @@ def prune_context_messages(
         return messages
 
     prunable_indices: List[int] = []
-    result: Optional[List[Message]] = None
+    result: Optional[List[BaseMessage]] = None
 
     for i in range(prune_start, cutoff_index):
         msg = messages[i]
-        if msg.role not in _TOOL_ROLES:
+        if not isinstance(msg, ToolMessage):
             continue
-        if not _is_tool_prunable(msg.tool_name, settings.tool_pruning):
+        if not _is_tool_prunable(msg.name, settings.tool_pruning):
             continue
         prunable_indices.append(i)
 
@@ -280,7 +277,7 @@ def prune_context_messages(
     prunable_chars = sum(
         _estimate_chars(output_after_soft[i])
         for i in prunable_indices
-        if output_after_soft[i].role in _TOOL_ROLES
+        if isinstance(output_after_soft[i], ToolMessage)
     )
     if prunable_chars < settings.min_prunable_tool_chars:
         return output_after_soft
@@ -290,11 +287,15 @@ def prune_context_messages(
             break
 
         msg = output_after_soft[i]
-        if msg.role not in _TOOL_ROLES:
+        if not isinstance(msg, ToolMessage):
             continue
 
         before = _estimate_chars(msg)
-        cleared = Message(role=msg.role, content=settings.hard_clear.placeholder, tool_call_id=msg.tool_call_id, tool_name=msg.tool_name)
+        cleared = ToolMessage(
+            content=settings.hard_clear.placeholder,
+            tool_call_id=msg.tool_call_id,
+            name=msg.name,
+        )
 
         if result is None:
             result = list(messages)

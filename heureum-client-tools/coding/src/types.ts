@@ -31,6 +31,16 @@ export interface CodingTool {
 export interface ToolResult {
 	success: boolean;
 	output: string;
+	outputPath?: string;
 	/** Image attachments (for image file reads) */
 	images?: Array<{ data: string; mimeType: string }>;
 }
+
+export interface TaskContext {
+	sessionId: string;
+	taskType: string;
+	taskId: string;
+	workDir?: string;
+}
+
+export type CodingToolResult = ToolResult;

@@ -1,3 +1,3 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
-"""MCP tool implementations: web, filesystem."""
+"""MCP tool implementations: web."""

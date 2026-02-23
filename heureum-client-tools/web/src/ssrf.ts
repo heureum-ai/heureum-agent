@@ -346,7 +346,7 @@ function createPinnedAgent(
 /**
  * Make an HTTP(S) request using Node.js native http/https modules.
  */
-function nativeRequest(
+async function nativeRequest(
   url: string,
   options: {
     headers?: Record<string, string>
@@ -355,7 +355,7 @@ function nativeRequest(
     servername?: string
   },
 ): Promise<FetchResponse> {
-  return new Promise((resolve, reject) => {
+  return await new Promise((resolve, reject) => {
     const parsed = new URL(url)
     const isHttps = parsed.protocol === 'https:'
     const mod = isHttps ? https : http

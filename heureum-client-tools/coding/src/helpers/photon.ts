@@ -123,7 +123,7 @@ export async function loadPhoton(): Promise<typeof import("@silvia-odwyer/photon
 	}
 
 	loadPromise = (async () => {
-		const restoreReadFileSync = patchPhotonWasmRead();
+		const restoreReadFilePatch = patchPhotonWasmRead();
 		try {
 			photonModule = await import("@silvia-odwyer/photon-node");
 			return photonModule;
@@ -131,7 +131,7 @@ export async function loadPhoton(): Promise<typeof import("@silvia-odwyer/photon
 			photonModule = null;
 			return photonModule;
 		} finally {
-			restoreReadFileSync();
+			restoreReadFilePatch();
 		}
 	})();
 

@@ -10,7 +10,6 @@ from pydantic import ValidationError
 
 from app.schemas.open_responses import (
     AssistantMessageItem,
-    ContentPart,
     DeveloperMessageItem,
     ErrorObject,
     ErrorType,
@@ -43,6 +42,7 @@ FIXTURES_DIR = Path(__file__).parent / "integration"
 # Usage
 # ---------------------------------------------------------------------------
 
+
 class TestUsage:
     def test_zero(self):
         u = Usage.zero()
@@ -54,12 +54,16 @@ class TestUsage:
 
     def test_add(self):
         a = Usage(
-            input_tokens=10, output_tokens=5, total_tokens=15,
+            input_tokens=10,
+            output_tokens=5,
+            total_tokens=15,
             input_tokens_details=InputTokenDetails(cached_tokens=3),
             output_tokens_details=OutputTokenDetails(reasoning_tokens=2),
         )
         b = Usage(
-            input_tokens=20, output_tokens=10, total_tokens=30,
+            input_tokens=20,
+            output_tokens=10,
+            total_tokens=30,
             input_tokens_details=InputTokenDetails(cached_tokens=7),
             output_tokens_details=OutputTokenDetails(reasoning_tokens=4),
         )
@@ -80,6 +84,7 @@ class TestUsage:
 # ---------------------------------------------------------------------------
 # Content parts
 # ---------------------------------------------------------------------------
+
 
 class TestInputTextContent:
     def test_creation(self):
@@ -108,6 +113,7 @@ class TestOutputTextContent:
 # ---------------------------------------------------------------------------
 # MessageItem and subclasses
 # ---------------------------------------------------------------------------
+
 
 class TestMessageItem:
     def test_normalize_content_from_string(self):
@@ -167,21 +173,23 @@ class TestDeveloperMessageItem:
 # Function tool call / result
 # ---------------------------------------------------------------------------
 
+
 class TestFunctionToolCall:
     def test_required_fields(self):
-        tc = FunctionToolCall(name="my_tool", arguments='{"a":1}')
+        tc = FunctionToolCall(name="my_tool", arguments='{"a":1}', display_name="My Tool")
         assert tc.type == "function_call"
         assert tc.name == "my_tool"
         assert tc.arguments == '{"a":1}'
         assert tc.status == ItemStatus.COMPLETED
+        assert tc.display_name == "My Tool"
 
     def test_arguments_is_json_string(self):
-        tc = FunctionToolCall(name="t", arguments='{"key":"val"}')
+        tc = FunctionToolCall(name="t", arguments='{"key":"val"}', display_name="T")
         parsed = json.loads(tc.arguments)
         assert parsed == {"key": "val"}
 
     def test_optional_fields(self):
-        tc = FunctionToolCall(name="t", arguments="{}")
+        tc = FunctionToolCall(name="t", arguments="{}", display_name="T")
         assert tc.id is None
         assert tc.call_id is None
         assert tc.usage is None
@@ -206,6 +214,7 @@ class TestFunctionToolResult:
 # ---------------------------------------------------------------------------
 # ReasoningItem / ItemReferenceItem
 # ---------------------------------------------------------------------------
+
 
 class TestReasoningItem:
     def test_all_optional(self):
@@ -238,13 +247,16 @@ class TestItemReferenceItem:
 # ToolDefinition
 # ---------------------------------------------------------------------------
 
+
 class TestToolDefinition:
     def test_name_property(self):
         td = ToolDefinition(
-            function=FunctionDefinition(name="search", description="Search the web")
+            function=FunctionDefinition(name="search", description="Search the web"),
+            display_name="Search",
         )
         assert td.name == "search"
         assert td.type == "function"
+        assert td.display_name == "Search"
 
     def test_function_optional_fields(self):
         fd = FunctionDefinition(name="f")
@@ -255,6 +267,7 @@ class TestToolDefinition:
 # ---------------------------------------------------------------------------
 # ResponseRequest
 # ---------------------------------------------------------------------------
+
 
 class TestResponseRequest:
     def test_defaults(self):
@@ -291,6 +304,7 @@ class TestResponseRequest:
 # ResponseObject
 # ---------------------------------------------------------------------------
 
+
 class TestResponseObject:
     def test_full_assembly(self):
         msg = AssistantMessageItem(
@@ -315,8 +329,12 @@ class TestResponseObject:
     def test_status_values(self):
         for status in ResponseStatus:
             resp = ResponseObject(
-                id="r", created_at=0, model="m",
-                status=status, output=[], usage=Usage.zero(),
+                id="r",
+                created_at=0,
+                model="m",
+                status=status,
+                output=[],
+                usage=Usage.zero(),
             )
             assert resp.status == status
 
@@ -324,6 +342,7 @@ class TestResponseObject:
 # ---------------------------------------------------------------------------
 # ErrorObject
 # ---------------------------------------------------------------------------
+
 
 class TestErrorObject:
     def test_error_types(self):
@@ -349,6 +368,7 @@ class TestErrorObject:
 # ROLE_TO_MESSAGE_CLASS mapping
 # ---------------------------------------------------------------------------
 
+
 class TestRoleToMessageClass:
     def test_mapping_completeness(self):
         expected = {
@@ -364,13 +384,17 @@ class TestRoleToMessageClass:
 # Fixture round-trip: parse real integration JSON into ResponseObject
 # ---------------------------------------------------------------------------
 
+
 class TestFixtureRoundTrip:
-    @pytest.mark.parametrize("fixture_file", [
-        "02_simple_text_response.json",
-        "03_tool_call_response.json",
-        "04_tool_result_continuation.json",
-        "07_agentic_loop_web_search.json",
-    ])
+    @pytest.mark.parametrize(
+        "fixture_file",
+        [
+            "02_simple_text_response.json",
+            "03_tool_call_response.json",
+            "04_tool_result_continuation.json",
+            "07_agentic_loop_web_search.json",
+        ],
+    )
     def test_parse_fixture(self, fixture_file: str):
         path = FIXTURES_DIR / fixture_file
         data = json.loads(path.read_text())
@@ -409,6 +433,7 @@ class TestFixtureRoundTrip:
 # ResponseStatus enum
 # ---------------------------------------------------------------------------
 
+
 class TestResponseStatus:
     def test_has_six_values(self):
         assert len(ResponseStatus) == 6
@@ -421,6 +446,7 @@ class TestResponseStatus:
 # ---------------------------------------------------------------------------
 # ItemStatus enum (no FAILED / CANCELLED)
 # ---------------------------------------------------------------------------
+
 
 class TestItemStatus:
     def test_has_three_values(self):
@@ -439,6 +465,7 @@ class TestItemStatus:
 # ---------------------------------------------------------------------------
 # ResponseRequest new fields
 # ---------------------------------------------------------------------------
+
 
 class TestResponseRequestNewFields:
     def test_tool_choice_defaults_none(self):

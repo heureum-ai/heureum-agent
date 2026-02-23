@@ -13,7 +13,8 @@
             "name": "web_search",
             "arguments": "{\"query\": \"2026 AI news\", \"search_context_size\": \"medium\"}",
             "status": "completed",
-            "usage": null
+            "usage": null,
+            "display_name": "Web Search"
         },
         {
             "type": "function_call_output",
@@ -29,7 +30,8 @@
             "name": "web_search",
             "arguments": "{\"query\": \"2026 artificial intelligence updates\", \"search_context_size\": \"medium\"}",
             "status": "completed",
-            "usage": null
+            "usage": null,
+            "display_name": "Web Search"
         },
         {
             "type": "function_call_output",
@@ -45,7 +47,8 @@
             "name": "web_search",
             "arguments": "{\"query\": \"2026 AI technology trends\", \"search_context_size\": \"medium\"}",
             "status": "completed",
-            "usage": null
+            "usage": null,
+            "display_name": "Web Search"
         },
         {
             "type": "function_call_output",

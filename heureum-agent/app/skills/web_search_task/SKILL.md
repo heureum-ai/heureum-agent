@@ -1,22 +1,22 @@
 ---
 name: web_search_task
 description: Web search and content retrieval workflow
-server_tools: mcp_web__search, mcp_web__fetch, mcp_filesystem__read
-client_tools:
+server_tools: mcp_web__search
+client_tools: web_fetch, read
 depends_on:
 ---
-You have `mcp_web__search`, `mcp_web__fetch` and `mcp_filesystem__read` tools for web research.
+You have `mcp_web__search`, `web_fetch` and `read` tools for web research.
 
 ## Workflow — always follow this sequence:
 
 1. `mcp_web__search(query="...")` — returns snippets and URLs.
    Search snippets are summaries, not full content. Never answer based on snippets alone.
 
-2. `mcp_web__fetch(url="...")` — fetches the page and saves full content to a session_file.
+2. `web_fetch(url="...")` — fetches the page and saves content as a local .md file.
    Call fetch on the top 1–2 URLs from search results.
 
-3. `mcp_filesystem__read(path="<session_file>")` — read the saved content.
-   The fetch result includes a session_file path. Use read to access the actual content.
+3. `read(path="<md_path>")` — read the saved .md file.
+   The fetch result includes a file path. Use read to access the actual content.
 
 ## Tool reference
 
@@ -27,22 +27,20 @@ You have `mcp_web__search`, `mcp_web__fetch` and `mcp_filesystem__read` tools fo
   - `search_depth`: `"basic"` (default) or `"advanced"` for deeper search.
   - `country`: ISO code (e.g. `"KR"`) or country name for geo-relevant results.
 
-`mcp_web__fetch(url, max_length?, start_index?, extract_mode?)`
-  Fetch a URL and save full content to a session_file. Returns a short snippet inline.
+`web_fetch(url, max_length?, start_index?, extract_mode?)`
+  Fetch a URL and save content as a local .md file. Returns a short snippet inline.
   - `url`: the URL to fetch (required)
-  - `max_length`: max characters to extract (default: 5000).
+  - `max_length`: max characters to extract (default: 20000).
   - `start_index`: character offset to start reading from (default: 0). Use for pagination on long pages.
   - `extract_mode`: `"markdown"` (default) or `"text"`.
 
-`mcp_filesystem__read(path, offset?, limit?)`
-  Read the saved session_file content.
-  - `path`: file path (required)
-  - `offset`: start line, 1-indexed.
-  - `limit`: max lines to read.
+`read(path)`
+  Read a local file.
+  - `path`: path to the .md file saved by web_fetch.
 
 ## Key rules
-- After search, you must call `mcp_web__fetch` before answering. Search snippets are not sufficient.
-- After fetch, you must call `mcp_filesystem__read` on the session_file. Fetch saves content to a file and does not return it inline.
+- After search, you must call `web_fetch` before answering. Search snippets are not sufficient.
+- After fetch, use `read(path="<md_path>")` to read the saved .md file for full content.
 - For broad topics, run 2–3 `mcp_web__search` calls in parallel with diverse keywords.
-- Call multiple `mcp_web__fetch` in parallel on different URLs in a single turn.
-- After fetches complete, call multiple `mcp_filesystem__read` in parallel in a single turn.
+- Call multiple `web_fetch` in parallel on different URLs in a single turn.
+- After fetches complete, call multiple `read` in parallel in a single turn.

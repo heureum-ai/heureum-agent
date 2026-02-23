@@ -19,9 +19,6 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Re-use a single httpx pool across all platform clients in the process.
-_shared_http_client = None
-
 
 @dataclass(frozen=True)
 class SessionContext:
@@ -29,7 +26,6 @@ class SessionContext:
 
     session_id: str
     platform_api_url: str
-    cwd: str = ""
 
 
 def extract_session_context(ctx) -> Optional[SessionContext]:
@@ -50,41 +46,11 @@ def extract_session_context(ctx) -> Optional[SessionContext]:
         meta = ctx.request_context.meta
         session_id = getattr(meta, "session_id", None)
         platform_api_url = getattr(meta, "platform_api_url", None)
-        cwd = getattr(meta, "cwd", "") or ""
         if session_id and platform_api_url:
             return SessionContext(
                 session_id=session_id,
                 platform_api_url=platform_api_url,
-                cwd=cwd,
             )
     except (AttributeError, ValueError):
         logger.debug("Session context extraction failed (no meta on ctx)", exc_info=True)
     return None
-
-
-def get_platform_client(session_ctx: SessionContext):
-    """Create a :class:`PlatformFileClient` from a :class:`SessionContext`.
-
-    Shares a single ``httpx.AsyncClient`` across all invocations within
-    the process to avoid connection-pool churn.
-
-    Args:
-        session_ctx: Session context with ``session_id`` and ``platform_api_url``.
-
-    Returns:
-        A :class:`PlatformFileClient` instance scoped to the session.
-    """
-    global _shared_http_client
-
-    import httpx
-    from src.tools.filesystem.platform_ops import PlatformFileClient
-
-    if _shared_http_client is None:
-        _shared_http_client = httpx.AsyncClient(timeout=30.0)
-
-    return PlatformFileClient(
-        platform_api_url=session_ctx.platform_api_url,
-        session_id=session_ctx.session_id,
-        cwd="/session",
-        http_client=_shared_http_client,
-    )

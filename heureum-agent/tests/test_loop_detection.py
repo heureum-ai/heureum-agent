@@ -3,7 +3,7 @@
 """Tests for tool loop detection."""
 
 import pytest
-from app.services.loop_detection import (
+from app.services.tools.loop_detection import (
     BUCKET_SIZE,
     LoopSeverity,
     ToolCallRecord,
@@ -26,7 +26,7 @@ def _clean_state():
     """Clear global loop state between tests."""
     yield
     # Clear all session states
-    from app.services.loop_detection import _session_states
+    from app.services.tools.loop_detection import _session_states
 
     _session_states.clear()
 
@@ -191,7 +191,9 @@ class TestDetectToolCallLoop:
             rec = ToolCallRecord(tool_name="browser_wait", call_hash="h", result_hash="same")
             state.records.append(rec)
 
-        result = detect_tool_call_loop("s4", config=cfg)
+        result = detect_tool_call_loop(
+            "s4", config=cfg, dynamic_poll_tools=frozenset({"browser_wait"})
+        )
         assert result.severity == LoopSeverity.CRITICAL
         assert result.pattern == "poll_loop"
 

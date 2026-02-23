@@ -79,25 +79,6 @@ export function setExtensionConnected(connected: boolean): void {
 
 // --- Dynamic tool builders ---
 
-function buildBashTool(): ToolDefinition {
-  const cwdNote = sessionCwd
-    ? ` Commands will execute in the working directory: ${sessionCwd}.`
-    : ' No working directory is set; commands will execute in the default directory. You should call select_cwd first to let the user choose a working directory.';
-  return {
-    type: 'function',
-    name: 'bash',
-    display_name: 'Bash',
-    description: `Execute a bash command on the local system.${cwdNote}`,
-    parameters: {
-      type: 'object',
-      properties: {
-        command: { type: 'string', description: 'The bash command to execute' },
-      },
-      required: ['command'],
-    },
-  };
-}
-
 function buildSelectCwdTool(): ToolDefinition {
   const cwdStatus = sessionCwd
     ? `Current working directory is: ${sessionCwd}.`
@@ -106,7 +87,7 @@ function buildSelectCwdTool(): ToolDefinition {
     type: 'function',
     name: 'select_cwd',
     display_name: 'Select Directory',
-    description: `Open a native folder picker dialog for the user to select a working directory for bash commands. ${cwdStatus} Call this before running bash commands if no working directory has been set, or if the user wants to change it.`,
+    description: `Open a native folder picker dialog for the user to select a working directory for local command tools. ${cwdStatus} Call this before running command tools if no working directory has been set, or if the user wants to change it.`,
     parameters: {
       type: 'object',
       properties: {},
@@ -152,79 +133,21 @@ const ASK_QUESTION_TOOL: ToolDefinition = {
   },
 };
 
-const BROWSER_NAVIGATE_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'browser_navigate',
-  display_name: 'Navigate',
-  description: 'Navigate the current browser tab to a URL. Returns page content.',
-  parameters: {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: 'The URL to navigate to' },
-    },
-    required: ['url'],
-  },
-};
+// --- Browser tools loaded from @heureum/browser package via IPC ---
+let cachedBrowserTools: ToolDefinition[] | null = null;
 
-const BROWSER_NEW_TAB_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'browser_new_tab',
-  display_name: 'New Tab',
-  description: 'Open a URL in a new browser tab. Returns page content.',
-  parameters: {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: 'The URL to open in a new tab' },
-    },
-    required: ['url'],
-  },
-};
-
-const BROWSER_CLICK_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'browser_click',
-  display_name: 'Click',
-  description: 'Click an element on the page using a CSS selector from browser_get_content.',
-  parameters: {
-    type: 'object',
-    properties: {
-      selector: { type: 'string', description: 'CSS selector of the element to click' },
-    },
-    required: ['selector'],
-  },
-};
-
-const BROWSER_TYPE_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'browser_type',
-  display_name: 'Type',
-  description: 'Type text into an input field using a CSS selector from browser_get_content.',
-  parameters: {
-    type: 'object',
-    properties: {
-      selector: { type: 'string', description: 'CSS selector of the input element' },
-      text: { type: 'string', description: 'Text to type into the input' },
-    },
-    required: ['selector', 'text'],
-  },
-};
-
-const BROWSER_GET_CONTENT_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'browser_get_content',
-  display_name: 'Get Content',
-  description:
-    'Get current page content: title, URL, interactive elements with CSS selectors, and visible text. Call this before clicking or typing.',
-  parameters: { type: 'object', properties: {} },
-};
-
-const BROWSER_TOOLS: ToolDefinition[] = [
-  BROWSER_NAVIGATE_TOOL,
-  BROWSER_NEW_TAB_TOOL,
-  BROWSER_CLICK_TOOL,
-  BROWSER_TYPE_TOOL,
-  BROWSER_GET_CONTENT_TOOL,
-];
+export async function initBrowserTools(): Promise<void> {
+  if (!canExecuteTools()) return;
+  try {
+    const schemas = await window.api!.getBrowserTools();
+    cachedBrowserTools = schemas.map(s => ({
+      ...s,
+      type: 'function' as const,
+    })) as ToolDefinition[];
+  } catch {
+    cachedBrowserTools = [];
+  }
+}
 
 const GET_DEVICE_INFO_TOOL: ToolDefinition = {
   type: 'function',
@@ -402,8 +325,8 @@ export async function initCodingTools(): Promise<void> {
     cachedCodingTools = schemas.map(s => ({
       ...s,
       type: 'function' as const,
-    }));
-    CODING_TOOL_NAMES = new Set(cachedCodingTools.map(t => t.name));
+    })) as ToolDefinition[];
+    CODING_TOOL_NAMES = new Set(cachedCodingTools!.map(t => t.name));
   } catch {
     cachedCodingTools = [];
   }
@@ -413,22 +336,17 @@ export function isMobileApp(): boolean {
   return typeof window !== 'undefined' && window.mobileBridge?.available === true;
 }
 
-function extractBaseCommand(fullCommand: string): string {
-  return fullCommand.trim().split(/\s+/)[0];
-}
-
 function buildTools(): ToolDefinition[] {
   const tools: ToolDefinition[] = [ASK_QUESTION_TOOL];
   if (canExecuteTools()) {
-    tools.push(buildBashTool());
     if (cachedCodingTools) {
       tools.push(...cachedCodingTools);
     }
     if (!cwdSelectionDeclined && !sessionCwd) {
       tools.push(buildSelectCwdTool());
     }
-    if (extensionConnected) {
-      tools.push(...BROWSER_TOOLS);
+    if (extensionConnected && cachedBrowserTools) {
+      tools.push(...cachedBrowserTools);
     }
   }
   if (isMobileApp()) {
@@ -617,9 +535,7 @@ export async function fetchAllSessionMessages(sessionId: string): Promise<Messag
 
       let parsedArgs: Record<string, unknown> = {};
       try { parsedArgs = JSON.parse(args); } catch { /* ignore */ }
-      const command = name === 'bash' && parsedArgs.command
-        ? String(parsedArgs.command)
-        : name;
+      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : name;
 
       messages.push({
         role: 'assistant',
@@ -635,7 +551,7 @@ export async function fetchAllSessionMessages(sessionId: string): Promise<Messag
     } else if (msg.type === 'todo_state') {
       // Reconstruct todo progress from persisted snapshot
       const todoContent = msg.content as unknown as TodoState;
-      if (todoContent && todoContent.task) {
+      if (todoContent && todoContent.tasks) {
         messages.push({ role: 'assistant', content: '', todo: todoContent });
       }
     }
@@ -708,9 +624,7 @@ export async function fetchSessionMessagesPage(
 
       let parsedArgs: Record<string, unknown> = {};
       try { parsedArgs = JSON.parse(args); } catch { /* ignore */ }
-      const command = name === 'bash' && parsedArgs.command
-        ? String(parsedArgs.command)
-        : name;
+      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : name;
 
       messages.push({
         role: 'assistant',
@@ -725,7 +639,7 @@ export async function fetchSessionMessagesPage(
       });
     } else if (msg.type === 'todo_state') {
       const todoContent = msg.content as unknown as TodoState;
-      if (todoContent && todoContent.task) {
+      if (todoContent && todoContent.tasks) {
         messages.push({ role: 'assistant', content: '', todo: todoContent });
       }
     }
@@ -750,6 +664,7 @@ export interface SubagentProgressStep {
   tool_name: string;
   detail: string;
   status: 'running' | 'completed' | 'failed';
+  display_name: string;
 }
 
 export interface SubagentStatusItem {
@@ -1199,95 +1114,9 @@ export const chatAPI = {
           continue;
         }
 
-        // --- Handle bash tool calls ---
-        // Block bash execution if no working directory is set
-        if (!sessionCwd) {
-          const deniedInfo: ToolCallInfo = {
-            command: tc.name,
-            status: 'failed',
-            output: 'No working directory set.',
-            exitCode: 1,
-          };
-          onToolCall?.({ ...deniedInfo });
-          collectedToolCalls.push(deniedInfo);
-          const sessionId = data.metadata?.session_id || request.session_id || '';
-          return {
-            message:
-              'A working directory is required to run commands. You can set one using the "Set Working Directory" button in the header.',
-            session_id: sessionId,
-            toolCalls: collectedToolCalls,
-          };
-        }
-
-        const args = JSON.parse(tc.arguments);
-        const command: string = args.command;
-        const baseCommand = extractBaseCommand(command);
-
-        // --- Permission check (always query platform) ---
-        let decision: PermissionDecision = 'allow_once';
-
-        const stored = await checkPermission(clientId, tc.name, baseCommand);
-        if (stored === true) {
-          decision = 'always_allow';
-        } else if (stored === false) {
-          decision = 'deny';
-        } else if (onPermissionRequired) {
-          decision = await onPermissionRequired({
-            toolName: tc.name,
-            command,
-            callId: tc.call_id,
-          });
-        }
-
-        const bashLogDecision = stored === true ? 'auto_approved' : decision;
-        const bashSid = data.metadata?.session_id || request.session_id || '';
-        logPermissionDecision(bashSid, clientId, tc.name, command, baseCommand, bashLogDecision, tc.call_id).catch(() => {});
-
-        // --- Handle denial ---
-        if (decision === 'deny') {
-          const deniedInfo: ToolCallInfo = {
-            command,
-            status: 'failed',
-            output: 'Permission denied by user',
-            exitCode: -1,
-          };
-          onToolCall?.({ ...deniedInfo });
-          collectedToolCalls.push(deniedInfo);
-          toolResults.push({
-            type: 'function_call_output',
-            call_id: tc.call_id,
-            output: 'Permission denied: user rejected tool execution.',
-          });
-          continue;
-        }
-
-        // --- Store "always allow" if user chose it and it wasn't already stored ---
-        if (decision === 'always_allow' && stored !== true) {
-          await setPermission(clientId, tc.name, baseCommand, true);
-        }
-
-        // --- Execute the tool ---
-        const toolCallInfo: ToolCallInfo = { command, status: 'running' };
-        onToolCall?.({ ...toolCallInfo });
-
-        const result = await window.api!.executeBash(command, sessionCwd || undefined);
-        const output = result.stdout + (result.stderr ? `\nSTDERR: ${result.stderr}` : '');
-        const exitCode = result.exitCode;
-
-        toolCallInfo.output = output || '(no output)';
-        toolCallInfo.exitCode = exitCode;
-        toolCallInfo.status = exitCode === 0 ? 'completed' : 'failed';
-        onToolCall?.({ ...toolCallInfo });
-        collectedToolCalls.push({ ...toolCallInfo });
-
-        toolResults.push({
-          type: 'function_call_output',
-          call_id: tc.call_id,
-          output: output || '(no output)',
-        });
       }
 
-      // Send results back (include tools so LLM can chain select_cwd → bash)
+      // Send results back (include tools so LLM can chain select_cwd → command tools)
       const followUpInput: InputItem[] = [...inputItems, ...toolCalls, ...toolResults];
       const followUpRequest: ResponseRequest = {
         input: followUpInput,

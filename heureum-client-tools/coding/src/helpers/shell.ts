@@ -1,40 +1,58 @@
-import { existsSync } from "node:fs";
-import { spawn, spawnSync } from "child_process";
+import { spawn } from "child_process";
+import { constants } from "node:fs";
+import { access } from "node:fs/promises";
 
 let cachedShellConfig: { shell: string; args: string[] } | null = null;
+
+async function existsAsync(p: string): Promise<boolean> {
+	try {
+		await access(p, constants.F_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Find bash executable on PATH (cross-platform)
  */
-function findBashOnPath(): string | null {
+async function findBashOnPath(): Promise<string | null> {
 	if (process.platform === "win32") {
-		try {
-			const result = spawnSync("where", ["bash.exe"], { encoding: "utf-8", timeout: 5000 });
-			if (result.status === 0 && result.stdout) {
-				const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-				if (firstMatch && existsSync(firstMatch)) {
-					return firstMatch;
+		return new Promise((resolve) => {
+			const child = spawn("where", ["bash.exe"], { stdio: ["ignore", "pipe", "pipe"] });
+			let stdout = "";
+			child.stdout.on("data", (data) => (stdout += data.toString()));
+			child.on("close", async (code) => {
+				if (code === 0 && stdout) {
+					const firstMatch = stdout.trim().split(/\r?\n/)[0];
+					if (firstMatch && (await existsAsync(firstMatch))) {
+						resolve(firstMatch);
+						return;
+					}
 				}
-			}
-		} catch {
-			// Ignore errors
-		}
-		return null;
+				resolve(null);
+			});
+			child.on("error", () => resolve(null));
+		});
 	}
 
 	// Unix: Use 'which' and trust its output
-	try {
-		const result = spawnSync("which", ["bash"], { encoding: "utf-8", timeout: 5000 });
-		if (result.status === 0 && result.stdout) {
-			const firstMatch = result.stdout.trim().split(/\r?\n/)[0];
-			if (firstMatch) {
-				return firstMatch;
+	return new Promise((resolve) => {
+		const child = spawn("which", ["bash"], { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		child.stdout.on("data", (data) => (stdout += data.toString()));
+		child.on("close", (code) => {
+			if (code === 0 && stdout) {
+				const firstMatch = stdout.trim().split(/\r?\n/)[0];
+				if (firstMatch) {
+					resolve(firstMatch);
+					return;
+				}
 			}
-		}
-	} catch {
-		// Ignore errors
-	}
-	return null;
+			resolve(null);
+		});
+		child.on("error", () => resolve(null));
+	});
 }
 
 /**
@@ -43,7 +61,7 @@ function findBashOnPath(): string | null {
  * 1. On Windows: Git Bash in known locations, then bash on PATH
  * 2. On Unix: /bin/bash, then bash on PATH, then fallback to sh
  */
-export function getShellConfig(): { shell: string; args: string[] } {
+export async function getShellConfig(): Promise<{ shell: string; args: string[] }> {
 	if (cachedShellConfig) {
 		return cachedShellConfig;
 	}
@@ -60,13 +78,13 @@ export function getShellConfig(): { shell: string; args: string[] } {
 		}
 
 		for (const path of paths) {
-			if (existsSync(path)) {
+			if (await existsAsync(path)) {
 				cachedShellConfig = { shell: path, args: ["-c"] };
 				return cachedShellConfig;
 			}
 		}
 
-		const bashOnPath = findBashOnPath();
+		const bashOnPath = await findBashOnPath();
 		if (bashOnPath) {
 			cachedShellConfig = { shell: bashOnPath, args: ["-c"] };
 			return cachedShellConfig;
@@ -78,12 +96,12 @@ export function getShellConfig(): { shell: string; args: string[] } {
 	}
 
 	// Unix: try /bin/bash, then bash on PATH, then fallback to sh
-	if (existsSync("/bin/bash")) {
+	if (await existsAsync("/bin/bash")) {
 		cachedShellConfig = { shell: "/bin/bash", args: ["-c"] };
 		return cachedShellConfig;
 	}
 
-	const bashOnPath = findBashOnPath();
+	const bashOnPath = await findBashOnPath();
 	if (bashOnPath) {
 		cachedShellConfig = { shell: bashOnPath, args: ["-c"] };
 		return cachedShellConfig;

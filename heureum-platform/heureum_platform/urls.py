@@ -4,6 +4,11 @@
 URL configuration for heureum_platform project.
 """
 
+from chat_messages.internal_views import (
+    complete_response as internal_complete_response,
+    save_message as internal_save_message,
+    save_tool_history as internal_save_tool_history,
+)
 from chat_messages.views import (
     MessageViewSet,
     QuestionViewSet,
@@ -45,4 +50,14 @@ urlpatterns = [
     path("api/v1/sessions/", include("session_files.urls")),
     # Periodic tasks
     path("api/v1/periodic-tasks/", include("periodic_tasks.urls")),
+    # Subagent persist
+    path("api/v1/subagents/", include("subagents.urls")),
+    # Internal message persist (agent → platform, real-time)
+    path("api/v1/messages/internal/save/", internal_save_message, name="internal_save_message"),
+    path(
+        "api/v1/messages/internal/response/<str:response_id>/complete/",
+        internal_complete_response,
+        name="internal_complete_response",
+    ),
+    path("api/v1/messages/internal/tool-history/", internal_save_tool_history, name="internal_save_tool_history"),
 ]

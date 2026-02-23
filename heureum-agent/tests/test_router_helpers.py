@@ -1,26 +1,21 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
-"""Tests for pure helper functions in app.routers.agent."""
+"""Tests for pure helper functions in app.services.agent_loop."""
 
 import asyncio
 import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
-import app.routers.agent as agent_module
+import app.services.agent_loop as agent_loop_pkg
 import pytest
 from app.config import settings
 from app.models import ToolCallInfo
-from app.routers.agent import (
-    _AgentLoopRunner,
-    _build_response,
-    _execute_tool_calls_pipelined,
-    _extract_session_id,
-    _LoopContext,
-    _parse_input,
-    _text_output,
-    _tool_call_output,
+from app.services.agent_loop import (
+    AgentLoopRunner,
+    LoopContext,
 )
+from app.services.messages import MessageController
 from app.schemas.open_responses import (
     AssistantMessageItem,
     ErrorObject,
@@ -30,7 +25,6 @@ from app.schemas.open_responses import (
     InputTextContent,
     ItemReferenceItem,
     ItemStatus,
-    MessageRole,
     OutputTextContent,
     ReasoningItem,
     ResponseRequest,
@@ -42,18 +36,29 @@ from app.schemas.open_responses import (
 FAKE_UUID_HEX = "a" * 32
 
 
+message_controller = MessageController()
+_parse_input = message_controller.response_message_controller.parse_input_messages
+_text_output = message_controller.response_message_controller.text_output
+_tool_call_output = message_controller.response_message_controller.tool_call_output
+_build_response = message_controller.response_message_controller.build_response
+
+
+def _extract_session_id(req: ResponseRequest) -> str:
+    return message_controller.response_message_controller.extract_session_id(req.metadata)
+
+
 @pytest.fixture(autouse=False)
 def mock_uuid():
     fake = MagicMock()
     fake.hex = FAKE_UUID_HEX
-    with patch("app.routers.agent.uuid.uuid4", return_value=fake) as m:
-        yield m
+    with patch("app.services.messages.responses.uuid.uuid4", return_value=fake) as m1:
+        yield (m1,)
 
 
 @pytest.fixture(autouse=False)
 def mock_time():
-    with patch("app.routers.agent.time.time", return_value=1700000000.0) as m:
-        yield m
+    with patch("app.services.messages.responses.time.time", return_value=1700000000.0) as m1:
+        yield (m1,)
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +71,7 @@ class TestParseInput:
         req = ResponseRequest(input="hello")
         result = _parse_input(req)
         assert len(result) == 1
-        assert result[0].role == MessageRole.USER
+        assert result[0].type == "human"
         assert result[0].content == "hello"
 
     def test_user_message_item(self):
@@ -76,7 +81,7 @@ class TestParseInput:
         req = ResponseRequest(input=[item])
         result = _parse_input(req)
         assert len(result) == 1
-        assert result[0].role == MessageRole.USER
+        assert result[0].type == "human"
         assert result[0].content == "hi\nthere"
 
     def test_function_tool_result(self):
@@ -84,12 +89,14 @@ class TestParseInput:
         req = ResponseRequest(input=[item])
         result = _parse_input(req)
         assert len(result) == 1
-        assert result[0].role == MessageRole.TOOL
+        assert result[0].type == "tool"
         assert result[0].content == "result_text"
         assert result[0].tool_call_id == "call_1"
 
     def test_function_tool_call_skipped(self):
-        item = FunctionToolCall(name="some_tool", arguments="{}", call_id="c1")
+        item = FunctionToolCall(
+            name="some_tool", arguments="{}", call_id="c1", display_name="Some Tool"
+        )
         req = ResponseRequest(input=[item])
         result = _parse_input(req)
         assert result == []
@@ -114,7 +121,7 @@ class TestParseInput:
     def test_mixed_input(self):
         items = [
             UserMessageItem(content="question"),
-            FunctionToolCall(name="tool_a", arguments="{}", call_id="c1"),
+            FunctionToolCall(name="tool_a", arguments="{}", call_id="c1", display_name="Tool A"),
             FunctionToolResult(call_id="c1", output="answer"),
             ReasoningItem(content="hmm"),
             ItemReferenceItem(item_id="ref_1"),
@@ -123,12 +130,12 @@ class TestParseInput:
         req = ResponseRequest(input=items)
         result = _parse_input(req)
         assert len(result) == 3
-        assert result[0].role == MessageRole.USER
+        assert result[0].type == "human"
         assert result[0].content == "question"
-        assert result[1].role == MessageRole.TOOL
+        assert result[1].type == "tool"
         assert result[1].content == "answer"
         assert result[1].tool_call_id == "c1"
-        assert result[2].role == MessageRole.ASSISTANT
+        assert result[2].type == "ai"
         assert result[2].content == "reply"
 
 
@@ -190,21 +197,22 @@ class TestTextOutput:
 
 class TestToolCallOutput:
     def test_name_and_call_id(self):
-        tc = _tool_call_output("my_tool", {"key": "val"}, "call_99")
+        tc = _tool_call_output("my_tool", {"key": "val"}, "call_99", display_name="My Tool")
         assert tc.name == "my_tool"
         assert tc.call_id == "call_99"
+        assert tc.display_name == "My Tool"
 
     def test_dict_arguments_serialized(self):
-        tc = _tool_call_output("t", {"a": 1, "b": [2]}, "c")
+        tc = _tool_call_output("t", {"a": 1, "b": [2]}, "c", display_name="T")
         parsed = json.loads(tc.arguments)
         assert parsed == {"a": 1, "b": [2]}
 
     def test_string_arguments_passthrough(self):
-        tc = _tool_call_output("t", '{"raw": true}', "c")
+        tc = _tool_call_output("t", '{"raw": true}', "c", display_name="T")
         assert tc.arguments == '{"raw": true}'
 
     def test_id_prefix(self, mock_uuid):
-        tc = _tool_call_output("t", {}, "c")
+        tc = _tool_call_output("t", {}, "c", display_name="T")
         assert tc.id == f"fc_{FAKE_UUID_HEX}"
 
 
@@ -313,10 +321,9 @@ class TestPipelinedChainDepth:
     @pytest.mark.asyncio
     async def test_depth_is_tracked_per_chain_hop(self, monkeypatch):
         """All sibling root calls should get first-hop follow-ups."""
+        ctrl = agent_loop_pkg._default
 
-        async def _fake_safe(
-            tc: ToolCallInfo, session_id: str = "", cwd: str = ""
-        ) -> tuple[ToolCallInfo, str]:
+        async def _fake_safe(tc: ToolCallInfo, session_id: str = "") -> tuple[ToolCallInfo, str]:
             delays = {"start_a": 0.01, "start_b": 0.02, "start_c": 0.03}
             await asyncio.sleep(delays.get(tc.name, 0))
             return tc, '{"ok": true}'
@@ -327,22 +334,31 @@ class TestPipelinedChainDepth:
                 return [ToolCallInfo(name=f"follow_{suffix}", args={}, id=f"fu_{tc.id}")]
             return []
 
-        monkeypatch.setattr(agent_module, "_safe_execute_tool", _fake_safe)
-        monkeypatch.setattr(agent_module.chain_registry, "build_per_result", _fake_build)
+        monkeypatch.setattr(ctrl.tool_exec, "safe_execute_tool", _fake_safe)
+        monkeypatch.setattr(ctrl.tool_exec.tool_controller, "build_per_result", _fake_build)
 
         roots = [
             ToolCallInfo(name="start_a", args={}, id="a"),
             ToolCallInfo(name="start_b", args={}, id="b"),
             ToolCallInfo(name="start_c", args={}, id="c"),
         ]
-        results, _ = await _execute_tool_calls_pipelined(
+        display_names = {
+            "start_a": "Start A",
+            "start_b": "Start B",
+            "start_c": "Start C",
+            "follow_a": "Follow A",
+            "follow_b": "Follow B",
+            "follow_c": "Follow C",
+        }
+        results, _ = await ctrl.tool_exec.execute_tool_calls_pipelined(
             roots,
             all_output_items=[],
+            display_names=display_names,
             session_id="s1",
             max_depth=1,
         )
 
-        names = [m.tool_name for m in results]
+        names = [m.name for m in results]
         assert "follow_a" in names
         assert "follow_b" in names
         assert "follow_c" in names
@@ -352,6 +368,7 @@ class TestStreamRetries:
     @pytest.mark.asyncio
     async def test_unfinished_work_does_not_emit_duplicate_delta(self, monkeypatch):
         """Partial text should be streamed once per iteration."""
+        ctrl = agent_loop_pkg._default
 
         class _FakeAccum:
             def __init__(self):
@@ -363,16 +380,16 @@ class TestStreamRetries:
             yield ("delta", "PARTIAL")
             yield ("done", _FakeAccum())
 
-        monkeypatch.setattr(agent_module.skill_provider, "has_unfinished_work", lambda _sid: True)
+        monkeypatch.setattr(ctrl.skill_controller, "has_unfinished_work", lambda _sid: True)
         monkeypatch.setattr(
-            agent_module.skill_provider,
+            ctrl.skill_controller,
             "build_retry_guidance",
             lambda _sid, _t: "Continue",
         )
-        monkeypatch.setattr(agent_module.agent_service, "_append_to_history", lambda *a, **k: None)
-        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+        monkeypatch.setattr(ctrl.agent_service, "append_to_history", lambda *a, **k: None)
+        monkeypatch.setattr(settings, "MAX_AGENT_ITERATIONS", 1)
 
-        ctx = _LoopContext(
+        ctx = LoopContext(
             request=SimpleNamespace(instructions=None),
             created_at=0,
             session_id="s1",
@@ -380,8 +397,9 @@ class TestStreamRetries:
             messages=[],
             tool_names=["dummy_tool"],
             total_usage=Usage.zero(),
+            ctrl=ctrl,
         )
-        runner = _AgentLoopRunner(ctx)
+        runner = AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
 
         events = []
@@ -442,43 +460,46 @@ class TestToolCallNarrationFiltering:
             model="test-model",
             messages=[],
             tool_names=["mcp_web__search"],
+            display_names={"mcp_web__search": "Web Search"},
             total_usage=Usage.zero(),
+            ctrl=agent_loop_pkg._default,
         )
         defaults.update(overrides)
-        return _LoopContext(**defaults)
+        return LoopContext(**defaults)
 
     def _apply_common_patches(self, monkeypatch):
+        ctrl = agent_loop_pkg._default
         monkeypatch.setattr(
-            agent_module.skill_provider,
+            ctrl.skill_controller,
             "has_unfinished_work",
             lambda _sid: False,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider,
+            ctrl.skill_controller,
             "should_force_text_only",
             lambda _sid: False,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider,
+            ctrl.skill_controller,
             "clear_completed_plans",
             lambda _sid: None,
         )
         monkeypatch.setattr(
-            agent_module.skill_provider,
+            ctrl.skill_controller,
             "get_state_prompts",
             lambda _sid: [],
         )
         monkeypatch.setattr(
-            agent_module.agent_service,
-            "_append_to_history",
+            ctrl.agent_service,
+            "append_to_history",
             lambda *a, **k: None,
         )
         monkeypatch.setattr(
-            agent_module.agent_service,
+            ctrl.agent_service,
             "append_tool_interaction",
             _async_noop,
         )
-        monkeypatch.setattr(agent_module.settings, "ENABLE_SELF_EVALUATION", False)
+        monkeypatch.setattr(settings, "ENABLE_SELF_EVALUATION", False)
 
     # ------------------------------------------------------------------ #
     # Case 1 (Normal): text-only → deltas + done, no abandoned            #
@@ -488,7 +509,7 @@ class TestToolCallNarrationFiltering:
     async def test_text_only_streams_deltas_and_done(self, monkeypatch):
         """Text-only LLM response: deltas streamed, done emitted, no abandoned."""
         self._apply_common_patches(monkeypatch)
-        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+        monkeypatch.setattr(settings, "MAX_AGENT_ITERATIONS", 1)
 
         accum = self._text_accum("대한민국은 동아시아에 위치한 나라입니다.")
 
@@ -498,7 +519,7 @@ class TestToolCallNarrationFiltering:
             yield ("done", accum)
 
         ctx = self._make_ctx()
-        runner = _AgentLoopRunner(ctx)
+        runner = AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
 
         raw_events = []
@@ -526,7 +547,7 @@ class TestToolCallNarrationFiltering:
         """When LLM generates narration text + tool_calls, abandoned event
         must be emitted so the frontend discards the streamed narration."""
         self._apply_common_patches(monkeypatch)
-        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+        monkeypatch.setattr(settings, "MAX_AGENT_ITERATIONS", 1)
 
         narration = "mcp_web__search를 사용하여 검색하겠습니다."
         accum = self._tool_accum(text=narration)
@@ -536,7 +557,7 @@ class TestToolCallNarrationFiltering:
             yield ("done", accum)
 
         ctx = self._make_ctx()
-        runner = _AgentLoopRunner(ctx)
+        runner = AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
             runner,
@@ -571,7 +592,7 @@ class TestToolCallNarrationFiltering:
     async def test_tool_call_without_narration_emits_abandoned(self, monkeypatch):
         """Tool call with empty text: no deltas, abandoned still emitted (harmless)."""
         self._apply_common_patches(monkeypatch)
-        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 1)
+        monkeypatch.setattr(settings, "MAX_AGENT_ITERATIONS", 1)
 
         accum = self._tool_accum(text="")
 
@@ -579,7 +600,7 @@ class TestToolCallNarrationFiltering:
             yield ("done", accum)
 
         ctx = self._make_ctx()
-        runner = _AgentLoopRunner(ctx)
+        runner = AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
             runner,
@@ -609,7 +630,7 @@ class TestToolCallNarrationFiltering:
         """Iteration 1: tool_call + narration → abandoned.
         Iteration 2: text-only → done + completed."""
         self._apply_common_patches(monkeypatch)
-        monkeypatch.setattr(agent_module.settings, "MAX_AGENT_ITERATIONS", 2)
+        monkeypatch.setattr(settings, "MAX_AGENT_ITERATIONS", 2)
 
         narration = "검색 도구를 사용하겠습니다."
         final_answer = "대한민국은 동아시아에 위치한 나라입니다."
@@ -627,7 +648,7 @@ class TestToolCallNarrationFiltering:
                 yield ("done", self._text_accum(final_answer))
 
         ctx = self._make_ctx()
-        runner = _AgentLoopRunner(ctx)
+        runner = AgentLoopRunner(ctx)
         monkeypatch.setattr(runner, "_stream_llm_and_accumulate", _fake_stream)
         monkeypatch.setattr(
             runner,

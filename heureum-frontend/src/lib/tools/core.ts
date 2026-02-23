@@ -3,6 +3,7 @@ import type { ToolDefinition } from '../../types';
 export const ASK_QUESTION_TOOL: ToolDefinition = {
   type: 'function',
   name: 'ask_question',
+  display_name: 'Question',
   description:
     'Ask the user a multiple-choice question when you need clarification or when the user needs to make a decision before proceeding. Present clear choices and optionally allow free-text input.',
   parameters: {

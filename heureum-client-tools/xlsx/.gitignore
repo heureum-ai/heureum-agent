@@ -1,0 +1,23 @@
+# Office and document files
+*.doc
+*.docx
+*.docm
+*.dot
+*.dotx
+*.hwp
+*.hwpx
+*.pdf
+*.ppt
+*.pptx
+*.pptm
+*.xls
+*.xlsx
+*.xlsm
+*.csv
+*.rtf
+*.odt
+*.ods
+*.odp
+
+# Temporary lock files
+~$*

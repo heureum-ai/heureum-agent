@@ -86,6 +86,9 @@ class Message(models.Model):
     role = models.CharField(max_length=20, choices=ROLE_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="completed")
 
+    # Sequence number for idempotent real-time persist (null for proxy-created)
+    seq = models.PositiveIntegerField(null=True, blank=True)
+
     # Content stored as JSON array of content parts
     content = models.JSONField(default=list)
 
@@ -121,6 +124,13 @@ class Message(models.Model):
         indexes = [
             models.Index(fields=["session_id", "-created_at"]),
             models.Index(fields=["response", "-created_at"]),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["response", "seq"],
+                condition=models.Q(seq__isnull=False),
+                name="unique_response_seq",
+            ),
         ]
 
     def save(self, *args, **kwargs):

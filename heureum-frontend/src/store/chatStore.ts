@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import { create } from 'zustand';
-import type { Message, TodoState, SubagentProgress } from '../types';
+import type { Message } from '../types';
 import { clearSessionCwd, setSessionCwd } from '../lib/api';
 
 interface ChatState {
@@ -21,9 +21,14 @@ interface ChatState {
   appendStreamDelta: (delta: string) => void;
   clearStreamingText: () => void;
   clearMessages: () => void;
-  loadSession: (sessionId: string, messages: Message[], cwd: string | null, hasOlderMessages?: boolean) => void;
-  updateOrAddTodo: (todo: TodoState) => void;
-  updateOrAddSubagentProgress: (progress: SubagentProgress) => void;
+  updateOrAddTodo: (todo: NonNullable<Message['todo']>) => void;
+  loadSession: (
+    sessionId: string,
+    messages: Message[],
+    cwd: string | null,
+    hasOlderMessages?: boolean,
+    loadedPages?: number,
+  ) => void;
   updateToolCallStatus: (callId: string, status: 'completed' | 'failed', output?: string) => void;
   setHasOlderMessages: (v: boolean) => void;
   setLoadingOlder: (v: boolean) => void;
@@ -53,41 +58,43 @@ export const useChatStore = create<ChatState>((set, get) => ({
     clearSessionCwd();
     set({ messages: [], sessionId: null, cwd: null, streamingText: '', hasOlderMessages: false, isLoadingOlder: false, oldestLoadedPage: 1 });
   },
-  loadSession: (sessionId, messages, cwd, hasOlderMessages = false) => {
+  updateOrAddTodo: (todo) => {
+    set((state) => {
+      const idx = state.messages.findIndex((m) => m.todo != null);
+      if (idx < 0) {
+        return { messages: [...state.messages, { role: 'assistant', content: '', todo }] };
+      }
+      const updated = [...state.messages];
+      updated[idx] = { ...updated[idx], todo };
+      return { messages: updated };
+    });
+  },
+  loadSession: (sessionId, messages, cwd, hasOlderMessages = false, loadedPages = 1) => {
     if (cwd) {
       setSessionCwd(cwd);
     } else {
       clearSessionCwd();
     }
-    set({ messages, sessionId, cwd, streamingText: '', hasOlderMessages, oldestLoadedPage: 1 });
+    const isSessionChange = sessionId !== get().sessionId;
+    set({
+      messages,
+      sessionId,
+      cwd,
+      ...(isSessionChange && { streamingText: '' }),
+      hasOlderMessages,
+      oldestLoadedPage: loadedPages,
+    });
   },
   updateToolCallStatus: (callId, status, output) => {
-    const msgs = get().messages;
-    const idx = msgs.findIndex(m => m.toolCall?.callId === callId);
-    if (idx >= 0) {
+    set((state) => {
+      const msgs = state.messages;
+      const idx = msgs.findIndex(m => m.toolCall?.callId === callId);
+      if (idx < 0) return state;
       const updated = [...msgs];
       const tc = { ...msgs[idx].toolCall!, status, ...(output != null ? { output } : {}) };
       updated[idx] = { ...msgs[idx], toolCall: tc };
-      set({ messages: updated });
-    }
-  },
-  updateOrAddTodo: (todo) => {
-    const msgs = get().messages;
-    // Remove previous todo and re-add at the end so it always
-    // appears near the latest activity (like Claude Code's in-place update).
-    const filtered = msgs.filter(m => m.todo == null);
-    set({ messages: [...filtered, { role: 'assistant', content: '', todo }] });
-  },
-  updateOrAddSubagentProgress: (progress) => {
-    const msgs = get().messages;
-    const idx = msgs.findIndex(m => m.subagentProgress?.childSessionId === progress.childSessionId);
-    if (idx >= 0) {
-      const updated = [...msgs];
-      updated[idx] = { ...msgs[idx], subagentProgress: progress };
-      set({ messages: updated });
-    } else {
-      set({ messages: [...msgs, { role: 'assistant', content: '', subagentProgress: progress }] });
-    }
+      return { messages: updated };
+    });
   },
   setHasOlderMessages: (v) => set({ hasOlderMessages: v }),
   setLoadingOlder: (v) => set({ isLoadingOlder: v }),

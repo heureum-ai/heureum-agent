@@ -10,7 +10,7 @@ from app.services.prompts.base import (
     build_system_prompt,
 )
 from app.services.prompts.compaction import COMPACTION_PREFIX
-from app.services.providers.skill import SkillProvider
+from app.services.skills import SkillController
 
 # ---------------------------------------------------------------------------
 # TestBuildSystemPrompt
@@ -39,7 +39,7 @@ class TestBuildSystemPrompt:
     def test_no_client_tools_no_client_guides(self):
         """Without client_tool_prompts, no client-provided guides appear.
         Server-side guides (todo, periodic_task) are always present."""
-        provider = SkillProvider()
+        provider = SkillController()
         result = build_system_prompt(server_tool_prompts=provider.get_all_guide_prompts())
         # Server-side guides are always present
         assert "manage_todo" in result

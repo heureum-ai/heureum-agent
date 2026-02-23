@@ -5,43 +5,8 @@
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from app.schemas.open_responses import MessageRole, Usage
+from app.schemas.open_responses import Usage
 from pydantic import BaseModel
-
-
-class Message(BaseModel):
-    """Message model.
-
-    Attributes:
-        role (MessageRole): The role of the message sender.
-        content (str): The text content of the message.
-        tool_call_id (Optional[str]): Identifier linking this message to a
-            specific tool call, if applicable.
-        tool_calls (Optional[List[Dict[str, Any]]]): List of tool call
-            descriptors emitted by the model, if any.
-        tool_name (Optional[str]): Name of the tool that produced this result
-            (tool-role messages only). Used for selective pruning.
-    """
-
-    role: MessageRole
-    content: str
-    tool_call_id: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    tool_name: Optional[str] = None
-    usage: Optional[Dict[str, Any]] = None
-
-
-class AgentRequest(BaseModel):
-    """Agent request model.
-
-    Attributes:
-        messages (List[Message]): Conversation history to send to the agent.
-        session_id (Optional[str]): Optional session identifier for
-            maintaining conversation state across requests.
-    """
-
-    messages: List[Message]
-    session_id: Optional[str] = None
 
 
 class AgentResponse(BaseModel):
@@ -51,11 +16,13 @@ class AgentResponse(BaseModel):
         message (str): The text content of the agent's reply.
         session_id (str): Session identifier for the conversation.
         usage (Optional[Usage]): Token usage statistics from the LLM.
+        reasoning (Optional[str]): Thinking/reasoning content from the LLM.
     """
 
     message: str
     session_id: str
     usage: Optional[Usage] = None
+    reasoning: Optional[str] = None
 
 
 class ToolCallInfo(BaseModel):
@@ -104,3 +71,4 @@ class LLMResult(BaseModel):
     assistant_lc_message: Optional[Any] = None
     session_id: str
     usage: Usage
+    reasoning: Optional[str] = None

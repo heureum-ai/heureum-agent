@@ -3,7 +3,7 @@
 """Tests for model fallback."""
 
 import pytest
-from app.services.model_fallback import (
+from app.services.providers.model_fallback import (
     AllModelsFailedError,
     AuthProfileManager,
     ErrorAction,

@@ -99,6 +99,9 @@ def proxy_to_agent(request: Request) -> Response:
             metadata=data.get("metadata", {}),
         )
 
+        # Pass response_id to agent so it can persist messages in real-time
+        data["metadata"]["response_id"] = response_obj.id
+
         # Store input messages
         input_data = data.get("input")
         input_messages = []
@@ -277,10 +280,25 @@ def _calculate_cost(input_tokens, output_tokens, pricing):
 
 
 def _persist_output(response_data, session_id, response_obj, item_usages=None, todo_state=None):
-    """Store output items and update response object from agent response."""
+    """Store output items and update response object from agent response.
+
+    If the agent already persisted messages in real-time (messages with seq),
+    this function skips creating duplicate text/tool messages and only handles
+    items the agent didn't persist (function_calls, tool_history, todo_state)
+    plus the response-level usage/cost update.
+    """
     output_items = response_data.get("output", [])
     model_name = response_data.get("model", "")
     pricing = ModelPricing.get_for_model(model_name)
+
+    # Check which messages the agent already persisted in real-time (per-message dedup).
+    # Using per-seq check instead of all-or-nothing to handle partial persist
+    # (e.g. agent crashes after persisting 2 of 5 messages).
+    existing_seqs = set(
+        Message.objects.filter(response=response_obj, seq__isnull=False)
+        .values_list("seq", flat=True)
+    )
+    agent_persisted = bool(existing_seqs)
 
     # Build per-iteration usage lookup from streaming events
     # text_usages[i] = usage dict for the i-th assistant text message
@@ -321,6 +339,12 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
             # Assistant text message — assign per-iteration usage
             item_usage = text_usages[text_idx] if text_idx < len(text_usages) else {}
             text_idx += 1
+
+            # Skip if agent already persisted this specific message in real-time.
+            # Use text_idx as the seq proxy: agent assigns seq sequentially,
+            # and text messages correspond to text_idx in order.
+            if agent_persisted and (text_idx - 1) in existing_seqs:
+                continue
 
             msg_input = item_usage.get("input_tokens", 0)
             msg_output = item_usage.get("output_tokens", 0)

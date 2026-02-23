@@ -1,5 +1,6 @@
-import { spawnSync } from "child_process";
-import { chmodSync, createWriteStream, existsSync, mkdirSync, renameSync, rmSync } from "fs";
+import { spawn } from "child_process";
+import { createWriteStream, existsSync } from "fs";
+import { access, chmod, mkdir, rename, rm } from "fs/promises";
 import { arch, homedir, platform } from "os";
 import { join } from "path";
 import { Readable } from "stream";
@@ -58,16 +59,54 @@ const TOOLS: Record<string, ToolConfig> = {
 	},
 };
 
-function commandExists(cmd: string): boolean {
+async function commandExists(cmd: string): Promise<boolean> {
 	try {
-		const result = spawnSync(cmd, ["--version"], { stdio: "pipe" });
-		return result.error === undefined || result.error === null;
+		const result = await runSpawnCommand(cmd, ["--version"]);
+		return result.status === 0;
 	} catch {
 		return false;
 	}
 }
 
-export function getToolPath(tool: "fd" | "rg"): string | null {
+async function pathExists(targetPath: string): Promise<boolean> {
+	try {
+		await access(targetPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+type SpawnResult = {
+	status: number;
+	stdout: string;
+	stderr: string;
+	error?: NodeJS.ErrnoException;
+};
+
+async function runSpawnCommand(command: string, args: string[]): Promise<SpawnResult> {
+	return await new Promise((resolve) => {
+		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout?.setEncoding("utf-8");
+		child.stderr?.setEncoding("utf-8");
+		child.stdout?.on("data", (chunk) => {
+			stdout += chunk;
+		});
+		child.stderr?.on("data", (chunk) => {
+			stderr += chunk;
+		});
+		child.on("error", (error) => {
+			resolve({ status: 1, stdout, stderr, error: error as NodeJS.ErrnoException });
+		});
+		child.on("close", (code) => {
+			resolve({ status: code ?? 1, stdout, stderr });
+		});
+	});
+}
+
+export async function getToolPath(tool: "fd" | "rg"): Promise<string | null> {
 	const config = TOOLS[tool];
 	if (!config) return null;
 
@@ -76,7 +115,7 @@ export function getToolPath(tool: "fd" | "rg"): string | null {
 		return localPath;
 	}
 
-	if (commandExists(config.binaryName)) {
+	if (await commandExists(config.binaryName)) {
 		return config.binaryName;
 	}
 
@@ -125,7 +164,7 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
 	}
 
-	mkdirSync(TOOLS_DIR, { recursive: true });
+	await mkdir(TOOLS_DIR, { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
 	const archivePath = join(TOOLS_DIR, assetName);
@@ -135,35 +174,35 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	await downloadFile(downloadUrl, archivePath);
 
 	const extractDir = join(TOOLS_DIR, "extract_tmp");
-	mkdirSync(extractDir, { recursive: true });
+	await mkdir(extractDir, { recursive: true });
 
 	try {
 		const extractResult = assetName.endsWith(".tar.gz")
-			? spawnSync("tar", ["xzf", archivePath, "-C", extractDir], { stdio: "pipe" })
+			? await runSpawnCommand("tar", ["xzf", archivePath, "-C", extractDir])
 			: assetName.endsWith(".zip")
-				? spawnSync("tar", ["xf", archivePath, "-C", extractDir], { stdio: "pipe" })
+				? await runSpawnCommand("tar", ["xf", archivePath, "-C", extractDir])
 				: null;
 
 		if (!extractResult || extractResult.error || extractResult.status !== 0) {
-			const errMsg = extractResult?.error?.message ?? extractResult?.stderr?.toString().trim() ?? "unknown error";
+			const errMsg = extractResult?.error?.message ?? extractResult?.stderr?.trim() ?? "unknown error";
 			throw new Error(`Failed to extract ${assetName}: ${errMsg}`);
 		}
 
 		const extractedDir = join(extractDir, assetName.replace(/\.(tar\.gz|zip)$/, ""));
 		const extractedBinary = join(extractedDir, config.binaryName + binaryExt);
 
-		if (existsSync(extractedBinary)) {
-			renameSync(extractedBinary, binaryPath);
+		if (await pathExists(extractedBinary)) {
+			await rename(extractedBinary, binaryPath);
 		} else {
 			throw new Error(`Binary not found in archive: ${extractedBinary}`);
 		}
 
 		if (plat !== "win32") {
-			chmodSync(binaryPath, 0o755);
+			await chmod(binaryPath, 0o755);
 		}
 	} finally {
-		rmSync(archivePath, { force: true });
-		rmSync(extractDir, { recursive: true, force: true });
+		await rm(archivePath, { force: true });
+		await rm(extractDir, { recursive: true, force: true });
 	}
 
 	return binaryPath;
@@ -175,7 +214,7 @@ const TERMUX_PACKAGES: Record<string, string> = {
 };
 
 export async function ensureTool(tool: "fd" | "rg", silent: boolean = false): Promise<string | undefined> {
-	const existingPath = getToolPath(tool);
+	const existingPath = await getToolPath(tool);
 	if (existingPath) {
 		return existingPath;
 	}

@@ -29,6 +29,13 @@ def _get_session(session_id, request):
 class SessionFileViewSet(ViewSet):
     """REST API for session file operations."""
 
+    _UNTHROTTLED_ACTIONS = frozenset({"write_by_path", "read_by_path", "delete_by_path"})
+
+    def get_throttles(self):
+        if self.action in self._UNTHROTTLED_ACTIONS:
+            return []
+        return super().get_throttles()
+
     def list(self, request, session_id=None):
         """List files in session, optional ?path= prefix filter."""
         session = _get_session(session_id, request)
@@ -213,11 +220,8 @@ class SessionFileViewSet(ViewSet):
         except ValueError as e:
             return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Ensure session exists
-        try:
-            session = Session.objects.get(session_id=session_id)
-        except Session.DoesNotExist:
-            return Response({"error": "Session not found"}, status=status.HTTP_404_NOT_FOUND)
+        # Ensure session exists (auto-create for subagent sessions)
+        session, _ = Session.objects.get_or_create(session_id=session_id)
 
         content_bytes = content.encode("utf-8")
         content_type = mimetypes.guess_type(path)[0] or "text/plain"

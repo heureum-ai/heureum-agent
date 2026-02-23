@@ -1,103 +1,232 @@
 /* Copyright (c) 2026 Heureum AI. All rights reserved. */
 
-/* ── TODO Progress — Claude Code style ── */
+/* ── Tree-style TodoProgress ── */
 
-.ac-todo {
+.tp-tree {
+  font-family: 'SF Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  max-width: 90%;
+}
+
+/* ── Plan (root node) ── */
+
+.tp-plan {
   display: flex;
-  gap: 10px;
-  align-items: flex-start;
-  max-width: 85%;
-  font-size: 14px;
+  align-items: center;
+  gap: 6px;
 }
 
-.ac-todo-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--h-status-success);
+.tp-plan-icon {
+  color: var(--h-text-primary);
   flex-shrink: 0;
-  margin-top: 6px;
 }
 
-.ac-todo-content {
+.tp-plan .tp-label {
+  font-weight: 700;
+  color: var(--h-text-primary);
+}
+
+.tp-plan-goal {
+  color: var(--h-text-secondary);
+}
+
+/* ── Branches container ── */
+
+.tp-branches {
+  padding-left: 8px;
+}
+
+/* ── Single branch (connector + task node) ── */
+
+.tp-branch {
+  display: flex;
+  align-items: flex-start;
+}
+
+.tp-connector {
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.tp-gutter {
+  color: var(--h-text-faint);
+  white-space: pre;
+}
+
+.tp-gutter-pad {
+  color: var(--h-text-faint);
+  white-space: pre;
+  display: inline-block;
+  width: 24px;
+  text-align: center;
+}
+
+/* ── Task node ── */
+
+.tp-task-node {
   flex: 1;
   min-width: 0;
 }
 
-.ac-todo-task {
-  font-weight: 600;
-  font-size: 14px;
-  color: var(--h-text-primary);
-  line-height: 1.4;
-}
-
-/* Steps */
-.ac-todo-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 6px;
-}
-
-.ac-todo-step {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 2px 0;
-}
-
-.ac-todo-step-icon {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
+.tp-task-header {
   display: flex;
   align-items: center;
-  justify-content: center;
-  font-size: 14px;
-  margin-top: 1px;
+  gap: 6px;
+  white-space: nowrap;
+  padding: 1px 4px;
+  border-radius: 4px;
 }
 
-.ac-todo-step-desc {
+.tp-task-header.clickable {
+  cursor: pointer;
+}
+
+.tp-task-header.clickable:hover {
+  background: var(--h-bg-secondary);
+}
+
+.tp-task-desc {
+  color: var(--h-text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Lucide icons ── */
+
+.tp-icon {
+  flex-shrink: 0;
+}
+
+.tp-icon-completed {
+  color: var(--h-status-success, #22c55e);
+}
+
+.tp-icon-running {
+  color: var(--h-status-info, #3b82f6);
+  animation: tpSpin 1s linear infinite;
+}
+
+.tp-icon-failed {
+  color: var(--h-status-error, #ef4444);
+}
+
+.tp-icon-pending {
+  color: var(--h-text-faint, #6b7280);
+}
+
+/* ── Chevron icon ── */
+
+.tp-chevron-icon {
+  color: var(--h-text-faint);
+  flex-shrink: 0;
+  transition: transform 0.15s ease;
+}
+
+.tp-chevron-icon.expanded {
+  transform: rotate(90deg);
+}
+
+/* ── Dependency info ── */
+
+.tp-task-deps {
+  display: flex;
+  align-items: baseline;
+  padding-left: 8px;
+}
+
+.tp-deps-text {
+  color: var(--h-text-faint);
+  font-style: italic;
+  font-size: 12px;
+}
+
+/* ── Todo list (sub-agent steps) ── */
+
+.tp-todo-list {
+  padding-left: 8px;
+}
+
+.tp-todo {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  min-width: 0;
+}
+
+.tp-todo-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.tp-todo-clickable:hover {
+  background: var(--h-bg-secondary);
+}
+
+.tp-todo-name {
   color: var(--h-text-primary);
-  line-height: 1.4;
-  font-size: 14px;
+  font-weight: 500;
 }
 
-/* Completed */
-.ac-todo-step-completed .ac-todo-step-icon {
-  color: var(--h-status-success);
-}
-
-.ac-todo-step-completed .ac-todo-step-desc {
-  color: var(--h-text-faint);
-  text-decoration: line-through;
-}
-
-/* In-progress */
-.ac-todo-step-in_progress .ac-todo-step-icon {
-  color: var(--h-status-info);
-  animation: acTodoPulse 1.2s ease-in-out infinite;
-}
-
-/* Pending */
-.ac-todo-step-pending .ac-todo-step-icon {
-  color: var(--h-text-faint);
-}
-
-.ac-todo-step-pending .ac-todo-step-desc {
+.tp-todo-detail {
   color: var(--h-text-muted);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+  font-size: 12px;
+  max-width: 300px;
 }
 
-/* Failed */
-.ac-todo-step-failed .ac-todo-step-icon {
-  color: var(--h-status-error);
+.tp-todo-detail-expanded {
+  white-space: normal;
+  overflow: visible;
+  text-overflow: unset;
+  max-width: none;
+  word-break: break-word;
 }
 
-.ac-todo-step-failed .ac-todo-step-desc {
-  color: var(--h-status-error);
+/* ── Collapsed hint ── */
+
+.tp-todo-hint {
+  display: flex;
+  align-items: baseline;
+  padding-left: 8px;
+  cursor: pointer;
 }
 
-@keyframes acTodoPulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+.tp-hint-text {
+  color: var(--h-text-faint);
+  font-size: 12px;
+}
+
+.tp-todo-hint:hover .tp-hint-text {
+  color: var(--h-text-muted);
+  text-decoration: underline;
+}
+
+/* ── Result (completed task) ── */
+
+.tp-todo-result {
+  display: flex;
+  align-items: flex-start;
+  padding-left: 8px;
+}
+
+.tp-result-text {
+  color: var(--h-text-muted);
+  font-size: 12px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+/* ── Animations ── */
+
+@keyframes tpSpin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }

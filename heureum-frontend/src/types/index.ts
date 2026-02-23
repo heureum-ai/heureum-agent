@@ -36,7 +36,7 @@ export interface FunctionToolCall {
   name: string;
   arguments: string;
   status?: ItemStatus;
-  display_name?: string;
+  display_name: string;
 }
 
 export interface FunctionToolResult {
@@ -52,7 +52,7 @@ export interface ToolDefinition {
   description?: string;
   parameters?: Record<string, any>;
   guide?: string;
-  display_name?: string;
+  display_name: string;
 }
 
 export type OutputItem = MessageItem | FunctionToolCall;
@@ -99,15 +99,18 @@ export interface ResponseObject {
 }
 
 // TODO progress types
-export interface TodoStep {
+export interface TodoTask {
+  id: string;
   description: string;
-  status: 'pending' | 'in_progress' | 'completed' | 'failed';
-  result?: string;
+  status: 'pending' | 'blocked' | 'in_progress' | 'completed' | 'failed';
+  result?: string | null;
+  depends_on: string[];
+  child_session_id?: string | null;
 }
 
 export interface TodoState {
-  task: string;
-  steps: TodoStep[];
+  team: string;
+  tasks: TodoTask[];
 }
 
 // Tool call display info
@@ -159,6 +162,7 @@ export type QuestionAnswer = {
 // Sub-agent progress types
 export interface SubagentProgressStep {
   toolName: string;
+  displayName: string;
   detail: string;
   status: 'running' | 'completed' | 'failed';
 }

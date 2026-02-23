@@ -2,15 +2,11 @@
 
 """Shared test fixtures for heureum-agent test suite."""
 
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from app.models import AgentRequest, AgentResponse, LLMResult, LLMResultType, Message, Usage
 from app.schemas.open_responses import (
     AssistantMessageItem,
-    FunctionToolCall,
-    FunctionToolResult,
     InputTokenDetails,
     ItemStatus,
     MessageRole,
@@ -20,47 +16,6 @@ from app.schemas.open_responses import (
     ResponseStatus,
     Usage as SchemaUsage,
 )
-
-
-# ---------------------------------------------------------------------------
-# Message / Request factories
-# ---------------------------------------------------------------------------
-
-
-@pytest.fixture
-def sample_message():
-    """Factory fixture for creating Message instances."""
-
-    def _factory(
-        role: MessageRole = MessageRole.USER,
-        content: str = "hello",
-        tool_call_id: Optional[str] = None,
-        tool_calls: Optional[List[Dict[str, Any]]] = None,
-    ) -> Message:
-        return Message(
-            role=role,
-            content=content,
-            tool_call_id=tool_call_id,
-            tool_calls=tool_calls,
-        )
-
-    return _factory
-
-
-@pytest.fixture
-def sample_agent_request(sample_message):
-    """Factory fixture for creating AgentRequest instances."""
-
-    def _factory(
-        messages: Optional[List[Message]] = None,
-        session_id: Optional[str] = None,
-    ) -> AgentRequest:
-        return AgentRequest(
-            messages=messages or [sample_message()],
-            session_id=session_id,
-        )
-
-    return _factory
 
 
 # ---------------------------------------------------------------------------
@@ -74,7 +29,7 @@ def mock_openai_response():
 
     def _factory(
         text: str = "Hello!",
-        tool_calls: Optional[list] = None,
+        tool_calls: list | None = None,
     ) -> MagicMock:
         resp = MagicMock()
         resp.content = text
@@ -98,7 +53,7 @@ def mock_openai_response():
 
 @pytest.fixture
 def mock_mcp_client():
-    """Fixture providing a mocked MCPClient."""
+    """Fixture providing a mocked MCPClientController."""
     client = AsyncMock()
     client.discover_tools = AsyncMock(return_value=[])
     client.call_tool = AsyncMock(return_value="tool result")

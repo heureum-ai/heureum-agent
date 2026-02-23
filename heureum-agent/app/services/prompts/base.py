@@ -76,6 +76,17 @@ autonomously. Exhaust the guide's recovery steps before asking the
 user for help. Change at least one parameter on each retry.
 </tool_usage>
 
+<task_execution>
+When the user's request requires 2 or more distinct steps or tool calls,
+call manage_todo(action="create") to break the task into steps before
+executing anything else. Sub-agents are spawned automatically for each step.
+After all sub-agents complete, synthesize their results into a final answer.
+
+This does NOT apply to:
+- Simple questions, greetings, or single-step lookups
+- Tasks that need only one tool call
+</task_execution>
+
 <conversation>
 In multi-turn conversations, refer to earlier context when relevant.
 After a context compaction, rely on the provided summary and continue
@@ -83,8 +94,8 @@ without asking the user to repeat information.
 </conversation>
 
 <language>
-Respond in Korean by default. If the user writes in another language,
-match that language instead.
+Respond in User's language by default.
+If the user writes in another language, match that language instead.
 </language>
 """
 
@@ -128,11 +139,18 @@ class SystemPromptBuilder:
     """
 
     def __init__(self) -> None:
+        self._skills_catalog: Optional[str] = None
         self._tool_guides: List[str] = []
         self._state_prompts: List[str] = []
         self._instructions: Optional[str] = None
 
     # -- section adders ----------------------------------------------------
+
+    def add_skills_catalog(self, prompt: str) -> "SystemPromptBuilder":
+        """Set the ``<available_skills>`` block from a client skills snapshot."""
+        if prompt and prompt.strip():
+            self._skills_catalog = prompt.strip()
+        return self
 
     def add_tool_guide(self, name: str, body: str) -> "SystemPromptBuilder":
         """Add a single tool guide, wrapping in ``<tool_guide>`` if needed."""
@@ -144,7 +162,7 @@ class SystemPromptBuilder:
         return self
 
     def add_tool_guides(self, guides: List[str]) -> "SystemPromptBuilder":
-        """Add pre-wrapped ``<tool_guide>`` strings (from SkillProvider)."""
+        """Add pre-wrapped ``<tool_guide>`` strings (from SkillController)."""
         for g in guides:
             stripped = g.strip()
             if stripped.startswith("<tool_guide"):
@@ -177,6 +195,9 @@ class SystemPromptBuilder:
         """Assemble and return the final system prompt string."""
         parts: List[str] = [AGENT_IDENTITY_PROMPT]
 
+        if self._skills_catalog:
+            parts.append(f"\n{self._skills_catalog}")
+
         if self._tool_guides:
             inner = "\n".join(self._tool_guides)
             parts.append(f"\n<tool_guides>\n{inner}\n</tool_guides>")
@@ -204,6 +225,7 @@ def build_system_prompt(
     client_tool_prompts: Optional[List[str]] = None,
     instructions: Optional[str] = None,
     state_prompts: Optional[List[str]] = None,
+    skills_prompt: Optional[str] = None,
 ) -> str:
     """Build a system prompt based on available tools.
 
@@ -218,12 +240,18 @@ def build_system_prompt(
             ``<instructions>`` XML block.
         state_prompts: Per-turn runtime state prompts from skills
             (wrapped inside ``<session_state>``).
+        skills_prompt: Pre-built ``<available_skills>`` block from a
+            client skills snapshot.  When present, takes priority over
+            ``<tool_guides>`` for skill discovery (tool_guides are still
+            included as fallback for server-side guides).
 
     Returns:
         The assembled system prompt string.
     """
     builder = SystemPromptBuilder()
 
+    if skills_prompt:
+        builder.add_skills_catalog(skills_prompt)
     if server_tool_prompts:
         builder.add_tool_guides(server_tool_prompts)
     if client_tool_prompts:

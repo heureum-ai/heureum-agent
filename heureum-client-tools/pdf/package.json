@@ -1,0 +1,28 @@
+{
+  "name": "@heureum/pdf",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts --outDir dist",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check-deps": "printf 'pdftoppm: ' && (command -v pdftoppm >/dev/null 2>&1 && echo OK || echo 'MISSING — brew install poppler')",
+    "install-deps": "brew install poppler"
+  },
+  "devDependencies": {
+    "@types/pngjs": "^6.0.5",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
+    "jpeg-js": "^0.4.4",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.4.624",
+    "pngjs": "^7.0.0"
+  }
+}

@@ -3,13 +3,16 @@
 """Tests for sessions_spawn skill service."""
 
 import json
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.subagent import SubagentRunRecord, get_registry, _session_depth
-from app.skills.sessions_spawn.service import SessionsSpawnSkill
+from app.skills.plan_task.service import (
+    SubagentRunRecord,
+    get_registry,
+    _session_depth,
+)
+from app.skills.plan_task.service import SessionsSpawnSkill
 
 
 @pytest.fixture(autouse=True)
@@ -36,9 +39,9 @@ class TestHasUnfinishedSteps:
 
     def test_with_running_subagent(self, skill):
         registry = get_registry()
-        registry.register(SubagentRunRecord(
-            child_session_id="c1", parent_session_id="s1", task="task"
-        ))
+        registry.register(
+            SubagentRunRecord(child_session_id="c1", parent_session_id="s1", task="task")
+        )
         assert skill.has_unfinished_steps("s1") is True
 
     def test_with_completed_subagent(self, skill):
@@ -49,7 +52,10 @@ class TestHasUnfinishedSteps:
         assert skill.has_unfinished_steps("s1") is False
 
     def test_exception_returns_false(self, skill):
-        with patch("app.skills.sessions_spawn.service.get_registry", side_effect=RuntimeError):
+        with patch(
+            "app.skills.plan_task.service._registry",
+            new_callable=lambda: MagicMock(count_active=MagicMock(side_effect=RuntimeError)),
+        ):
             assert skill.has_unfinished_steps("s1") is False
 
 
@@ -100,7 +106,10 @@ class TestBuildRetryGuidance:
         assert "Something broke" in guidance
 
     def test_exception_returns_fallback(self, skill):
-        with patch("app.skills.sessions_spawn.service.get_registry", side_effect=RuntimeError):
+        with patch(
+            "app.skills.plan_task.service._registry",
+            new_callable=lambda: MagicMock(list_by_parent=MagicMock(side_effect=RuntimeError)),
+        ):
             guidance = skill.build_retry_guidance("s1", "")
         assert "still running" in guidance.lower()
 
@@ -113,14 +122,14 @@ class TestBuildRetryGuidance:
 class TestAwaitPending:
     @pytest.mark.asyncio
     async def test_delegates_to_await_active_subagents(self, skill):
-        with patch("app.skills.sessions_spawn.service.await_active_subagents", new=AsyncMock()) as mock:
+        with patch("app.skills.plan_task.service.await_active_subagents", new=AsyncMock()) as mock:
             await skill.await_pending("s1", timeout=10.0)
         mock.assert_called_once_with("s1", timeout=10.0)
 
     @pytest.mark.asyncio
     async def test_exception_is_caught(self, skill):
         with patch(
-            "app.skills.sessions_spawn.service.await_active_subagents",
+            "app.skills.plan_task.service.await_active_subagents",
             new=AsyncMock(side_effect=RuntimeError("fail")),
         ):
             # Should not raise
@@ -143,7 +152,7 @@ class TestExecuteRouting:
     @pytest.mark.asyncio
     async def test_routes_to_status(self, skill):
         with patch.object(skill, "_status", new=AsyncMock(return_value='{"children":[]}')) as mock:
-            result = await skill.execute("sessions_spawn_status", {}, "s1")
+            await skill.execute("sessions_spawn_status", {}, "s1")
         mock.assert_called_once_with({}, "s1")
 
     @pytest.mark.asyncio
@@ -162,7 +171,8 @@ class TestExecuteRouting:
 class TestSpawn:
     @pytest.mark.asyncio
     async def test_success(self, skill):
-        with patch("app.skills.sessions_spawn.service.spawn_subagent", new=AsyncMock()) as mock:
+        skill.set_dependencies(create_subagent_task_fn=MagicMock())
+        with patch("app.skills.plan_task.service.spawn_subagent", new=AsyncMock()) as mock:
             mock.return_value = MagicMock(
                 status="accepted",
                 child_session_id="subagent_abc",
@@ -176,8 +186,9 @@ class TestSpawn:
 
     @pytest.mark.asyncio
     async def test_spawn_exception(self, skill):
+        skill.set_dependencies(create_subagent_task_fn=MagicMock())
         with patch(
-            "app.skills.sessions_spawn.service.spawn_subagent",
+            "app.skills.plan_task.service.spawn_subagent",
             new=AsyncMock(side_effect=RuntimeError("boom")),
         ):
             result = await skill._spawn({"task": "hello"}, "s1")
@@ -229,12 +240,12 @@ class TestStatus:
     @pytest.mark.asyncio
     async def test_list_all_children(self, skill):
         registry = get_registry()
-        registry.register(SubagentRunRecord(
-            child_session_id="c1", parent_session_id="s1", task="task1"
-        ))
-        registry.register(SubagentRunRecord(
-            child_session_id="c2", parent_session_id="s1", task="task2"
-        ))
+        registry.register(
+            SubagentRunRecord(child_session_id="c1", parent_session_id="s1", task="task1")
+        )
+        registry.register(
+            SubagentRunRecord(child_session_id="c2", parent_session_id="s1", task="task2")
+        )
 
         result = await skill._status({}, "s1")
         data = json.loads(result)
@@ -248,8 +259,11 @@ class TestStatus:
 
     @pytest.mark.asyncio
     async def test_status_exception(self, skill):
-        with patch("app.skills.sessions_spawn.service.get_registry", side_effect=RuntimeError("fail")):
-            result = await skill._status({}, "s1")
+        with patch(
+            "app.skills.plan_task.service._registry",
+            new_callable=lambda: MagicMock(get=MagicMock(side_effect=RuntimeError("fail"))),
+        ):
+            result = await skill._status({"child_session_id": "c1"}, "s1")
         data = json.loads(result)
         assert "error" in data
 

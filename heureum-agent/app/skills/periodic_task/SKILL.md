@@ -25,7 +25,7 @@ Step 2: Execute a MANDATORY dry run.
     (search → fetch → read workflow).
   - For notification tasks (reminders, greetings): compose the actual notification text
     and send it using `notify_user`.
-  - For file tasks: create the actual file using `mcp_filesystem__write`.
+  - For file tasks: create the actual file using `mcp_filesystem__bash` (e.g. `cat > path << 'EOF'`).
   Track every tool you use and every result you get. The dry run MUST produce
   real output — not just acknowledge the request.
 
@@ -41,11 +41,11 @@ Step 3: Synthesize a DETAILED execution recipe from the dry run.
     "instructions": [
       "Step 1: Use mcp_web__search to search for '...'",
       "Step 2: Use mcp_web__fetch on the top result URLs",
-      "Step 3: Use mcp_filesystem__read to read the fetched session_file content",
+      "Step 3: Use mcp_filesystem__bash to read the fetched session_file content (e.g. cat <path>)",
       "Step 4: Extract the key information from the content",
       "Step 5: Use notify_user with title '...' and body containing the extracted info"
     ],
-    "tools_required": ["mcp_web__search", "mcp_web__fetch", "mcp_filesystem__read", "notify_user"],
+    "tools_required": ["mcp_web__search", "mcp_web__fetch", "mcp_filesystem__bash", "notify_user"],
     "output_spec": {
       "file_pattern": "path/to/output_{date}.md (or empty if notification-only)",
       "summary_template": "Description of what the notification/output looks like",

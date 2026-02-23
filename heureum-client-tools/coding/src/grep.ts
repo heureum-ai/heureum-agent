@@ -1,18 +1,18 @@
-import { createInterface } from "node:readline";
-import type { CodingTool } from "./types.js";
 import { spawn } from "child_process";
-import { readFileSync, statSync } from "fs";
+import { readFile, stat } from "fs/promises";
+import { createInterface } from "node:readline";
 import path from "path";
 import { ensureTool } from "./helpers/tools-manager.js";
 import { resolveToCwd } from "./path-utils.js";
 import {
-	DEFAULT_MAX_BYTES,
-	formatSize,
-	GREP_MAX_LINE_LENGTH,
-	type TruncationResult,
-	truncateHead,
-	truncateLine,
+    DEFAULT_MAX_BYTES,
+    formatSize,
+    GREP_MAX_LINE_LENGTH,
+    truncateHead,
+    truncateLine,
+    type TruncationResult,
 } from "./truncate.js";
+import type { CodingTool } from "./types.js";
 
 
 const DEFAULT_LIMIT = 100;
@@ -29,14 +29,14 @@ export interface GrepToolDetails {
  */
 export interface GrepOperations {
 	/** Check if path is a directory. Throws if path doesn't exist. */
-	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
+	isDirectory: (absolutePath: string) => Promise<boolean>;
 	/** Read file contents for context lines */
-	readFile: (absolutePath: string) => Promise<string> | string;
+	readFile: (absolutePath: string) => Promise<string>;
 }
 
 const defaultGrepOperations: GrepOperations = {
-	isDirectory: (p) => statSync(p).isDirectory(),
-	readFile: (p) => readFileSync(p, "utf-8"),
+	isDirectory: async (p) => (await stat(p)).isDirectory(),
+	readFile: (p) => readFile(p, "utf-8"),
 };
 
 export interface GrepToolOptions {

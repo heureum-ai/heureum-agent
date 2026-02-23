@@ -3,8 +3,8 @@
  * Returns structured page info for the LLM.
  */
 (function extractPageContent() {
-  const MAX_TEXT_LENGTH = 3000;
-  const MAX_ELEMENTS = 150;
+  const MAX_TEXT_LENGTH = 5000;
+  const MAX_ELEMENTS = 200;
 
   /**
    * Generate a unique CSS selector for an element.

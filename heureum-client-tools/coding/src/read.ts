@@ -148,9 +148,9 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): CodingTo
 								let outputText: string;
 
 								if (truncation.firstLineExceedsLimit) {
-									// First line at offset exceeds 30KB - tell model to use bash
+									// First line at offset exceeds byte limit - suggest line paging.
 									const firstLineSize = formatSize(Buffer.byteLength(allLines[startLine], "utf-8"));
-									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Use bash: sed -n '${startLineDisplay}p' ${path} | head -c ${DEFAULT_MAX_BYTES}]`;
+									outputText = `[Line ${startLineDisplay} is ${firstLineSize}, exceeds ${formatSize(DEFAULT_MAX_BYTES)} limit. Narrow the range with offset/limit around this line.]`;
 									details = { truncation };
 								} else if (truncation.truncated) {
 									// Truncation occurred - build actionable notice
@@ -207,4 +207,3 @@ export function createReadTool(cwd: string, options?: ReadToolOptions): CodingTo
 		},
 	};
 }
-

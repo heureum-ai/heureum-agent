@@ -5,8 +5,13 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from app.models import Message
-from app.schemas.open_responses import MessageRole
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage as LCSystemMessage,
+    ToolMessage,
+)
 from app.services.compaction.pruning import (
     _find_assistant_cutoff_index,
     _find_first_user_index,
@@ -48,9 +53,21 @@ from app.services.prompts.compaction import COMPACTION_PREFIX
 # ---------------------------------------------------------------------------
 
 
-def _msg(role: MessageRole, content: str = "x" * 100) -> Message:
-    """Create a test Message with the given role and content."""
-    return Message(role=role, content=content)
+def _msg(role: str, content: str = "x" * 100) -> BaseMessage:
+    """Create a test BaseMessage with the given role and content.
+
+    Args:
+        role: One of "user", "assistant", "tool", "system".
+    """
+    if role == "user":
+        return HumanMessage(content=content)
+    if role == "assistant":
+        return AIMessage(content=content)
+    if role == "tool":
+        return ToolMessage(content=content, tool_call_id="")
+    if role == "system":
+        return LCSystemMessage(content=content)
+    raise ValueError(f"Unknown role: {role}")
 
 
 def _mock_llm(response_text: str = "Summary of conversation.") -> AsyncMock:
@@ -171,8 +188,8 @@ class TestTruncateOversizedToolResults:
     def test_no_tool_messages(self):
         """Verify non-tool messages are left untouched."""
         msgs = [
-            Message(role=MessageRole.USER, content="x" * 100_000),
-            Message(role=MessageRole.ASSISTANT, content="y" * 100_000),
+            HumanMessage(content="x" * 100_000),
+            AIMessage(content="y" * 100_000),
         ]
         result, count = truncate_oversized_tool_results(msgs, self._settings())
         assert count == 0
@@ -181,7 +198,7 @@ class TestTruncateOversizedToolResults:
     def test_tool_within_limit(self):
         """Verify tool results within the limit are not truncated."""
         s = self._settings(window=200_000)
-        msgs = [Message(role=MessageRole.TOOL, content="small")]
+        msgs = [ToolMessage(tool_call_id="", content="small")]
         result, count = truncate_oversized_tool_results(msgs, s)
         assert count == 0
         assert result[0].content == "small"
@@ -190,7 +207,7 @@ class TestTruncateOversizedToolResults:
         """Verify oversized tool results are truncated."""
         s = self._settings(window=1_000)
         # max_chars = 1000 * 0.3 * 4 = 1200
-        msgs = [Message(role=MessageRole.TOOL, content="x" * 50_000)]
+        msgs = [ToolMessage(tool_call_id="", content="x" * 50_000)]
         result, count = truncate_oversized_tool_results(msgs, s)
         assert count == 1
         assert len(result[0].content) < 50_000
@@ -199,10 +216,10 @@ class TestTruncateOversizedToolResults:
         """Verify only oversized tool results are truncated in a mixed list."""
         s = self._settings(window=1_000)
         msgs = [
-            Message(role=MessageRole.USER, content="q"),
-            Message(role=MessageRole.TOOL, content="A" * 50_000),
-            Message(role=MessageRole.TOOL, content="small"),
-            Message(role=MessageRole.ASSISTANT, content="a"),
+            HumanMessage(content="q"),
+            ToolMessage(tool_call_id="", content="A" * 50_000),
+            ToolMessage(tool_call_id="", content="small"),
+            AIMessage(content="a"),
         ]
         result, count = truncate_oversized_tool_results(msgs, s)
         assert count == 1
@@ -211,7 +228,7 @@ class TestTruncateOversizedToolResults:
     def test_original_not_mutated(self):
         """Verify the original message objects are not mutated."""
         s = self._settings(window=1_000)
-        original = Message(role=MessageRole.TOOL, content="x" * 50_000)
+        original = ToolMessage(tool_call_id="", content="x" * 50_000)
         msgs = [original]
         truncate_oversized_tool_results(msgs, s)
         assert len(original.content) == 50_000
@@ -228,19 +245,19 @@ class TestHasOversizedToolResults:
     def test_no_oversized(self):
         """Verify False is returned when no tool results exceed the limit."""
         s = CompactionSettings()
-        msgs = [Message(role=MessageRole.TOOL, content="short")]
+        msgs = [ToolMessage(tool_call_id="", content="short")]
         assert has_oversized_tool_results(msgs, s) is False
 
     def test_has_oversized(self):
         """Verify True is returned when a tool result exceeds the limit."""
         s = CompactionSettings(context_window_tokens=100)
-        msgs = [Message(role=MessageRole.TOOL, content="x" * 50_000)]
+        msgs = [ToolMessage(tool_call_id="", content="x" * 50_000)]
         assert has_oversized_tool_results(msgs, s) is True
 
     def test_ignores_non_tool(self):
         """Verify non-tool messages are ignored even if they are large."""
         s = CompactionSettings(context_window_tokens=100)
-        msgs = [Message(role=MessageRole.USER, content="x" * 50_000)]
+        msgs = [HumanMessage(content="x" * 50_000)]
         assert has_oversized_tool_results(msgs, s) is False
 
     def test_empty(self):
@@ -264,36 +281,36 @@ class TestFindAssistantCutoffIndex:
     def test_finds_nth_from_last(self):
         """Verify the nth assistant message from the end is found correctly."""
         msgs = [
-            _msg(MessageRole.USER),
-            _msg(MessageRole.ASSISTANT),
-            _msg(MessageRole.USER),
-            _msg(MessageRole.ASSISTANT),
+            _msg("user"),
+            _msg("assistant"),
+            _msg("user"),
+            _msg("assistant"),
         ]
         assert _find_assistant_cutoff_index(msgs, 1) == 3
         assert _find_assistant_cutoff_index(msgs, 2) == 1
 
     def test_fewer_than_n_returns_zero(self):
         """Verify index 0 is returned when fewer than n assistants exist."""
-        msgs = [_msg(MessageRole.USER), _msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("user"), _msg("assistant")]
         assert _find_assistant_cutoff_index(msgs, 5) == 0
 
     def test_no_assistants_returns_zero(self):
         """Verify index 0 is returned when no assistant messages exist."""
         msgs = [
-            _msg(MessageRole.USER),
-            _msg(MessageRole.TOOL),
-            _msg(MessageRole.SYSTEM),
+            _msg("user"),
+            _msg("tool"),
+            _msg("system"),
         ]
         assert _find_assistant_cutoff_index(msgs, 3) == 0
 
     def test_keep_zero_returns_len(self):
         """Verify keeping zero assistants returns len(msgs)."""
-        msgs = [_msg(MessageRole.USER), _msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("user"), _msg("assistant")]
         assert _find_assistant_cutoff_index(msgs, 0) == len(msgs)
 
     def test_keep_negative_returns_len(self):
         """Verify a negative keep value returns len(msgs)."""
-        msgs = [_msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("assistant")]
         assert _find_assistant_cutoff_index(msgs, -1) == len(msgs)
 
     def test_empty(self):
@@ -312,21 +329,21 @@ class TestFindFirstUserIndex:
     def test_finds_first_user(self):
         """Verify the first user message index is returned correctly."""
         msgs = [
-            _msg(MessageRole.SYSTEM),
-            _msg(MessageRole.SYSTEM),
-            _msg(MessageRole.USER),
-            _msg(MessageRole.USER),
+            _msg("system"),
+            _msg("system"),
+            _msg("user"),
+            _msg("user"),
         ]
         assert _find_first_user_index(msgs) == 2
 
     def test_user_at_start(self):
         """Verify index 0 is returned when user message is first."""
-        msgs = [_msg(MessageRole.USER), _msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("user"), _msg("assistant")]
         assert _find_first_user_index(msgs) == 0
 
     def test_no_user(self):
         """Verify None is returned when no user messages exist."""
-        msgs = [_msg(MessageRole.SYSTEM), _msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("system"), _msg("assistant")]
         assert _find_first_user_index(msgs) is None
 
     def test_empty(self):
@@ -388,16 +405,16 @@ class TestPruneContextMessages:
         """Verify messages below the pruning ratio threshold are returned unchanged."""
         s = CompactionSettings()
         msgs = [
-            _msg(MessageRole.USER, "x" * 10),
-            _msg(MessageRole.TOOL, "x" * 100),
-            _msg(MessageRole.ASSISTANT, "x" * 10),
+            _msg("user", "x" * 10),
+            _msg("tool", "x" * 100),
+            _msg("assistant", "x" * 10),
         ]
         assert prune_context_messages(msgs, s) is msgs
 
     def test_zero_window_unchanged(self):
         """Verify a zero context window disables pruning."""
         s = CompactionSettings(context_window_tokens=0)
-        msgs = [_msg(MessageRole.TOOL, "x" * 10_000)]
+        msgs = [_msg("tool", "x" * 10_000)]
         assert prune_context_messages(msgs, s) is msgs
 
     # -- soft trim ---
@@ -406,11 +423,11 @@ class TestPruneContextMessages:
         """Verify soft trimming reduces oversized tool result content."""
         s = self._settings()
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
         assert len(result[1].content) < 10_000
@@ -421,11 +438,11 @@ class TestPruneContextMessages:
         """Verify hard clear replaces extremely large tool results with a cleared marker."""
         s = self._settings(hard_clear_ratio=0.3)
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 100_000),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 100_000),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
         assert "cleared" in result[1].content.lower()
@@ -437,11 +454,11 @@ class TestPruneContextMessages:
             hard_clear_ratio=0.3,
         )
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 100_000),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 100_000),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
         assert "cleared" not in result[1].content.lower()
@@ -452,13 +469,13 @@ class TestPruneContextMessages:
         """Verify tool results near recent assistant messages are protected from pruning."""
         s = self._settings(keep_last_assistants=2)
         msgs = [
-            Message(role=MessageRole.USER, content="q1"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="a1"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="a3"),
+            HumanMessage(content="q1"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="a1"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="a2"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="a3"),
         ]
         result = prune_context_messages(msgs, s)
         assert len(result[1].content) < 10_000  # pruned
@@ -468,11 +485,11 @@ class TestPruneContextMessages:
         """Verify system bootstrap messages are never pruned."""
         s = self._settings()
         msgs = [
-            Message(role=MessageRole.SYSTEM, content="identity" * 500),
-            Message(role=MessageRole.SYSTEM, content="config" * 500),
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="done"),
+            LCSystemMessage(content="identity" * 500),
+            LCSystemMessage(content="config" * 500),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="done"),
         ]
         result = prune_context_messages(msgs, s)
         assert result[0].content == msgs[0].content
@@ -484,10 +501,10 @@ class TestPruneContextMessages:
         """Verify pruning works correctly when no user messages are present."""
         s = self._settings(keep_last_assistants=1)
         msgs = [
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="a1"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="a1"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="a2"),
         ]
         result = prune_context_messages(msgs, s)
         assert len(result[0].content) < 10_000
@@ -496,8 +513,8 @@ class TestPruneContextMessages:
         """Verify non-tool messages are left unchanged when no tools exist."""
         s = self._settings()
         msgs = [
-            Message(role=MessageRole.USER, content="q" * 5_000),
-            Message(role=MessageRole.ASSISTANT, content="a" * 5_000),
+            HumanMessage(content="q" * 5_000),
+            AIMessage(content="a" * 5_000),
         ]
         result = prune_context_messages(msgs, s)
         assert result[0].content == msgs[0].content
@@ -506,8 +523,8 @@ class TestPruneContextMessages:
         """Verify system-only messages are not pruned."""
         s = self._settings()
         msgs = [
-            _msg(MessageRole.SYSTEM, "x" * 10_000),
-            _msg(MessageRole.SYSTEM, "x" * 10_000),
+            _msg("system", "x" * 10_000),
+            _msg("system", "x" * 10_000),
         ]
         result = prune_context_messages(msgs, s)
         assert result[0].content == msgs[0].content
@@ -516,9 +533,9 @@ class TestPruneContextMessages:
         """Verify all messages are protected when keep exceeds actual assistant count."""
         s = self._settings(keep_last_assistants=10)
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000),
-            Message(role=MessageRole.ASSISTANT, content="only one"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000),
+            AIMessage(content="only one"),
         ]
         result = prune_context_messages(msgs, s)
         assert result[1].content == msgs[1].content
@@ -526,13 +543,13 @@ class TestPruneContextMessages:
     def test_original_list_not_mutated(self):
         """Verify the original message list is not mutated by pruning."""
         s = self._settings()
-        original_tool = Message(role=MessageRole.TOOL, content="T" * 10_000)
+        original_tool = ToolMessage(tool_call_id="", content="T" * 10_000)
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
+            HumanMessage(content="hi"),
             original_tool,
-            Message(role=MessageRole.ASSISTANT, content="a1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="a2"),
+            AIMessage(content="a1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="a2"),
         ]
         original_len = len(msgs)
         prune_context_messages(msgs, s)
@@ -555,9 +572,9 @@ class TestRepairNoOp:
     def test_plain_messages_unchanged(self):
         """Verify plain messages without tool_call fields are returned unchanged."""
         msgs = [
-            Message(role=MessageRole.ASSISTANT, content="hello"),
-            Message(role=MessageRole.TOOL, content="result"),
-            Message(role=MessageRole.ASSISTANT, content="done"),
+            AIMessage(content="hello"),
+            ToolMessage(tool_call_id="", content="result"),
+            AIMessage(content="done"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 0
@@ -581,14 +598,16 @@ class TestRepairActive:
     def test_drops_orphaned_tool_result(self):
         """Verify orphaned tool results with unmatched call IDs are dropped."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="use tool",
-                tool_calls=[{"id": "call_1"}, {"id": "call_2"}],
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call_1", "name": "t", "args": {}},
+                    {"id": "call_2", "name": "t", "args": {}},
+                ],
             ),
-            Message(role=MessageRole.TOOL, content="result 1", tool_call_id="call_1"),
-            Message(role=MessageRole.TOOL, content="result 2", tool_call_id="call_2"),
-            Message(role=MessageRole.TOOL, content="orphan", tool_call_id="call_GONE"),
+            ToolMessage(tool_call_id="call_1", content="result 1"),
+            ToolMessage(tool_call_id="call_2", content="result 2"),
+            ToolMessage(tool_call_id="call_GONE", content="orphan"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 1
@@ -597,12 +616,11 @@ class TestRepairActive:
     def test_keeps_all_matched(self):
         """Verify all messages are kept when every tool result has a matching call."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="use tool",
-                tool_calls=[{"id": "call_A"}],
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_A", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="result", tool_call_id="call_A"),
+            ToolMessage(tool_call_id="call_A", content="result"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 0
@@ -611,13 +629,12 @@ class TestRepairActive:
     def test_keeps_tool_without_id(self):
         """Verify tool results without a tool_call_id are preserved."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="use",
-                tool_calls=[{"id": "call_X"}],
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_X", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="legacy result"),
-            Message(role=MessageRole.TOOL, content="matched", tool_call_id="call_X"),
+            ToolMessage(tool_call_id="", content="legacy result"),
+            ToolMessage(tool_call_id="call_X", content="matched"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 0
@@ -626,14 +643,13 @@ class TestRepairActive:
     def test_multiple_orphans(self):
         """Verify multiple orphaned tool results are all dropped."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="use",
-                tool_calls=[{"id": "call_1"}],
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="ok", tool_call_id="call_1"),
-            Message(role=MessageRole.TOOL, content="orphan1", tool_call_id="call_99"),
-            Message(role=MessageRole.TOOL, content="orphan2", tool_call_id="call_100"),
+            ToolMessage(tool_call_id="call_1", content="ok"),
+            ToolMessage(tool_call_id="call_99", content="orphan1"),
+            ToolMessage(tool_call_id="call_100", content="orphan2"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 2
@@ -642,46 +658,43 @@ class TestRepairActive:
     def test_preserves_non_tool_messages(self):
         """Verify user and system messages are preserved even when orphans are dropped."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="thinking",
-                tool_calls=[{"id": "call_1"}],
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_1", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="orphan", tool_call_id="call_DROPPED"),
-            Message(role=MessageRole.USER, content="continue"),
-            Message(role=MessageRole.SYSTEM, content="note"),
+            ToolMessage(tool_call_id="call_DROPPED", content="orphan"),
+            HumanMessage(content="continue"),
+            LCSystemMessage(content="note"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 1
         assert len(report.messages) == 3
-        roles = [m.role for m in report.messages]
-        assert MessageRole.USER in roles
-        assert MessageRole.SYSTEM in roles
+        types = [m.type for m in report.messages]
+        assert "human" in types
+        assert "system" in types
 
     def test_multiple_assistants_collect_all_ids(self):
         """Verify tool call IDs are collected across multiple assistant messages."""
         msgs = [
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="first",
-                tool_calls=[{"id": "call_A"}],
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_A", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="r1", tool_call_id="call_A"),
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="second",
-                tool_calls=[{"id": "call_B"}],
+            ToolMessage(tool_call_id="call_A", content="r1"),
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "call_B", "name": "t", "args": {}}],
             ),
-            Message(role=MessageRole.TOOL, content="r2", tool_call_id="call_B"),
+            ToolMessage(tool_call_id="call_B", content="r2"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         assert report.dropped_orphan_count == 0
 
     def test_assistant_with_empty_tool_calls(self):
-        """Empty tool_calls means the tool_result is orphaned and should be dropped."""
+        """No tool_calls means the tool_result is orphaned and should be dropped."""
         msgs = [
-            Message(role=MessageRole.ASSISTANT, content="no tools", tool_calls=[]),
-            Message(role=MessageRole.TOOL, content="orphan", tool_call_id="call_X"),
+            AIMessage(content="no tools"),
+            ToolMessage(tool_call_id="call_X", content="orphan"),
         ]
         report = repair_tool_use_result_pairing(msgs)
         # No matching tool_use for call_X → orphan is dropped
@@ -702,7 +715,7 @@ class TestMessagesToText:
 
     def test_formats_messages(self):
         """Verify messages are formatted as [Role]: content with double newlines."""
-        msgs = [_msg(MessageRole.USER, "hello"), _msg(MessageRole.ASSISTANT, "world")]
+        msgs = [_msg("user", "hello"), _msg("assistant", "world")]
         text = _messages_to_text(msgs)
         assert "[User]: hello" in text
         assert "[Assistant]: world" in text
@@ -710,7 +723,7 @@ class TestMessagesToText:
 
     def test_truncates_long_content(self):
         """Verify long message content is truncated at the per-message limit."""
-        msgs = [_msg(MessageRole.USER, "A" * 5_000)]
+        msgs = [_msg("user", "A" * 5_000)]
         text = _messages_to_text(msgs, max_chars_per_message=100)
         assert len(text) < 200
 
@@ -724,19 +737,19 @@ class TestChunkMessagesByMaxTokens:
 
     def test_single_chunk(self):
         """Verify small messages fit into a single chunk."""
-        msgs = [_msg(MessageRole.USER, "x" * 40) for _ in range(3)]
+        msgs = [_msg("user", "x" * 40) for _ in range(3)]
         chunks = _chunk_messages_by_max_tokens(msgs, max_tokens=1_000)
         assert len(chunks) == 1
 
     def test_splits_at_budget(self):
         """Verify messages are split into multiple chunks at the token budget."""
-        msgs = [_msg(MessageRole.USER, "x" * 1_000) for _ in range(10)]
+        msgs = [_msg("user", "x" * 1_000) for _ in range(10)]
         chunks = _chunk_messages_by_max_tokens(msgs, max_tokens=300)
         assert len(chunks) > 1
 
     def test_oversized_single_message(self):
         """Verify a single oversized message stays in one chunk."""
-        msgs = [_msg(MessageRole.USER, "x" * 10_000)]
+        msgs = [_msg("user", "x" * 10_000)]
         chunks = _chunk_messages_by_max_tokens(msgs, max_tokens=100)
         assert len(chunks) == 1
 
@@ -750,7 +763,7 @@ class TestSplitByTokenShare:
 
     def test_splits_into_parts(self):
         """Verify messages are split into the requested number of parts."""
-        msgs = [_msg(MessageRole.USER, "x" * 400) for _ in range(10)]
+        msgs = [_msg("user", "x" * 400) for _ in range(10)]
         splits = _split_by_token_share(msgs, parts=3)
         assert len(splits) == 3
         total = sum(len(s) for s in splits)
@@ -758,13 +771,13 @@ class TestSplitByTokenShare:
 
     def test_single_part(self):
         """Verify requesting one part returns all messages in a single split."""
-        msgs = [_msg(MessageRole.USER)]
+        msgs = [_msg("user")]
         splits = _split_by_token_share(msgs, parts=1)
         assert len(splits) == 1
 
     def test_more_parts_than_messages(self):
         """Verify requesting more parts than messages caps at message count."""
-        msgs = [_msg(MessageRole.USER), _msg(MessageRole.USER)]
+        msgs = [_msg("user"), _msg("user")]
         splits = _split_by_token_share(msgs, parts=10)
         assert len(splits) == 2
 
@@ -779,13 +792,13 @@ class TestComputeAdaptiveChunkRatio:
     def test_default_for_small(self):
         """Verify the base chunk ratio is used for small inputs."""
         s = CompactionSettings()
-        msgs = [_msg(MessageRole.USER, "short") for _ in range(10)]
+        msgs = [_msg("user", "short") for _ in range(10)]
         assert _compute_adaptive_chunk_ratio(msgs, s) == s.base_chunk_ratio
 
     def test_reduces_for_large(self):
         """Verify the chunk ratio is reduced for large inputs."""
         s = CompactionSettings(context_window_tokens=1_000)
-        msgs = [_msg(MessageRole.USER, "x" * 10_000) for _ in range(5)]
+        msgs = [_msg("user", "x" * 10_000) for _ in range(5)]
         ratio = _compute_adaptive_chunk_ratio(msgs, s)
         assert ratio < s.base_chunk_ratio
         assert ratio >= s.min_chunk_ratio
@@ -808,7 +821,7 @@ class TestSummarizeChunks:
     async def test_basic(self):
         """Verify basic chunk summarization returns the LLM response."""
         llm = _mock_llm("chunk summary")
-        result = await summarize_chunks([_msg(MessageRole.USER, "hello")], llm, 10_000)
+        result = await summarize_chunks([_msg("user", "hello")], llm, 10_000)
         assert result == "chunk summary"
 
     @pytest.mark.asyncio
@@ -822,7 +835,7 @@ class TestSummarizeChunks:
         """Verify previous summary is included in the summarization prompt."""
         llm = _mock_llm("updated")
         await summarize_chunks(
-            [_msg(MessageRole.USER)],
+            [_msg("user")],
             llm,
             10_000,
             previous_summary="old summary",
@@ -834,7 +847,7 @@ class TestSummarizeChunks:
     async def test_multiple_chunks(self):
         """Verify multiple chunks result in multiple LLM invocations."""
         llm = _mock_llm("iterative")
-        msgs = [_msg(MessageRole.USER, "x" * 1_000) for _ in range(5)]
+        msgs = [_msg("user", "x" * 1_000) for _ in range(5)]
         await summarize_chunks(msgs, llm, 300)
         assert llm.ainvoke.call_count > 1
 
@@ -851,7 +864,7 @@ class TestSummarizeWithFallback:
     async def test_success(self):
         """Verify successful summarization returns the LLM result."""
         result = await summarize_with_fallback(
-            [_msg(MessageRole.USER)],
+            [_msg("user")],
             _mock_llm("ok"),
             CompactionSettings(),
             10_000,
@@ -864,7 +877,7 @@ class TestSummarizeWithFallback:
         llm = AsyncMock()
         llm.ainvoke.side_effect = Exception("LLM error")
         result = await summarize_with_fallback(
-            [_msg(MessageRole.USER, "x" * 100)],
+            [_msg("user", "x" * 100)],
             llm,
             CompactionSettings(),
             10_000,
@@ -901,7 +914,7 @@ class TestSummarizeWithFallback:
         llm.ainvoke.side_effect = side_effect
 
         s = CompactionSettings(context_window_tokens=100)
-        msgs = [_msg(MessageRole.USER, "small"), _msg(MessageRole.TOOL, "x" * 100_000)]
+        msgs = [_msg("user", "small"), _msg("tool", "x" * 100_000)]
         result = await summarize_with_fallback(msgs, llm, s, 10_000)
         assert "partial summary" in result
         assert "omitted" in result.lower()
@@ -919,7 +932,7 @@ class TestSummarizeInStages:
     async def test_small_input_no_split(self):
         """Verify small input is summarized in a single stage without splitting."""
         result = await summarize_in_stages(
-            [_msg(MessageRole.USER, "hello")],
+            [_msg("user", "hello")],
             _mock_llm("direct"),
             CompactionSettings(),
             100_000,
@@ -931,7 +944,7 @@ class TestSummarizeInStages:
         """Verify large input is split and summarized in multiple stages."""
         llm = _mock_llm("merged")
         s = CompactionSettings(context_window_tokens=500)
-        msgs = [_msg(MessageRole.USER, "x" * 2_000) for _ in range(10)]
+        msgs = [_msg("user", "x" * 2_000) for _ in range(10)]
         result = await summarize_in_stages(
             msgs,
             llm,
@@ -969,15 +982,15 @@ class TestCompactHistory:
         llm = _mock_llm("compacted summary")
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=1)
         msgs = [
-            _msg(MessageRole.USER, "q1"),
-            _msg(MessageRole.ASSISTANT, "a1"),
-            _msg(MessageRole.USER, "q2"),
-            _msg(MessageRole.ASSISTANT, "a2"),
-            _msg(MessageRole.USER, "q3"),
-            _msg(MessageRole.ASSISTANT, "a3"),
+            _msg("user", "q1"),
+            _msg("assistant", "a1"),
+            _msg("user", "q2"),
+            _msg("assistant", "a2"),
+            _msg("user", "q3"),
+            _msg("assistant", "a3"),
         ]
         result = await compact_history(msgs, llm, s)
-        assert result[0].role == MessageRole.SYSTEM
+        assert result[0].type == "system"
         assert result[0].content.startswith(COMPACTION_PREFIX)
         assert len(result) < len(msgs)
 
@@ -985,7 +998,7 @@ class TestCompactHistory:
     async def test_disabled(self):
         """Verify compaction returns original messages when disabled."""
         s = CompactionSettings(compaction_enabled=False)
-        msgs = [_msg(MessageRole.USER), _msg(MessageRole.ASSISTANT)]
+        msgs = [_msg("user"), _msg("assistant")]
         result = await compact_history(msgs, _mock_llm(), s)
         assert result is msgs
 
@@ -1001,11 +1014,11 @@ class TestCompactHistory:
         llm = _mock_llm("updated summary")
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=1)
         msgs = [
-            Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\nold summary"),
-            _msg(MessageRole.USER, "q1"),
-            _msg(MessageRole.ASSISTANT, "a1"),
-            _msg(MessageRole.USER, "q2"),
-            _msg(MessageRole.ASSISTANT, "a2"),
+            LCSystemMessage(content=f"{COMPACTION_PREFIX}\nold summary"),
+            _msg("user", "q1"),
+            _msg("assistant", "a1"),
+            _msg("user", "q2"),
+            _msg("assistant", "a2"),
         ]
         result = await compact_history(msgs, llm, s)
         assert result[0].content.startswith(COMPACTION_PREFIX)
@@ -1018,10 +1031,10 @@ class TestCompactHistory:
         llm = _mock_llm("summary")
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=1)
         msgs = [
-            _msg(MessageRole.USER, "q1"),
-            _msg(MessageRole.ASSISTANT, "a1"),
-            _msg(MessageRole.USER, "q2"),
-            _msg(MessageRole.ASSISTANT, "TAIL_MSG"),
+            _msg("user", "q1"),
+            _msg("assistant", "a1"),
+            _msg("user", "q2"),
+            _msg("assistant", "TAIL_MSG"),
         ]
         result = await compact_history(msgs, llm, s)
         tail_contents = [m.content for m in result[1:]]
@@ -1031,7 +1044,7 @@ class TestCompactHistory:
     async def test_no_summarizable_returns_original(self):
         """Verify original messages are returned when nothing is summarizable."""
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=10)
-        msgs = [_msg(MessageRole.USER, "q"), _msg(MessageRole.ASSISTANT, "a")]
+        msgs = [_msg("user", "q"), _msg("assistant", "a")]
         result = await compact_history(msgs, _mock_llm(), s)
         assert result is msgs
 
@@ -1043,14 +1056,14 @@ class TestCompactHistory:
         llm.ainvoke.side_effect = Exception("LLM down")
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=1)
         msgs = [
-            _msg(MessageRole.USER, "q1"),
-            _msg(MessageRole.ASSISTANT, "a1"),
-            _msg(MessageRole.USER, "q2"),
-            _msg(MessageRole.ASSISTANT, "a2"),
+            _msg("user", "q1"),
+            _msg("assistant", "a1"),
+            _msg("user", "q2"),
+            _msg("assistant", "a2"),
         ]
         result = await compact_history(msgs, llm, s)
         # Still compacts, but with a fallback summary
-        assert result[0].role == MessageRole.SYSTEM
+        assert result[0].type == "system"
         assert "unavailable" in result[0].content.lower() or "messages" in result[0].content.lower()
 
     @pytest.mark.asyncio
@@ -1059,14 +1072,14 @@ class TestCompactHistory:
         llm = _mock_llm("new summary")
         s = CompactionSettings(context_window_tokens=500, keep_last_assistants=1)
         msgs = [
-            Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\nold"),
-            _msg(MessageRole.USER, "q1"),
-            _msg(MessageRole.ASSISTANT, "a1"),
-            _msg(MessageRole.USER, "q2"),
-            _msg(MessageRole.ASSISTANT, "a2"),
+            LCSystemMessage(content=f"{COMPACTION_PREFIX}\nold"),
+            _msg("user", "q1"),
+            _msg("assistant", "a1"),
+            _msg("user", "q2"),
+            _msg("assistant", "a2"),
         ]
         result = await compact_history(msgs, llm, s)
-        assert result[0].role == MessageRole.SYSTEM
+        assert result[0].type == "system"
         assert result[0].content.startswith(COMPACTION_PREFIX)
 
 
@@ -1141,11 +1154,11 @@ class TestPruneWithToolName:
         """Tool results matching deny pattern are not pruned."""
         s = self._settings(tool_pruning=ToolPruningConfig(deny=["important_*"]))
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000, tool_name="important_api"),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000, name="important_api"),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
         # important_api should NOT be pruned
@@ -1155,12 +1168,12 @@ class TestPruneWithToolName:
         """Only tools matching allow pattern are pruned."""
         s = self._settings(tool_pruning=ToolPruningConfig(allow=["bash"]))
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000, tool_name="bash"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000, tool_name="read_file"),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000, name="bash"),
+            ToolMessage(tool_call_id="", content="T" * 10_000, name="read_file"),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
         assert len(result[1].content) < 10_000  # bash pruned
@@ -1170,14 +1183,14 @@ class TestPruneWithToolName:
         """tool_name is preserved on pruned messages."""
         s = self._settings()
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(role=MessageRole.TOOL, content="T" * 10_000, tool_name="bash"),
-            Message(role=MessageRole.ASSISTANT, content="r1"),
-            Message(role=MessageRole.USER, content="q2"),
-            Message(role=MessageRole.ASSISTANT, content="r2"),
+            HumanMessage(content="hi"),
+            ToolMessage(tool_call_id="", content="T" * 10_000, name="bash"),
+            AIMessage(content="r1"),
+            HumanMessage(content="q2"),
+            AIMessage(content="r2"),
         ]
         result = prune_context_messages(msgs, s)
-        assert result[1].tool_name == "bash"
+        assert result[1].name == "bash"
 
 
 # ===========================================================================
@@ -1190,14 +1203,13 @@ class TestCharsIncludeToolCalls:
 
     def test_message_without_tool_calls(self):
         """Plain message chars == content length."""
-        msg = Message(role=MessageRole.USER, content="hello")
+        msg = HumanMessage(content="hello")
         assert estimate_message_chars(msg) == 5
 
     def test_message_with_tool_calls(self):
         """Message with tool_calls should have chars > content length."""
-        msg = Message(
-            role=MessageRole.ASSISTANT,
-            content="thinking",
+        msg = AIMessage(
+            content="",
             tool_calls=[{"id": "call_1", "name": "bash", "args": {"command": "ls -la"}}],
         )
         chars = estimate_message_chars(msg)
@@ -1206,10 +1218,9 @@ class TestCharsIncludeToolCalls:
     def test_estimate_context_chars_includes_tool_calls(self):
         """estimate_context_chars should include tool_calls metadata."""
         msgs = [
-            Message(role=MessageRole.USER, content="hi"),
-            Message(
-                role=MessageRole.ASSISTANT,
-                content="ok",
+            HumanMessage(content="hi"),
+            AIMessage(
+                content="",
                 tool_calls=[{"id": "c1", "name": "bash", "args": {"cmd": "echo hello"}}],
             ),
         ]
@@ -1223,31 +1234,28 @@ class TestEstimateMessageTokens:
 
     def test_plain_message(self):
         """Plain message tokens should match content-only estimation."""
-        msg = Message(role=MessageRole.USER, content="hello world")
+        msg = HumanMessage(content="hello world")
         tokens = estimate_message_tokens(msg)
         assert tokens > 0
 
     def test_tool_calls_increase_tokens(self):
         """Message with tool_calls should have more tokens than content alone."""
         content = "thinking"
-        plain = Message(role=MessageRole.ASSISTANT, content=content)
-        with_tc = Message(
-            role=MessageRole.ASSISTANT,
-            content=content,
+        plain = AIMessage(content=content)
+        with_tc = AIMessage(
+            content="",
             tool_calls=[{"id": "call_1", "name": "bash", "args": {"command": "ls -la"}}],
         )
         assert estimate_message_tokens(with_tc) > estimate_message_tokens(plain)
 
     def test_tool_calls_tokens_proportional_to_size(self):
         """Larger tool_calls should produce more tokens."""
-        small_tc = Message(
-            role=MessageRole.ASSISTANT,
-            content="ok",
+        small_tc = AIMessage(
+            content="",
             tool_calls=[{"id": "c1", "name": "bash", "args": {"cmd": "ls"}}],
         )
-        large_tc = Message(
-            role=MessageRole.ASSISTANT,
-            content="ok",
+        large_tc = AIMessage(
+            content="",
             tool_calls=[{"id": "c1", "name": "bash", "args": {"cmd": "x" * 400}}],
         )
         assert estimate_message_tokens(large_tc) > estimate_message_tokens(small_tc)

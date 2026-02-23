@@ -1,14 +1,23 @@
-import type { CodingTool } from "./types.js";
-import { spawnSync } from "child_process";
-import { existsSync } from "fs";
-import { globSync } from "glob";
+import { spawn } from "child_process";
+import { access } from "node:fs/promises";
+import { glob } from "glob";
 import path from "path";
 import { ensureTool } from "./helpers/tools-manager.js";
 import { resolveToCwd } from "./path-utils.js";
-import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.js";
+import { DEFAULT_MAX_BYTES, formatSize, truncateHead, type TruncationResult } from "./truncate.js";
+import type { CodingTool } from "./types.js";
 
 
 const DEFAULT_LIMIT = 1000;
+
+async function pathExists(targetPath: string): Promise<boolean> {
+	try {
+		await access(targetPath);
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 export interface FindToolDetails {
 	truncation?: TruncationResult;
@@ -27,7 +36,7 @@ export interface FindOperations {
 }
 
 const defaultFindOperations: FindOperations = {
-	exists: existsSync,
+	exists: pathExists,
 	glob: (_pattern, _searchCwd, _options) => {
 		// This is a placeholder - actual fd execution happens in execute
 		return [];
@@ -141,20 +150,21 @@ export function createFindTool(cwd: string, options?: FindToolOptions): CodingTo
 							String(effectiveLimit),
 						];
 
-						// Include .gitignore files
-						const gitignoreFiles = new Set<string>();
-						const rootGitignore = path.join(searchPath, ".gitignore");
-						if (existsSync(rootGitignore)) {
-							gitignoreFiles.add(rootGitignore);
-						}
+							// Include .gitignore files
+							const gitignoreFiles = new Set<string>();
+							const rootGitignore = path.join(searchPath, ".gitignore");
+							if (await pathExists(rootGitignore)) {
+								gitignoreFiles.add(rootGitignore);
+							}
 
-						try {
-							const nestedGitignores = globSync("**/.gitignore", {
-								cwd: searchPath,
-								dot: true,
-								absolute: true,
-								ignore: ["**/node_modules/**", "**/.git/**"],
-							});
+							try {
+								const nestedGitignores = await glob("**/.gitignore", {
+									cwd: searchPath,
+									dot: true,
+									absolute: true,
+									nodir: true,
+									ignore: ["**/node_modules/**", "**/.git/**"],
+								});
 							for (const file of nestedGitignores) {
 								gitignoreFiles.add(file);
 							}
@@ -168,85 +178,94 @@ export function createFindTool(cwd: string, options?: FindToolOptions): CodingTo
 
 						args.push(pattern, searchPath);
 
-						const result = spawnSync(fdPath, args, {
-							encoding: "utf-8",
-							maxBuffer: 10 * 1024 * 1024,
+						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+						let stdout = "";
+						let stderr = "";
+
+						child.stdout?.on("data", (data: Buffer) => {
+							stdout += data.toString();
+						});
+						child.stderr?.on("data", (data: Buffer) => {
+							stderr += data.toString();
 						});
 
-						signal?.removeEventListener("abort", onAbort);
+						child.on("error", (error: Error) => {
+							signal?.removeEventListener("abort", onAbort);
+							reject(new Error(`Failed to run fd: ${error.message}`));
+						});
 
-						if (result.error) {
-							reject(new Error(`Failed to run fd: ${result.error.message}`));
-							return;
-						}
+						child.on("close", (code: number) => {
+							signal?.removeEventListener("abort", onAbort);
 
-						const output = result.stdout?.trim() || "";
+							const output = stdout.trim();
 
-						if (result.status !== 0) {
-							const errorMsg = result.stderr?.trim() || `fd exited with code ${result.status}`;
+							if (code !== 0) {
+								const errorMsg = stderr.trim() || `fd exited with code ${code}`;
+								if (!output) {
+									reject(new Error(errorMsg));
+									return;
+								}
+							}
+
 							if (!output) {
-								reject(new Error(errorMsg));
+								resolve({
+									content: [{ type: "text", text: "No files found matching pattern" }],
+									details: undefined,
+								});
 								return;
 							}
-						}
 
-						if (!output) {
+
+							const lines = output.split("\n");
+							const relativized: string[] = [];
+
+							for (const rawLine of lines) {
+								const line = rawLine.replace(/\r$/, "").trim();
+								if (!line) continue;
+
+								const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
+								let relativePath = line;
+								if (line.startsWith(searchPath)) {
+									relativePath = line.slice(searchPath.length + 1);
+								} else {
+									relativePath = path.relative(searchPath, line);
+								}
+
+								if (hadTrailingSlash && !relativePath.endsWith("/")) {
+									relativePath += "/";
+								}
+
+								relativized.push(relativePath);
+							}
+
+							const resultLimitReached = relativized.length >= effectiveLimit;
+							const rawOutput = relativized.join("\n");
+							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+
+							let resultOutput = truncation.content;
+							const details: FindToolDetails = {};
+							const notices: string[] = [];
+
+							if (resultLimitReached) {
+								notices.push(
+									`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
+								);
+								details.resultLimitReached = effectiveLimit;
+							}
+
+							if (truncation.truncated) {
+								notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
+								details.truncation = truncation;
+							}
+
+							if (notices.length > 0) {
+								resultOutput += `\n\n[${notices.join(". ")}]`;
+							}
+
 							resolve({
-								content: [{ type: "text", text: "No files found matching pattern" }],
-								details: undefined,
+								content: [{ type: "text", text: resultOutput }],
+								details: Object.keys(details).length > 0 ? details : undefined,
 							});
-							return;
-						}
-
-						const lines = output.split("\n");
-						const relativized: string[] = [];
-
-						for (const rawLine of lines) {
-							const line = rawLine.replace(/\r$/, "").trim();
-							if (!line) continue;
-
-							const hadTrailingSlash = line.endsWith("/") || line.endsWith("\\");
-							let relativePath = line;
-							if (line.startsWith(searchPath)) {
-								relativePath = line.slice(searchPath.length + 1);
-							} else {
-								relativePath = path.relative(searchPath, line);
-							}
-
-							if (hadTrailingSlash && !relativePath.endsWith("/")) {
-								relativePath += "/";
-							}
-
-							relativized.push(relativePath);
-						}
-
-						const resultLimitReached = relativized.length >= effectiveLimit;
-						const rawOutput = relativized.join("\n");
-						const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
-
-						let resultOutput = truncation.content;
-						const details: FindToolDetails = {};
-						const notices: string[] = [];
-
-						if (resultLimitReached) {
-							notices.push(
-								`${effectiveLimit} results limit reached. Use limit=${effectiveLimit * 2} for more, or refine pattern`,
-							);
-							details.resultLimitReached = effectiveLimit;
-						}
-
-						if (truncation.truncated) {
-							notices.push(`${formatSize(DEFAULT_MAX_BYTES)} limit reached`);
-							details.truncation = truncation;
-						}
-
-						if (notices.length > 0) {
-							resultOutput += `\n\n[${notices.join(". ")}]`;
-						}
-
-						resolve({
-							content: [{ type: "text", text: resultOutput }],
-							details: Object.keys(details).length > 0 ? details : undefined,
 						});
 					} catch (e: any) {
 						signal?.removeEventListener("abort", onAbort);
@@ -257,4 +276,3 @@ export function createFindTool(cwd: string, options?: FindToolOptions): CodingTo
 		},
 	};
 }
-

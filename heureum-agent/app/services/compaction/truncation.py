@@ -24,13 +24,11 @@ from __future__ import annotations
 import logging
 from typing import List, Tuple
 
-from app.models import Message
-from app.schemas.open_responses import MessageRole
 from app.services.compaction.settings import CompactionSettings
+from app.services.compaction.tokens import _text_content
+from langchain_core.messages import BaseMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
-
-_TOOL_ROLES = frozenset({MessageRole.TOOL})
 
 
 def calculate_max_tool_result_chars(settings: CompactionSettings) -> int:
@@ -84,38 +82,48 @@ def truncate_tool_result_text(
 
 
 def truncate_oversized_tool_results(
-    messages: List[Message],
+    messages: List[BaseMessage],
     settings: CompactionSettings,
-) -> Tuple[List[Message], int]:
+) -> Tuple[List[BaseMessage], int]:
     """Truncate oversized tool results in-memory (does not mutate originals).
 
     Args:
-        messages (List[Message]): Conversation message list to process.
+        messages (List[BaseMessage]): Conversation message list to process.
         settings (CompactionSettings): Compaction configuration providing
             truncation thresholds and suffix.
 
     Returns:
-        Tuple[List[Message], int]: A tuple of the new message list (with
+        Tuple[List[BaseMessage], int]: A tuple of the new message list (with
             oversized tool results truncated) and the count of messages
             that were truncated.
     """
     max_chars = calculate_max_tool_result_chars(settings)
     truncated_count = 0
-    result: List[Message] = []
+    result: List[BaseMessage] = []
 
     for msg in messages:
-        if msg.role not in _TOOL_ROLES or len(msg.content) <= max_chars:
+        if not isinstance(msg, ToolMessage):
+            result.append(msg)
+            continue
+        text = _text_content(msg.content)
+        if len(text) <= max_chars:
             result.append(msg)
             continue
 
-        original_len = len(msg.content)
+        original_len = len(text)
         truncated_content = truncate_tool_result_text(
-            msg.content,
+            text,
             max_chars,
             min_keep_chars=settings.min_keep_chars,
             suffix=settings.truncation_suffix,
         )
-        result.append(Message(role=msg.role, content=truncated_content, tool_call_id=msg.tool_call_id, tool_name=msg.tool_name))
+        result.append(
+            ToolMessage(
+                content=truncated_content,
+                tool_call_id=msg.tool_call_id,
+                name=msg.name,
+            )
+        )
         truncated_count += 1
         logger.info(
             "Truncated tool result: %d chars -> %d chars",
@@ -127,13 +135,13 @@ def truncate_oversized_tool_results(
 
 
 def has_oversized_tool_results(
-    messages: List[Message],
+    messages: List[BaseMessage],
     settings: CompactionSettings,
 ) -> bool:
     """Check whether any tool result exceeds the size limit.
 
     Args:
-        messages (List[Message]): Conversation message list to check.
+        messages (List[BaseMessage]): Conversation message list to check.
         settings (CompactionSettings): Compaction configuration providing
             the size limit.
 
@@ -142,4 +150,7 @@ def has_oversized_tool_results(
             maximum allowed character count.
     """
     max_chars = calculate_max_tool_result_chars(settings)
-    return any(msg.role in _TOOL_ROLES and len(msg.content) > max_chars for msg in messages)
+    return any(
+        isinstance(msg, ToolMessage) and len(_text_content(msg.content)) > max_chars
+        for msg in messages
+    )

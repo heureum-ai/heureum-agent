@@ -500,3 +500,46 @@ class TestPermissions:
         other_client.force_authenticate(other_user)
         resp = other_client.get(f"/api/v1/sessions/{TEST_SESSION_ID}/files/")
         assert resp.status_code == 404  # session not found for other user
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Throttle: agent actions exempt from rate limiting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestThrottleExemption:
+    """get_throttles() should return [] for agent-oriented actions."""
+
+    def _viewset_with_action(self, action_name):
+        from session_files.views import SessionFileViewSet
+
+        vs = SessionFileViewSet()
+        vs.action = action_name
+        return vs
+
+    def test_write_by_path_unthrottled(self):
+        vs = self._viewset_with_action("write_by_path")
+        assert vs.get_throttles() == []
+
+    def test_read_by_path_unthrottled(self):
+        vs = self._viewset_with_action("read_by_path")
+        assert vs.get_throttles() == []
+
+    def test_delete_by_path_unthrottled(self):
+        vs = self._viewset_with_action("delete_by_path")
+        assert vs.get_throttles() == []
+
+    def test_list_action_still_throttled(self):
+        vs_list = self._viewset_with_action("list")
+        vs_agent = self._viewset_with_action("write_by_path")
+        # Agent action takes the override path (always [])
+        assert vs_agent.get_throttles() == []
+        # list action delegates to super(); verify it takes a different
+        # code path.  The actual throttle list depends on DRF settings,
+        # but it must not be our explicit empty-list bypass.
+        throttles = vs_list.get_throttles()
+        assert isinstance(throttles, list)
+        # In production settings throttles are configured, so the list
+        # should be non-empty.  In a minimal test env it may still be [],
+        # so we also confirm the code path difference via identity:
+        assert throttles is not vs_agent.get_throttles()

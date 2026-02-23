@@ -4,9 +4,6 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
 const api = {
-  executeBash: (command: string, cwd?: string): Promise<{ stdout: string; stderr: string; exitCode: number }> => {
-    return ipcRenderer.invoke('execute-bash', command, cwd)
-  },
   selectCwd: (): Promise<{ path: string | null }> => {
     return ipcRenderer.invoke('select-cwd')
   },
@@ -33,31 +30,42 @@ const api = {
   isBrowserExtensionConnected: (): Promise<boolean> => {
     return ipcRenderer.invoke('browser-extension-status')
   },
-  // TODO: re-enable when document tools are ready
-  // docxTool: (
-  //   toolName: string,
-  //   params: Record<string, unknown>
-  // ): Promise<{ success: boolean; output: string; error?: string }> => {
-  //   return ipcRenderer.invoke('docx-tool', toolName, params)
-  // },
-  // pdfTool: (
-  //   toolName: string,
-  //   params: Record<string, unknown>
-  // ): Promise<{ success: boolean; output: string; error?: string }> => {
-  //   return ipcRenderer.invoke('pdf-tool', toolName, params)
-  // },
-  // pptTool: (
-  //   toolName: string,
-  //   params: Record<string, unknown>
-  // ): Promise<{ success: boolean; output: string; error?: string }> => {
-  //   return ipcRenderer.invoke('ppt-tool', toolName, params)
-  // },
-  // xlsxTool: (
-  //   toolName: string,
-  //   params: Record<string, unknown>
-  // ): Promise<{ success: boolean; output: string; error?: string }> => {
-  //   return ipcRenderer.invoke('xlsx-tool', toolName, params)
-  // },
+  docxTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('docx-tool', toolName, params)
+  },
+  pdfTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('pdf-tool', toolName, params)
+  },
+  pptTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('ppt-tool', toolName, params)
+  },
+  xlsxTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('xlsx-tool', toolName, params)
+  },
+  mdTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('md-tool', toolName, params)
+  },
+  hwpxTool: (
+    toolName: string,
+    params: Record<string, unknown>
+  ): Promise<{ success: boolean; output: string; error?: string }> => {
+    return ipcRenderer.invoke('hwpx-tool', toolName, params)
+  },
   startNotificationStream: (platformUrl: string): Promise<{ success: boolean }> => {
     return ipcRenderer.invoke('start-notification-stream', platformUrl)
   },
@@ -90,6 +98,16 @@ const api = {
   },
   sendTestNotification: (): Promise<{ success: boolean; error?: string }> => {
     return ipcRenderer.invoke('send-test-notification')
+  },
+  getBrowserTools: (): Promise<Array<{ type: string; name: string; display_name: string; description?: string; parameters?: Record<string, any>; guide?: string }>> => {
+    return ipcRenderer.invoke('get-browser-tools')
+  },
+  getSkillsSnapshot: (): Promise<{
+    version: string | null
+    prompt: string
+    skills: Array<{ name: string; description: string; location: string; tools: string[] }>
+  }> => {
+    return ipcRenderer.invoke('get-skills-snapshot')
   }
 }
 

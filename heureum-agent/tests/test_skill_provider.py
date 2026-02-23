@@ -1,15 +1,16 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
-"""Tests for app.services.providers.skill — SkillProvider class."""
+"""Tests for app.services.providers.skill — SkillController class."""
 
 import pytest
-from app.services.providers.skill import SkillProvider, parse_skill_md
+from app.services.skills import SkillController
+from app.services.skills.metadata import parse_skill_md
 
 
 @pytest.fixture
 def provider():
-    """Create a fresh SkillProvider instance (triggers discovery)."""
-    return SkillProvider()
+    """Create a fresh SkillController instance (triggers discovery)."""
+    return SkillController()
 
 
 # ---------------------------------------------------------------------------
@@ -154,25 +155,36 @@ class TestPlanSkillIntegration:
         plan = provider.get_skill("plan_task")
         result = await plan.execute(
             "manage_todo",
-            {"action": "create", "task": "Test task", "steps": ["Step 1", "Step 2"]},
+            {
+                "action": "create",
+                "goal": "Test goal",
+                "tasks": [
+                    {"id": "t1", "description": "Step 1"},
+                    {"id": "t2", "description": "Step 2"},
+                ],
+            },
             "test_session",
         )
-        assert "Test task" in result
+        assert "Test goal" in result
         assert "Step 1" in result
 
     @pytest.mark.asyncio
-    async def test_update_step(self, provider):
+    async def test_update_task(self, provider):
         plan = provider.get_skill("plan_task")
         await plan.execute(
             "manage_todo",
-            {"action": "create", "task": "Update test", "steps": ["Step A"]},
+            {
+                "action": "create",
+                "goal": "Update test",
+                "tasks": [{"id": "a", "description": "Task A"}],
+            },
             "test_update_session",
         )
         result = await plan.execute(
             "manage_todo",
             {
-                "action": "update_step",
-                "step_index": 0,
+                "action": "update_task",
+                "task_id": "a",
                 "status": "completed",
                 "result": "Done",
             },
@@ -185,7 +197,11 @@ class TestPlanSkillIntegration:
         plan = provider.get_skill("plan_task")
         await plan.execute(
             "manage_todo",
-            {"action": "create", "task": "State test", "steps": ["S1"]},
+            {
+                "action": "create",
+                "goal": "State test",
+                "tasks": [{"id": "s1", "description": "S1"}],
+            },
             "test_state_session",
         )
         prompt = plan.get_state_prompt("test_state_session")

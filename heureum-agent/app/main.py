@@ -14,11 +14,14 @@ from typing import AsyncGenerator, Set
 from app.config import settings
 from app.routers import agent
 from app.routers.agent import (
-    agent_service,
     create_response,
     generate_title,
-    mcp_client,
     subagent_status,
+)
+from app.services.agent_loop import (
+    agent_service,
+    mcp_client,
+    persist_controller,
 )
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -97,6 +100,8 @@ async def _on_shutdown() -> None:
     try:
         await agent_service.aclose()
         await mcp_client.close()
+        if persist_controller:
+            await persist_controller.close()
     except Exception:
         logger.warning("Error during shutdown cleanup", exc_info=True)
 

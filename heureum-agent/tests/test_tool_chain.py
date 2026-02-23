@@ -4,9 +4,10 @@
 
 import json
 
-from app.models import Message, ToolCallInfo
-from app.schemas.open_responses import MessageRole
-from app.services.providers.tool import ChainRule, ChainStep, ToolChainRegistry
+from app.models import ToolCallInfo
+from langchain_core.messages import ToolMessage
+from app.services.tools.chains import ToolChainRegistry
+from app.services.tools.types import ChainRule, ChainStep
 
 # ---------------------------------------------------------------------------
 # 1. Single-step chains (migrated from test_mcp_client.py)
@@ -38,7 +39,7 @@ class TestBuildSingleStep:
             }
         )
         executed = [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")]
-        results = [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")]
+        results = [ToolMessage(content=search_result, tool_call_id="c1")]
 
         chained = registry.build(executed, results)
 
@@ -50,7 +51,7 @@ class TestBuildSingleStep:
     def test_non_search_tool_no_chain(self):
         registry = ToolChainRegistry()
         executed = [ToolCallInfo(name="calculator", args={}, id="c1")]
-        results = [Message(role=MessageRole.TOOL, content="42", tool_call_id="c1")]
+        results = [ToolMessage(content="42", tool_call_id="c1")]
 
         assert registry.build(executed, results) == []
 
@@ -69,7 +70,7 @@ class TestBuildSingleStep:
             )
         )
         executed = [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")]
-        results = [Message(role=MessageRole.TOOL, content="not json", tool_call_id="c1")]
+        results = [ToolMessage(content="not json", tool_call_id="c1")]
 
         assert registry.build(executed, results) == []
 
@@ -105,7 +106,7 @@ class TestBuildMultiStep:
         registry = self._make_registry()
         search_result = json.dumps({"results": [{"url": "https://example.com/1"}]})
         executed = [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")]
-        results = [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")]
+        results = [ToolMessage(content=search_result, tool_call_id="c1")]
 
         chained = registry.build(executed, results, session_id="s1")
 
@@ -119,7 +120,7 @@ class TestBuildMultiStep:
         search_result = json.dumps({"results": [{"url": "https://example.com/1"}]})
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
-            [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")],
+            [ToolMessage(content=search_result, tool_call_id="c1")],
             session_id="s1",
         )
 
@@ -128,8 +129,7 @@ class TestBuildMultiStep:
         step1 = registry.build(
             step0,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=fetch_result,
                     tool_call_id=step0[0].id,
                 )
@@ -148,8 +148,7 @@ class TestBuildMultiStep:
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"results": [{"url": "https://x.com"}]}),
                     tool_call_id="c1",
                 )
@@ -160,8 +159,7 @@ class TestBuildMultiStep:
         step1 = registry.build(
             step0,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"content": "Hi"}),
                     tool_call_id=step0[0].id,
                 )
@@ -172,8 +170,7 @@ class TestBuildMultiStep:
         step2 = registry.build(
             step1,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"summary": "Brief"}),
                     tool_call_id=step1[0].id,
                 )
@@ -189,8 +186,7 @@ class TestBuildMultiStep:
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")],
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"results": [{"url": "https://x.com"}]}),
                     tool_call_id="c1",
                 )
@@ -205,8 +201,7 @@ class TestBuildMultiStep:
         chained = registry.build(
             step0,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"content": "Hi"}),
                     tool_call_id=step0[0].id,
                 )
@@ -295,8 +290,7 @@ class TestBuildPerResult:
             )
         )
         tc = ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")
-        result_msg = Message(
-            role=MessageRole.TOOL,
+        result_msg = ToolMessage(
             content=json.dumps({"results": [{"url": "https://example.com/1"}]}),
             tool_call_id="c1",
         )
@@ -330,8 +324,7 @@ class TestBuildPerResult:
 
         # Step 0
         tc0 = ToolCallInfo(name="web_search", args={"query": "q"}, id="c1")
-        result0 = Message(
-            role=MessageRole.TOOL,
+        result0 = ToolMessage(
             content=json.dumps({"results": [{"url": "https://example.com/1"}]}),
             tool_call_id="c1",
         )
@@ -340,8 +333,7 @@ class TestBuildPerResult:
         assert step0[0].name == "web_fetch"
 
         # Step 1
-        result1 = Message(
-            role=MessageRole.TOOL,
+        result1 = ToolMessage(
             content=json.dumps({"content": "Page text"}),
             tool_call_id=step0[0].id,
         )
@@ -375,7 +367,7 @@ class TestBuildCaching:
 
         content = json.dumps({"x": 1, "y": 2})
         tc = ToolCallInfo(name="tool_a", args={}, id="c1")
-        result_msg = Message(role=MessageRole.TOOL, content=content, tool_call_id="c1")
+        result_msg = ToolMessage(content=content, tool_call_id="c1")
 
         parse_cache: dict = {}
         path_cache: dict = {}
@@ -413,7 +405,7 @@ class TestBuildCaching:
 
         content = json.dumps({"items": [{"id": 1}, {"id": 2}]})
         tc = ToolCallInfo(name="tool_a", args={}, id="c1")
-        result_msg = Message(role=MessageRole.TOOL, content=content, tool_call_id="c1")
+        result_msg = ToolMessage(content=content, tool_call_id="c1")
 
         parse_cache: dict = {}
         path_cache: dict = {}
@@ -561,7 +553,7 @@ class TestSourceArgsPropagation:
         search_result = json.dumps({"results": [{"url": "https://example.com/article"}]})
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "python async 2026"}, id="c1")],
-            [Message(role=MessageRole.TOOL, content=search_result, tool_call_id="c1")],
+            [ToolMessage(content=search_result, tool_call_id="c1")],
             session_id="s1",
         )
         assert len(step0) == 1
@@ -579,8 +571,7 @@ class TestSourceArgsPropagation:
         step1 = registry.build(
             step0,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=fetch_result,
                     tool_call_id=step0[0].id,
                 )
@@ -598,7 +589,7 @@ class TestSourceArgsPropagation:
         grep_result = json.dumps({"matches": [{"line": 42, "text": "python async example"}]})
         step2 = registry.build(
             step1,
-            [Message(role=MessageRole.TOOL, content=grep_result, tool_call_id=step1[0].id)],
+            [ToolMessage(content=grep_result, tool_call_id=step1[0].id)],
             session_id="s1",
         )
         assert step2 == []
@@ -610,8 +601,7 @@ class TestSourceArgsPropagation:
         step0 = registry.build(
             [ToolCallInfo(name="web_search", args={"query": "test"}, id="c1")],
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"results": [{"url": "https://x.com"}]}),
                     tool_call_id="c1",
                 )
@@ -623,8 +613,7 @@ class TestSourceArgsPropagation:
         step1 = registry.build(
             step0,
             [
-                Message(
-                    role=MessageRole.TOOL,
+                ToolMessage(
                     content=json.dumps({"session_file": "/f", "title": "T"}),
                     tool_call_id=step0[0].id,
                 )

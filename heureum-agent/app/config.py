@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""
     PLATFORM_API_URL: str = "http://localhost:8001"
-    MCP_SERVER_URLS: str = "http://localhost:3001,http://localhost:3002"
+    MCP_SERVER_URLS: str = "http://localhost:3001"
     AGENT_MODEL: str = "gemini-3-flash-preview"
     AGENT_TEMPERATURE: float = 0.7
     AGENT_MAX_TOKENS: int = 32768
@@ -103,12 +103,17 @@ class Settings(BaseSettings):
     MAX_LLM_RETRIES: int = 2
     LLM_RETRY_BASE_DELAY: float = 1.0  # seconds, doubles each retry
 
+    # Plan retry (text-only responses while plan has unfinished steps)
+    MAX_PLAN_RETRIES: int = 3
+
     # Self-evaluation (LLM-as-judge)
     ENABLE_SELF_EVALUATION: bool = False
     MAX_EVAL_RETRIES: int = 2  # max judge retry attempts per response
 
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes
+    MCP_CONNECT_MAX_RETRIES: int = 2
+    MCP_CONNECT_RETRY_DELAY: float = 1.0  # seconds, doubles each retry
 
     # Tool loop detection
     LOOP_DETECTION_ENABLED: bool = True
@@ -125,9 +130,10 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
 
     # Sub-agent
-    SUBAGENT_MAX_SPAWN_DEPTH: int = 1
+    SUBAGENT_MAX_SPAWN_DEPTH: int = 2
     SUBAGENT_MAX_CHILDREN: int = 5
     SUBAGENT_TIMEOUT_SECONDS: int = 300
+    SUBAGENT_MAX_ITERATIONS: int = 30
 
     def get_cors_origins(self) -> List[str]:
         """Parse CORS origins as list.

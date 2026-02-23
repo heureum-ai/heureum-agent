@@ -32,8 +32,7 @@ import logging
 from dataclasses import dataclass
 from typing import List
 
-from app.models import Message
-from app.schemas.open_responses import MessageRole
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 logger = logging.getLogger(__name__)
 
@@ -43,26 +42,24 @@ class RepairReport:
     """Result of a repair pass.
 
     Attributes:
-        messages (List[Message]): The repaired message list with orphans removed.
+        messages (List[BaseMessage]): The repaired message list with orphans removed.
         dropped_orphan_count (int): Number of orphaned tool_result messages
             that were dropped during repair.
     """
 
-    messages: List[Message]
+    messages: List[BaseMessage]
     dropped_orphan_count: int
 
 
-def repair_tool_use_result_pairing(messages: List[Message]) -> RepairReport:
+def repair_tool_use_result_pairing(messages: List[BaseMessage]) -> RepairReport:
     """Remove orphaned tool_result messages whose tool_use was dropped.
 
     Scans assistant messages for tool_use IDs (via ``tool_calls`` attribute),
-    then drops any tool-role message whose ``tool_call_id`` is not found in
+    then drops any ToolMessage whose ``tool_call_id`` is not found in
     that set.
 
-    If Message lacks these optional fields the function is a safe no-op.
-
     Args:
-        messages (List[Message]): Conversation message list to scan and repair.
+        messages (List[BaseMessage]): Conversation message list to scan and repair.
 
     Returns:
         RepairReport: A report containing the cleaned message list and the
@@ -73,15 +70,14 @@ def repair_tool_use_result_pairing(messages: List[Message]) -> RepairReport:
 
     tool_use_ids: set[str] = set()
     has_tool_messages = any(
-        msg.role == MessageRole.TOOL and getattr(msg, "tool_call_id", None)
-        for msg in messages
+        isinstance(msg, ToolMessage) and getattr(msg, "tool_call_id", None) for msg in messages
     )
 
     if not has_tool_messages:
         return RepairReport(messages=messages, dropped_orphan_count=0)
 
     for msg in messages:
-        if msg.role != MessageRole.ASSISTANT:
+        if not isinstance(msg, AIMessage):
             continue
         tool_calls = getattr(msg, "tool_calls", None)
         if not tool_calls:
@@ -91,13 +87,13 @@ def repair_tool_use_result_pairing(messages: List[Message]) -> RepairReport:
             if tc_id:
                 tool_use_ids.add(tc_id)
 
-    repaired: List[Message] = []
+    repaired: List[BaseMessage] = []
     dropped = 0
 
     for msg in messages:
-        if msg.role == MessageRole.TOOL:
+        if isinstance(msg, ToolMessage):
             tc_id = getattr(msg, "tool_call_id", None)
-            if tc_id is not None and tc_id not in tool_use_ids:
+            if tc_id and tc_id not in tool_use_ids:
                 logger.info("Dropped orphaned tool_result: tool_call_id=%s", tc_id)
                 dropped += 1
                 continue

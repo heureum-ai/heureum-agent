@@ -73,6 +73,7 @@ help:
 # Setup: install + migrate + run all services
 setup: install
 	@echo "Running database migrations..."
+	cd heureum-platform && poetry run python manage.py makemigrations --no-input
 	cd heureum-platform && poetry run python manage.py migrate
 	@echo "✓ Setup complete. Starting all services..."
 	@$(MAKE) dev-all
@@ -100,6 +101,7 @@ install-frontend:
 install-client-tools:
 	@echo "Installing and building heureum-client-tools..."
 	cd heureum-client-tools/coding && pnpm install && pnpm build
+	cd heureum-client-tools/browser && pnpm install && pnpm build
 	# TODO: document tools temporarily excluded
 	# cd heureum-client-tools/word && pnpm install && pnpm build
 	# cd heureum-client-tools/pdf && pnpm install && pnpm build
@@ -170,6 +172,7 @@ build-frontend:
 
 build-client-tools:
 	cd heureum-client-tools/coding && pnpm build
+	cd heureum-client-tools/browser && pnpm build
 	# TODO: document tools temporarily excluded
 	# cd heureum-client-tools/word && pnpm build
 	# cd heureum-client-tools/pdf && pnpm build
@@ -248,6 +251,7 @@ clean:
 	rm -rf heureum-platform/dist heureum-platform/.pytest_cache heureum-platform/__pycache__
 	rm -rf heureum-frontend/dist heureum-frontend/node_modules/.vite
 	rm -rf heureum-client-tools/coding/dist
+	rm -rf heureum-client-tools/browser/dist
 	# TODO: document tools temporarily excluded
 	# rm -rf heureum-client-tools/word/dist heureum-client-tools/pdf/dist heureum-client-tools/ppt/dist heureum-client-tools/xlsx/dist heureum-client-tools/web/dist
 	rm -rf heureum-client/dist heureum-client/out heureum-client/release heureum-client/node_modules/.vite
@@ -256,6 +260,7 @@ clean:
 clean-node-modules:
 	@echo "Removing node_modules..."
 	rm -rf heureum-client-tools/coding/node_modules
+	rm -rf heureum-client-tools/browser/node_modules
 	# TODO: document tools temporarily excluded
 	# rm -rf heureum-client-tools/word/node_modules
 	# rm -rf heureum-client-tools/pdf/node_modules

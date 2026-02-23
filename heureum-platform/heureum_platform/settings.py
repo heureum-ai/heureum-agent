@@ -48,6 +48,7 @@ INSTALLED_APPS = [
     "notifications",
     "session_files",
     "periodic_tasks",
+    "subagents",
 ]
 
 MIDDLEWARE = [
@@ -84,10 +85,16 @@ WSGI_APPLICATION = "heureum_platform.wsgi.application"
 
 # Database
 DATABASES = {
-    "default": env.db(
-        "DATABASE_URL",
-        default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
-    )
+    "default": {
+        **env.db(
+            "DATABASE_URL",
+            default=f"sqlite:///{BASE_DIR / 'db.sqlite3'}",
+        ),
+        "OPTIONS": {
+            "timeout": 30,
+            "transaction_mode": "IMMEDIATE",
+        },
+    }
 }
 
 # Password validation

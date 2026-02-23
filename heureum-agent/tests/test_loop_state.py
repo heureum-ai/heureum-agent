@@ -2,7 +2,7 @@
 
 """Tests for _LoopStateBuilder and _ToolCallRecord in agent.py."""
 
-from app.routers.agent import _LoopStateBuilder
+from app.services.agent_loop import _LoopStateBuilder
 from app.schemas.open_responses import (
     FunctionToolCall,
     FunctionToolResult,
@@ -30,6 +30,7 @@ def _make_tool_call(name: str, call_id: str) -> FunctionToolCall:
         name=name,
         arguments="{}",
         status=ItemStatus.COMPLETED,
+        display_name=name,
     )
 
 

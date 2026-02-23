@@ -1,21 +1,32 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """
-Plan skill — manages per-session execution plans (TODO).
+Plan skill — hierarchical task planning with dependency-based execution.
 
-The agent creates a TODO plan for multi-step tasks, then executes each
-step while updating progress.  State is kept in-memory and persisted
-as TODO.md in session files via the Platform API.
+The agent creates a plan of tasks (each with todo items) and executes them
+via sub-agents.  Tasks with dependencies wait until their predecessors
+complete before spawning.
 """
 
+import asyncio
+import json
 import logging
-import re
 import time
+import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Module-level config — injected via PlanSkill.on_init from app.config.settings
+_config: Dict[str, Any] = {
+    "max_spawn_depth": 2,
+    "max_children": 5,
+}
+
+# ---------------------------------------------------------------------------
+# Tool schemas
+# ---------------------------------------------------------------------------
 
 MANAGE_TODO_TOOL_SCHEMA = {
     "type": "function",
@@ -23,42 +34,62 @@ MANAGE_TODO_TOOL_SCHEMA = {
     "function": {
         "name": "manage_todo",
         "description": (
-            "Create or update a TODO execution plan for the current task. "
-            "Use this for multi-step tasks to plan before executing."
+            "Create or update a hierarchical task plan. "
+            "Tasks can have dependencies — the system spawns sub-agents "
+            "for ready tasks and cascades when predecessors complete."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "update_step", "add_steps"],
+                    "enum": ["create", "update_task", "add_tasks"],
                     "description": "Action to perform",
                 },
-                "task": {
+                "goal": {
                     "type": "string",
-                    "description": "Overall task description (required for 'create')",
+                    "description": "Overall goal description (required for 'create')",
                 },
-                "steps": {
+                "tasks": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Step descriptions (required for 'create' and 'add_steps')",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Unique task identifier (e.g. 'economy', 'task_0')",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Task description",
+                            },
+                            "depends_on": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "IDs of tasks that must complete before this one",
+                            },
+                            "todo_items": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Checklist items within this task",
+                            },
+                        },
+                        "required": ["id", "description"],
+                    },
+                    "description": "Task definitions (required for 'create' and 'add_tasks')",
                 },
-                "step_index": {
-                    "type": "integer",
-                    "description": "Index of step to update (required for 'update_step')",
+                "task_id": {
+                    "type": "string",
+                    "description": "ID of task to update (required for 'update_task')",
                 },
                 "status": {
                     "type": "string",
                     "enum": ["in_progress", "completed", "failed"],
-                    "description": "New status for the step (required for 'update_step')",
+                    "description": "New status for the task (required for 'update_task')",
                 },
                 "result": {
                     "type": "string",
-                    "description": "Brief result description for completed/failed steps",
-                },
-                "after_index": {
-                    "type": "integer",
-                    "description": "Insert new steps after this index (for 'add_steps', defaults to end)",
+                    "description": "Brief result description for completed/failed tasks",
                 },
             },
             "required": ["action"],
@@ -66,10 +97,335 @@ MANAGE_TODO_TOOL_SCHEMA = {
     },
 }
 
+SESSIONS_SPAWN_TOOL_SCHEMA = {
+    "type": "function",
+    "display_name": "Sub-Agent",
+    "function": {
+        "name": "sessions_spawn",
+        "description": (
+            "Spawn a sub-agent to handle a self-contained task in parallel. "
+            "The sub-agent runs independently with its own context and tools, "
+            "and reports back when done. Use this for tasks that can be "
+            "delegated without needing real-time interaction."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A clear, self-contained description of the task for the sub-agent.",
+                },
+                "tools": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional list of tool names the sub-agent should have access to. Defaults to all available tools.",
+                },
+                "cleanup": {
+                    "type": "string",
+                    "enum": ["keep", "delete"],
+                    "description": "Whether to keep or delete the sub-agent session after completion. Defaults to 'delete'.",
+                },
+            },
+            "required": ["task"],
+        },
+    },
+}
+
+SESSIONS_SPAWN_STATUS_TOOL_SCHEMA = {
+    "type": "function",
+    "display_name": "Sub-Agent Status",
+    "function": {
+        "name": "sessions_spawn_status",
+        "description": (
+            "Check the status of spawned sub-agents. "
+            "Returns status, elapsed time, and result summary for each sub-agent. "
+            "Call with no arguments to list all sub-agents for the current session, "
+            "or provide a child_session_id to check a specific one."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "child_session_id": {
+                    "type": "string",
+                    "description": "Optional. ID of a specific sub-agent to check. If omitted, returns all sub-agents for this session.",
+                },
+            },
+        },
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Sub-agent data models (moved from app.services.subagent)
+# ---------------------------------------------------------------------------
+
 
 @dataclass
-class TodoStep:
-    """A single step in a TODO plan."""
+class ProgressStep:
+    """A single tool call progress entry within a sub-agent run."""
+
+    tool_name: str
+    display_name: str
+    detail: str
+    status: str = "running"  # "running" | "completed" | "failed"
+    started_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+
+
+@dataclass
+class SpawnRequest:
+    """Request to spawn a sub-agent."""
+
+    parent_session_id: str
+    task: str
+    tools: Optional[List[str]] = None
+    cleanup: str = "delete"  # "keep" or "delete"
+    skills_prompt: Optional[str] = None
+
+
+@dataclass
+class SpawnResult:
+    """Result from a spawn attempt."""
+
+    status: str  # "accepted", "forbidden", "error"
+    child_session_id: str = ""
+    message: str = ""
+
+
+@dataclass
+class SubagentRunRecord:
+    """Tracks a single sub-agent run."""
+
+    child_session_id: str
+    parent_session_id: str
+    task: str
+    status: str = "running"  # "running", "completed", "failed", "timeout"
+    started_at: float = field(default_factory=time.time)
+    completed_at: Optional[float] = None
+    result_summary: str = ""
+    asyncio_task: Optional[asyncio.Task] = None
+    progress_log: List[ProgressStep] = field(default_factory=list)
+    current_iteration: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Registry (moved from app.services.subagent)
+# ---------------------------------------------------------------------------
+
+
+class SubagentRegistry:
+    """Tracks active and completed sub-agent runs."""
+
+    # Completed records older than this are eligible for GC.
+    STALE_TTL_SECONDS: float = 600  # 10 minutes
+
+    def __init__(self) -> None:
+        self._runs: Dict[str, SubagentRunRecord] = {}
+
+    def register(self, record: SubagentRunRecord) -> None:
+        self._runs[record.child_session_id] = record
+
+    def get(self, child_session_id: str) -> Optional[SubagentRunRecord]:
+        return self._runs.get(child_session_id)
+
+    def count_active(self, parent_session_id: str) -> int:
+        return sum(
+            1
+            for r in self._runs.values()
+            if r.parent_session_id == parent_session_id and r.status == "running"
+        )
+
+    def mark_completed(
+        self,
+        child_session_id: str,
+        status: str = "completed",
+        summary: str = "",
+    ) -> None:
+        record = self._runs.get(child_session_id)
+        if record:
+            record.status = status
+            record.completed_at = time.time()
+            record.result_summary = summary
+
+    def list_by_parent(self, parent_session_id: str) -> List[SubagentRunRecord]:
+        """Return all runs (active and completed) for a parent session."""
+        return [r for r in self._runs.values() if r.parent_session_id == parent_session_id]
+
+    def cleanup(self, child_session_id: str) -> None:
+        self._runs.pop(child_session_id, None)
+
+    def sweep_stale(self) -> List[str]:
+        """Remove completed/failed/timeout records older than STALE_TTL_SECONDS.
+
+        Returns the list of swept child_session_ids.
+        Caller is responsible for cleaning up associated depth tracking
+        and shared service state.
+        """
+        now = time.time()
+        stale_ids: List[str] = []
+        for sid, record in list(self._runs.items()):
+            if record.status == "running":
+                continue
+            completed_at = record.completed_at or record.started_at
+            if now - completed_at > self.STALE_TTL_SECONDS:
+                stale_ids.append(sid)
+
+        for sid in stale_ids:
+            self._runs.pop(sid, None)
+
+        if stale_ids:
+            logger.info("Swept %d stale subagent records: %s", len(stale_ids), stale_ids)
+        return stale_ids
+
+
+# Module-level singleton
+_registry = SubagentRegistry()
+
+
+def get_registry() -> SubagentRegistry:
+    return _registry
+
+
+# ---------------------------------------------------------------------------
+# Depth tracking (moved from app.services.subagent)
+# ---------------------------------------------------------------------------
+
+_session_depth: Dict[str, int] = {}
+
+
+def get_subagent_depth(session_id: str) -> int:
+    """Get the spawn depth of a session (0 = root)."""
+    return _session_depth.get(session_id, 0)
+
+
+def _set_child_depth(child_session_id: str, parent_session_id: str) -> None:
+    """Set child depth = parent depth + 1."""
+    parent_depth = get_subagent_depth(parent_session_id)
+    _session_depth[child_session_id] = parent_depth + 1
+
+
+def _clear_depth(session_id: str) -> None:
+    """Remove depth tracking for a session."""
+    _session_depth.pop(session_id, None)
+
+
+# ---------------------------------------------------------------------------
+# Orchestration (moved from app.services.subagent)
+# ---------------------------------------------------------------------------
+
+
+async def spawn_subagent(request: SpawnRequest, create_task_fn: Any) -> SpawnResult:
+    """Spawn a sub-agent task.
+
+    Validates depth and children limits, then creates an async task
+    for the sub-agent execution.
+
+    Args:
+        request: The spawn request with task description and config.
+        create_task_fn: Callable(record, request, registry, clear_depth_fn) -> asyncio.Task
+
+    Returns:
+        SpawnResult with status and child session ID.
+    """
+    # Depth check
+    max_depth = _config["max_spawn_depth"]
+    depth = get_subagent_depth(request.parent_session_id)
+    if depth >= max_depth:
+        return SpawnResult(
+            status="forbidden",
+            message=f"Maximum spawn depth ({max_depth}) reached. "
+            "Sub-agents cannot spawn their own sub-agents.",
+        )
+
+    # Children limit check
+    max_children = _config["max_children"]
+    active = _registry.count_active(request.parent_session_id)
+    if active >= max_children:
+        return SpawnResult(
+            status="forbidden",
+            message=f"Maximum concurrent children ({max_children}) reached.",
+        )
+
+    # Create child session
+    child_session_id = f"subagent_{uuid.uuid4().hex[:12]}"
+    _set_child_depth(child_session_id, request.parent_session_id)
+
+    record = SubagentRunRecord(
+        child_session_id=child_session_id,
+        parent_session_id=request.parent_session_id,
+        task=request.task,
+    )
+    _registry.register(record)
+
+    # Launch async task
+    task = create_task_fn(record, request, _registry, _clear_depth)
+    record.asyncio_task = task
+
+    logger.info(
+        "Spawned sub-agent %s for parent %s (depth=%d, task=%s)",
+        child_session_id,
+        request.parent_session_id,
+        depth + 1,
+        request.task[:100],
+    )
+
+    return SpawnResult(
+        status="accepted",
+        child_session_id=child_session_id,
+        message="Sub-agent spawned. It will report back when done.",
+    )
+
+
+async def await_active_subagents(
+    parent_session_id: str,
+    timeout: float = 300.0,
+    poll_interval: float = 1.0,
+) -> List[SubagentRunRecord]:
+    """Wait for all active sub-agents of a parent session to complete.
+
+    Gathers the asyncio tasks for all running sub-agents and awaits them
+    with a timeout.  Returns the list of (now-completed) records.
+
+    Args:
+        parent_session_id: The parent session to wait for.
+        timeout: Maximum seconds to wait (default: 5 minutes).
+        poll_interval: Not used directly — asyncio.wait handles timing.
+
+    Returns:
+        List of SubagentRunRecord that were active (now completed/failed/timeout).
+    """
+    records = _registry.list_by_parent(parent_session_id)
+    active = [r for r in records if r.status == "running" and r.asyncio_task is not None]
+
+    if not active:
+        return []
+
+    tasks = [r.asyncio_task for r in active if r.asyncio_task is not None]
+
+    try:
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            logger.warning(
+                "await_active_subagents: %d sub-agent(s) still pending after %.1fs timeout for parent %s",
+                len(pending), timeout, parent_session_id,
+            )
+    except Exception:
+        logger.warning(
+            "Error awaiting sub-agents for parent %s",
+            parent_session_id,
+            exc_info=True,
+        )
+
+    return active
+
+
+# ---------------------------------------------------------------------------
+# Plan data models
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TodoItem:
+    """A single checklist item within a task."""
 
     description: str
     status: str = "pending"  # pending | in_progress | completed | failed
@@ -77,258 +433,678 @@ class TodoStep:
 
 
 @dataclass
-class SessionTodo:
-    """A TODO plan for a session."""
+class PlanTask:
+    """A task in the execution plan with optional dependencies."""
 
-    task: str
-    steps: List[TodoStep]
-    filename: str = "TODO.md"
+    id: str
+    description: str
+    todo_items: List[TodoItem] = field(default_factory=list)
+    depends_on: List[str] = field(default_factory=list)
+    status: str = "pending"  # pending | blocked | in_progress | completed | failed
+    child_session_id: Optional[str] = None
+    result: Optional[str] = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in ("completed", "failed")
+
+
+@dataclass
+class SessionPlan:
+    """A hierarchical execution plan for a session."""
+
+    goal: str
+    tasks: Dict[str, PlanTask] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
+    def get_ready_tasks(self) -> List[PlanTask]:
+        """Return pending tasks whose dependencies are all completed."""
+        ready = []
+        for task in self.tasks.values():
+            if task.status != "pending":
+                continue
+            if all(self.tasks[dep].status == "completed" for dep in task.depends_on):
+                ready.append(task)
+        return ready
 
-# Type alias for the async write callback:
-#   (tool_name: str, arguments: dict, *, session_id: str) -> str
-WriteToolFn = Callable[..., Coroutine[Any, Any, str]]
+    def all_terminal(self) -> bool:
+        """True when every task is completed or failed."""
+        return all(t.is_terminal for t in self.tasks.values())
+
+
+# ---------------------------------------------------------------------------
+# SessionsSpawnSkill
+# ---------------------------------------------------------------------------
+
+
+class SessionsSpawnSkill:
+    """Skill for spawning and tracking sub-agent tasks."""
+
+    name = "sessions_spawn"
+    tool_schemas = [SESSIONS_SPAWN_TOOL_SCHEMA]
+
+    def __init__(self) -> None:
+        self._create_subagent_task_fn: Any = None
+        self._get_skills_prompt: Any = None
+
+    def set_dependencies(
+        self,
+        *,
+        create_subagent_task_fn: Any = None,
+        get_skills_prompt: Any = None,
+    ) -> None:
+        """Inject runtime dependencies (called by PlanSkill.on_init)."""
+        if create_subagent_task_fn is not None:
+            self._create_subagent_task_fn = create_subagent_task_fn
+        if get_skills_prompt is not None:
+            self._get_skills_prompt = get_skills_prompt
+
+    def has_unfinished_steps(self, session_id: str) -> bool:
+        try:
+            return _registry.count_active(session_id) > 0
+        except Exception:
+            return False
+
+    def build_retry_guidance(self, session_id: str, abandoned_text: str) -> str:
+        try:
+            records = _registry.list_by_parent(session_id)
+
+            active = [r for r in records if r.status == "running"]
+            completed = [r for r in records if r.status in ("completed", "failed", "timeout")]
+
+            parts = [
+                "Sub-agents are still running. DO NOT respond to the user yet.",
+                "Wait for all sub-agents to complete, then synthesize their results.",
+            ]
+
+            if completed:
+                parts.append("\nCompleted sub-agents:")
+                for r in completed:
+                    summary = r.result_summary[:200] if r.result_summary else "No result"
+                    parts.append(f"  - [{r.status}] {r.task[:100]}: {summary}")
+
+            if active:
+                parts.append(f"\nStill running: {len(active)} sub-agent(s)")
+                for r in active:
+                    parts.append(f"  - {r.task[:100]} (iteration {r.current_iteration})")
+
+            return "\n".join(parts)
+        except Exception:
+            return "Sub-agents are still running. Wait for them to complete before responding."
+
+    async def await_pending(self, session_id: str, timeout: float = 300.0) -> None:
+        try:
+            await await_active_subagents(session_id, timeout=timeout)
+        except Exception:
+            logger.warning("await_pending failed for session %s", session_id, exc_info=True)
+
+    async def execute(self, name: str, args: Dict[str, Any], session_id: str) -> str:
+        if name == "sessions_spawn":
+            return await self._spawn(args, session_id)
+        if name == "sessions_spawn_status":
+            return await self._status(args, session_id)
+        return json.dumps({"error": f"Unknown tool: {name}"})
+
+    async def _spawn(self, args: Dict[str, Any], session_id: str) -> str:
+        try:
+            task = (args.get("task") or "").strip()
+            if not task:
+                return json.dumps({"error": "task is required. Provide a clear task description."})
+
+            parent_skills_prompt = None
+            if self._get_skills_prompt:
+                try:
+                    parent_skills_prompt = self._get_skills_prompt()
+                except Exception:
+                    pass
+
+            request = SpawnRequest(
+                parent_session_id=session_id,
+                task=task,
+                tools=args.get("tools"),
+                cleanup=args.get("cleanup", "delete"),
+                skills_prompt=parent_skills_prompt,
+            )
+            result = await spawn_subagent(request, self._create_subagent_task_fn)
+            return json.dumps(
+                {
+                    "status": result.status,
+                    "child_session_id": result.child_session_id,
+                    "message": result.message,
+                }
+            )
+        except Exception as e:
+            logger.warning("Sub-agent spawn failed: %s", e)
+            return json.dumps({"error": str(e)})
+
+    async def _status(self, args: Dict[str, Any], session_id: str) -> str:
+        try:
+            child_id = args.get("child_session_id")
+
+            if child_id:
+                record = _registry.get(child_id)
+                if not record:
+                    return json.dumps({"error": f"Sub-agent '{child_id}' not found"})
+                if record.parent_session_id != session_id:
+                    return json.dumps({"error": f"Sub-agent '{child_id}' not found"})
+                return json.dumps(self._record_to_dict(record))
+
+            records = _registry.list_by_parent(session_id)
+            if not records:
+                return json.dumps(
+                    {"message": "No sub-agents found for this session", "children": []}
+                )
+
+            return json.dumps({"children": [self._record_to_dict(r) for r in records]})
+        except Exception as e:
+            logger.warning("Sub-agent status check failed: %s", e)
+            return json.dumps({"error": str(e)})
+
+    @staticmethod
+    def _record_to_dict(record) -> Dict[str, Any]:
+        elapsed = time.time() - record.started_at
+        result: Dict[str, Any] = {
+            "child_session_id": record.child_session_id,
+            "task": record.task,
+            "status": record.status,
+            "elapsed_seconds": round(elapsed, 1),
+        }
+        if record.result_summary:
+            result["result_summary"] = record.result_summary[:500]
+        return result
+
+
+# ---------------------------------------------------------------------------
+# PlanSkill
+# ---------------------------------------------------------------------------
 
 
 class PlanSkill:
-    """Manages TODO plans per session with markdown persistence."""
+    """Manages hierarchical task plans with dependency-based execution."""
 
     name = "plan_task"
-    tool_schemas = [MANAGE_TODO_TOOL_SCHEMA]
+    tool_schemas = [
+        MANAGE_TODO_TOOL_SCHEMA,
+        SESSIONS_SPAWN_TOOL_SCHEMA,
+        SESSIONS_SPAWN_STATUS_TOOL_SCHEMA,
+    ]
 
     def __init__(self) -> None:
-        self._session_todos: Dict[str, SessionTodo] = {}
-        self._session_history: Dict[str, List[SessionTodo]] = {}
-        self._write_tool_fn: Optional[WriteToolFn] = None
+        self._session_plans: Dict[str, SessionPlan] = {}
+        self._session_history: Dict[str, List[SessionPlan]] = {}
+        self._create_subagent_task_fn: Any = None
+        self._get_skills_prompt: Any = None
+        self._spawn_skill = SessionsSpawnSkill()
 
     async def on_init(self, **kwargs: Any) -> None:
-        write_tool_fn = kwargs.get("write_tool_fn")
-        if write_tool_fn is not None:
-            self._write_tool_fn = write_tool_fn
+        create_subagent_task_fn = kwargs.get("create_subagent_task_fn")
+        if create_subagent_task_fn is not None:
+            self._create_subagent_task_fn = create_subagent_task_fn
+        get_skills_prompt = kwargs.get("get_skills_prompt")
+        if get_skills_prompt is not None:
+            self._get_skills_prompt = get_skills_prompt
+        # Inject config (max_spawn_depth, max_children, etc.)
+        subagent_config = kwargs.get("subagent_config")
+        if subagent_config:
+            _config.update(subagent_config)
+        # Propagate dependencies to spawn sub-skill
+        self._spawn_skill.set_dependencies(
+            create_subagent_task_fn=self._create_subagent_task_fn,
+            get_skills_prompt=self._get_skills_prompt,
+        )
 
     async def execute(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
+        # Delegate spawn tools to SessionsSpawnSkill
+        if name in ("sessions_spawn", "sessions_spawn_status"):
+            return await self._spawn_skill.execute(name, arguments, session_id)
+
         action = arguments.get("action", "")
         if action == "create":
             return await self._create(
                 session_id,
-                arguments.get("task", ""),
-                arguments.get("steps", []),
+                arguments.get("goal", ""),
+                arguments.get("tasks", []),
             )
-        elif action == "update_step":
-            return await self._update_step(
+        elif action == "update_task":
+            return await self._update_task(
                 session_id,
-                arguments.get("step_index", 0),
+                arguments.get("task_id", ""),
                 arguments.get("status", "completed"),
                 arguments.get("result"),
             )
-        elif action == "add_steps":
-            return await self._add_steps(
+        elif action == "add_tasks":
+            return await self._add_tasks(
                 session_id,
-                arguments.get("steps", []),
-                arguments.get("after_index"),
+                arguments.get("tasks", []),
             )
         else:
             return f"Unknown action: {action}"
 
+    # ------------------------------------------------------------------
+    # Plan creation
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def _make_todo_filename(task: str) -> str:
-        slug = re.sub(r"[^a-z0-9]+", "-", task.lower()).strip("-")[:40]
-        ts = datetime.now(timezone.utc).strftime("%H%M%S")
-        return f"TODO-{slug}-{ts}.md"
+    def _has_cycle(tasks: Dict[str, PlanTask]) -> bool:
+        """DFS cycle detection on the dependency graph."""
+        WHITE, GRAY, BLACK = 0, 1, 2
+        color: Dict[str, int] = {tid: WHITE for tid in tasks}
 
-    async def _create(self, session_id: str, task: str, steps: List[str]) -> str:
-        if not task:
-            return "Error: task description is required"
-        if not steps:
-            return "Error: at least one step is required"
+        def dfs(tid: str) -> bool:
+            color[tid] = GRAY
+            for dep in tasks[tid].depends_on:
+                if dep not in color:
+                    continue
+                if color[dep] == GRAY:
+                    return True
+                if color[dep] == WHITE and dfs(dep):
+                    return True
+            color[tid] = BLACK
+            return False
 
-        existing = self._session_todos.get(session_id)
+        return any(dfs(tid) for tid, c in color.items() if c == WHITE)
+
+    async def _create(self, session_id: str, goal: str, raw_tasks: List[Dict[str, Any]]) -> str:
+        if not goal:
+            return "Error: goal description is required"
+        if not raw_tasks:
+            return "Error: at least one task is required"
+
+        # Build PlanTask objects
+        tasks: Dict[str, PlanTask] = {}
+        seen_ids: set = set()
+        for t in raw_tasks:
+            tid = t.get("id", "")
+            if not tid:
+                return "Error: every task must have an 'id'"
+            if tid in seen_ids:
+                return f"Error: duplicate task id '{tid}'"
+            seen_ids.add(tid)
+
+            todo_items = [TodoItem(description=d) for d in (t.get("todo_items") or [])]
+            depends_on = t.get("depends_on") or []
+            tasks[tid] = PlanTask(
+                id=tid,
+                description=t.get("description", ""),
+                todo_items=todo_items,
+                depends_on=depends_on,
+            )
+
+        # Validate dependency references
+        for task in tasks.values():
+            for dep in task.depends_on:
+                if dep not in tasks:
+                    return f"Error: task '{task.id}' depends on unknown task '{dep}'"
+
+        # Cycle check
+        if self._has_cycle(tasks):
+            return "Error: circular dependency detected in tasks"
+
+        # Set initial statuses: blocked if has deps, pending otherwise
+        for task in tasks.values():
+            if task.depends_on:
+                task.status = "blocked"
+            else:
+                task.status = "pending"
+
+        # Archive existing plan
+        existing = self._session_plans.get(session_id)
         if existing:
             self._session_history.setdefault(session_id, []).append(existing)
 
-        filename = self._make_todo_filename(task)
-        todo = SessionTodo(
-            task=task,
-            steps=[TodoStep(description=s) for s in steps],
-            filename=filename,
-        )
-        self._session_todos[session_id] = todo
-        await self._write_todo_file(session_id, todo)
-        return self._format_state(todo)
+        plan = SessionPlan(goal=goal, tasks=tasks)
+        self._session_plans[session_id] = plan
 
-    async def _update_step(
+        # Spawn ready tasks
+        await self._spawn_ready_tasks(session_id, plan)
+
+        return self._format_state(plan)
+
+    # ------------------------------------------------------------------
+    # Task spawning
+    # ------------------------------------------------------------------
+
+    async def _spawn_ready_tasks(self, session_id: str, plan: SessionPlan) -> None:
+        """Spawn sub-agents for all ready (pending, deps satisfied) tasks."""
+        ready = plan.get_ready_tasks()
+        if not ready:
+            return
+
+        skills_prompt = None
+        if self._get_skills_prompt:
+            try:
+                skills_prompt = self._get_skills_prompt()
+            except Exception:
+                pass
+
+        max_children = _config["max_children"]
+        active_count = _registry.count_active(session_id)
+
+        for task in ready:
+            if active_count >= max_children:
+                break
+
+            # Build task instruction
+            instruction_parts = [f"Goal: {plan.goal}", f"Task: {task.description}"]
+            if task.todo_items:
+                instruction_parts.append("Checklist:")
+                for item in task.todo_items:
+                    instruction_parts.append(f"  - {item.description}")
+
+            # Include completed dependency results for context
+            dep_results = []
+            for dep_id in task.depends_on:
+                dep_task = plan.tasks.get(dep_id)
+                if dep_task and dep_task.result:
+                    dep_results.append(f"[{dep_id}] {dep_task.result}")
+            if dep_results:
+                instruction_parts.append("\nPrevious task results:")
+                instruction_parts.extend(f"  {r}" for r in dep_results)
+
+            instruction = "\n".join(instruction_parts)
+
+            task.status = "in_progress"
+            try:
+                result = await spawn_subagent(
+                    SpawnRequest(
+                        parent_session_id=session_id,
+                        task=instruction,
+                        skills_prompt=skills_prompt,
+                    ),
+                    self._create_subagent_task_fn,
+                )
+                if result.status == "accepted":
+                    task.child_session_id = result.child_session_id
+                    active_count += 1
+                else:
+                    task.status = "failed"
+                    task.result = result.message
+            except Exception as e:
+                task.status = "failed"
+                task.result = str(e)
+
+        plan.updated_at = time.time()
+
+    # ------------------------------------------------------------------
+    # Status sync from sub-agent registry
+    # ------------------------------------------------------------------
+
+    def _sync_task_statuses(self, session_id: str, plan: SessionPlan) -> bool:
+        """Sync task statuses from the sub-agent registry. Returns True if anything changed."""
+        changed = False
+
+        for task in plan.tasks.values():
+            if task.child_session_id and task.status == "in_progress":
+                record = _registry.get(task.child_session_id)
+                if record and record.status != "running":
+                    changed = True
+                    if record.status == "completed":
+                        task.status = "completed"
+                        task.result = (record.result_summary or "Done")[:200]
+                    else:
+                        task.status = "failed"
+                        task.result = record.result_summary or record.status
+
+        # Promote blocked tasks whose deps are now all completed
+        for task in plan.tasks.values():
+            if task.status == "blocked":
+                deps_ok = all(plan.tasks[dep].status == "completed" for dep in task.depends_on)
+                deps_failed = any(plan.tasks[dep].status == "failed" for dep in task.depends_on)
+                if deps_failed:
+                    task.status = "failed"
+                    task.result = "Dependency failed"
+                    changed = True
+                elif deps_ok:
+                    task.status = "pending"
+                    changed = True
+
+        if changed:
+            plan.updated_at = time.time()
+        return changed
+
+    # ------------------------------------------------------------------
+    # await_pending — cascade loop
+    # ------------------------------------------------------------------
+
+    async def await_pending(self, session_id: str, timeout: float = 300.0) -> None:
+        """Wait for sub-agents, sync statuses, and cascade to newly ready tasks."""
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return
+
+        while True:
+            # 1. Wait for current sub-agents
+            try:
+                await await_active_subagents(session_id, timeout=timeout)
+            except Exception:
+                logger.warning("await_pending failed for session %s", session_id, exc_info=True)
+                break
+
+            # 2. Sync statuses from registry
+            self._sync_task_statuses(session_id, plan)
+
+            # 3. Check for newly ready tasks
+            ready = plan.get_ready_tasks()
+            if not ready:
+                break
+
+            # 4. Spawn new tasks
+            await self._spawn_ready_tasks(session_id, plan)
+
+            # 5. Loop to wait for new sub-agents
+
+    # ------------------------------------------------------------------
+    # Manual task update
+    # ------------------------------------------------------------------
+
+    async def _update_task(
         self,
         session_id: str,
-        step_index: int,
+        task_id: str,
         status: str,
         result: Optional[str] = None,
     ) -> str:
-        todo = self._session_todos.get(session_id)
-        if not todo:
-            return "Error: no TODO plan exists for this session"
-        if step_index < 0 or step_index >= len(todo.steps):
-            return f"Error: step_index {step_index} out of range (0-{len(todo.steps) - 1})"
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return "Error: no plan exists for this session"
+        task = plan.tasks.get(task_id)
+        if not task:
+            return f"Error: task '{task_id}' not found"
 
-        step = todo.steps[step_index]
-        step.status = status
+        task.status = status
         if result is not None:
-            step.result = result
-        todo.updated_at = time.time()
+            task.result = result
+        plan.updated_at = time.time()
 
-        await self._write_todo_file(session_id, todo)
-        return self._format_state(todo)
+        # Cascade: promote blocked tasks and spawn newly ready ones
+        self._sync_task_statuses(session_id, plan)
+        await self._spawn_ready_tasks(session_id, plan)
 
-    async def _add_steps(
+        return self._format_state(plan)
+
+    # ------------------------------------------------------------------
+    # Add tasks to existing plan
+    # ------------------------------------------------------------------
+
+    async def _add_tasks(
         self,
         session_id: str,
-        steps: List[str],
-        after_index: Optional[int] = None,
+        raw_tasks: List[Dict[str, Any]],
     ) -> str:
-        todo = self._session_todos.get(session_id)
-        if not todo:
-            return "Error: no TODO plan exists for this session"
-        if not steps:
-            return "Error: at least one step is required"
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return "Error: no plan exists for this session"
+        if not raw_tasks:
+            return "Error: at least one task is required"
 
-        new_steps = [TodoStep(description=s) for s in steps]
-        if after_index is not None and 0 <= after_index < len(todo.steps):
-            insert_at = after_index + 1
-            todo.steps[insert_at:insert_at] = new_steps
-        else:
-            todo.steps.extend(new_steps)
+        for t in raw_tasks:
+            tid = t.get("id", "")
+            if not tid:
+                return "Error: every task must have an 'id'"
+            if tid in plan.tasks:
+                return f"Error: task id '{tid}' already exists"
 
-        todo.updated_at = time.time()
-        await self._write_todo_file(session_id, todo)
-        return self._format_state(todo)
+            todo_items = [TodoItem(description=d) for d in (t.get("todo_items") or [])]
+            depends_on = t.get("depends_on") or []
 
-    def get_state(self, session_id: str) -> Optional[SessionTodo]:
-        return self._session_todos.get(session_id)
+            # Validate deps reference existing tasks
+            for dep in depends_on:
+                if dep not in plan.tasks:
+                    return f"Error: task '{tid}' depends on unknown task '{dep}'"
 
-    def get_failed_step(self, session_id: str) -> Optional[TodoStep]:
-        todo = self._session_todos.get(session_id)
-        if not todo:
+            task = PlanTask(
+                id=tid,
+                description=t.get("description", ""),
+                todo_items=todo_items,
+                depends_on=depends_on,
+                status="blocked" if depends_on else "pending",
+            )
+            plan.tasks[tid] = task
+
+        plan.updated_at = time.time()
+        await self._spawn_ready_tasks(session_id, plan)
+        return self._format_state(plan)
+
+    # ------------------------------------------------------------------
+    # State accessors
+    # ------------------------------------------------------------------
+
+    def get_state(self, session_id: str) -> Optional[SessionPlan]:
+        return self._session_plans.get(session_id)
+
+    def get_failed_step(self, session_id: str) -> Optional[PlanTask]:
+        plan = self._session_plans.get(session_id)
+        if not plan:
             return None
-        for step in todo.steps:
-            if step.status == "failed":
-                return step
+        for task in plan.tasks.values():
+            if task.status == "failed":
+                return task
         return None
 
-    def build_retry_guidance(self, session_id: str, abandoned_text: str) -> Optional[str]:
-        """Build a targeted guidance prompt when the LLM abandons the plan.
+    def is_all_complete(self, session_id: str) -> bool:
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return False
+        return plan.all_terminal()
 
-        Provides a structured breakdown of previous/current/remaining steps
-        so the LLM has full context to recover and continue.
-        """
-        todo = self._session_todos.get(session_id)
-        if not todo:
+    def has_unfinished_steps(self, session_id: str) -> bool:
+        plan = self._session_plans.get(session_id)
+        if plan and any(
+            t.status in ("in_progress", "pending", "blocked") for t in plan.tasks.values()
+        ):
+            return True
+        return self._spawn_skill.has_unfinished_steps(session_id)
+
+    # ------------------------------------------------------------------
+    # Retry guidance
+    # ------------------------------------------------------------------
+
+    def build_retry_guidance(self, session_id: str, abandoned_text: str) -> Optional[str]:
+        plan = self._session_plans.get(session_id)
+        if not plan:
             return None
 
         in_progress = []
         pending = []
+        blocked = []
         completed = []
         failed = []
-        for i, step in enumerate(todo.steps):
-            if step.status == "in_progress":
-                in_progress.append((i, step))
-            elif step.status == "pending":
-                pending.append((i, step))
-            elif step.status == "completed":
-                completed.append((i, step))
-            elif step.status == "failed":
-                failed.append((i, step))
+        for task in plan.tasks.values():
+            if task.status == "in_progress":
+                in_progress.append(task)
+            elif task.status == "pending":
+                pending.append(task)
+            elif task.status == "blocked":
+                blocked.append(task)
+            elif task.status == "completed":
+                completed.append(task)
+            elif task.status == "failed":
+                failed.append(task)
 
-        if not in_progress and not pending:
+        if not in_progress and not pending and not blocked:
             return None
 
         lines = [
             "You tried to respond without finishing the plan. "
-            "You MUST complete every step before giving a final answer.",
+            "You MUST complete every task before giving a final answer.",
         ]
 
-        # -- Previous steps (completed / failed) --
         if completed or failed:
             lines.append("")
-            lines.append("## Previous steps")
-            for idx, step in completed:
-                result_part = f" → {step.result}" if step.result else ""
-                lines.append(f"  ✓ Step {idx}: {step.description}{result_part}")
-            for idx, step in failed:
-                result_part = f" → {step.result}" if step.result else ""
-                lines.append(f"  ✗ Step {idx}: {step.description}{result_part}")
+            lines.append("## Previous tasks")
+            for t in completed:
+                result_part = f" → {t.result}" if t.result else ""
+                lines.append(f"  ✓ {t.id}: {t.description}{result_part}")
+            for t in failed:
+                result_part = f" → {t.result}" if t.result else ""
+                lines.append(f"  ✗ {t.id}: {t.description}{result_part}")
 
-        # -- Current step (in_progress) --
-        if in_progress:
-            idx, step = in_progress[0]
+        if in_progress or pending:
+            running = in_progress + pending
             lines.append("")
-            lines.append("## Current step (BLOCKED)")
-            lines.append(f"  ⟳ Step {idx}: {step.description}")
+            lines.append("## Running tasks (sub-agents)")
+            for t in running:
+                lines.append(f"  ⟳ {t.id}: {t.description}")
             lines.append("")
-            lines.append("Action required — pick ONE:")
-            lines.append("  1. Try a DIFFERENT approach to complete this step.")
-            lines.append("  2. Mark it failed if truly impossible:")
-            lines.append(
-                f'     manage_todo(action="update_step", step_index={idx}, '
-                f'status="failed", result="<reason>")'
-            )
+            lines.append("Sub-agents are running. Wait for them to complete.")
 
-        # -- Remaining steps (pending) --
-        if pending:
+        if blocked:
             lines.append("")
-            lines.append("## Remaining steps")
-            for idx, step in pending:
-                lines.append(f"  ○ Step {idx}: {step.description}")
-            if in_progress:
-                next_idx, next_step = pending[0]
-                lines.append("")
-                lines.append(f"After resolving the current step, continue to step {next_idx}.")
-            else:
-                next_idx, next_step = pending[0]
-                lines.append("")
-                lines.append(f"Start step {next_idx} now.")
+            lines.append("## Blocked tasks")
+            for t in blocked:
+                waiting = ", ".join(t.depends_on)
+                lines.append(f"  ⏳ {t.id}: {t.description} (waiting for: {waiting})")
 
         lines.append("")
-        lines.append(f"Progress: {len(completed)}/{len(todo.steps)} completed.")
+        lines.append(f"Progress: {len(completed)}/{len(plan.tasks)} completed.")
 
         return "\n".join(lines)
 
-    def is_all_complete(self, session_id: str) -> bool:
-        """True when a plan exists and every step is completed or failed."""
-        todo = self._session_todos.get(session_id)
-        if not todo:
-            return False
-        return all(s.status in ("completed", "failed") for s in todo.steps)
-
-    def has_unfinished_steps(self, session_id: str) -> bool:
-        """Check if the plan has any in_progress or pending steps."""
-        todo = self._session_todos.get(session_id)
-        if not todo:
-            return False
-        return any(s.status in ("in_progress", "pending") for s in todo.steps)
+    # ------------------------------------------------------------------
+    # Finalize abandoned
+    # ------------------------------------------------------------------
 
     async def finalize_abandoned_steps(self, session_id: str) -> None:
-        """Auto-fail any in_progress or pending steps when the LLM returns text without updating.
-
-        Called by the agent loop as a safety net — ensures the plan never
-        stays stuck in a broken state when the LLM abandons it.
-        """
-        todo = self._session_todos.get(session_id)
-        if not todo:
+        plan = self._session_plans.get(session_id)
+        if not plan:
             return
         changed = False
-        for step in todo.steps:
-            if step.status == "in_progress":
-                step.status = "failed"
-                step.result = "Abandoned by agent"
+        child_sids_to_cancel: list[str] = []
+        for task in plan.tasks.values():
+            if task.status == "in_progress":
+                task.status = "failed"
+                task.result = "Abandoned by agent"
                 changed = True
-            elif step.status == "pending":
-                step.status = "failed"
-                step.result = "Skipped — previous step abandoned"
+                if task.child_session_id:
+                    child_sids_to_cancel.append(task.child_session_id)
+            elif task.status in ("pending", "blocked"):
+                task.status = "failed"
+                task.result = "Skipped — previous task abandoned"
                 changed = True
         if changed:
-            todo.updated_at = time.time()
-            await self._write_todo_file(session_id, todo)
+            plan.updated_at = time.time()
+
+        # Cancel sub-agent asyncio tasks and update registry
+        for child_sid in child_sids_to_cancel:
+            record = _registry.get(child_sid)
+            if record and record.status == "running":
+                if record.asyncio_task and not record.asyncio_task.done():
+                    record.asyncio_task.cancel()
+                _registry.mark_completed(child_sid, "failed", "Abandoned by parent agent")
+
+        # Also cancel ad-hoc sub-agents not tracked in plan tasks
+        for record in _registry.list_by_parent(session_id):
+            if record.status == "running":
+                if record.asyncio_task and not record.asyncio_task.done():
+                    record.asyncio_task.cancel()
+                _registry.mark_completed(
+                    record.child_session_id, "failed", "Abandoned by parent agent"
+                )
+
+    # ------------------------------------------------------------------
+    # State prompt
+    # ------------------------------------------------------------------
 
     def get_state_prompt(self, session_id: str) -> Optional[str]:
         parts: List[str] = []
@@ -337,10 +1113,10 @@ class PlanSkill:
         if history:
             hlines = ["<previous_attempts>"]
             for h in history:
-                hlines.append(f"Task: {h.task}")
-                for i, step in enumerate(h.steps):
-                    result_part = f" — {step.result}" if step.result else ""
-                    hlines.append(f"  {i}. [{step.status}] {step.description}{result_part}")
+                hlines.append(f"Goal: {h.goal}")
+                for task in h.tasks.values():
+                    result_part = f" — {task.result}" if task.result else ""
+                    hlines.append(f"  [{task.status}] {task.id}: {task.description}{result_part}")
                 hlines.append("")
             hlines.append(
                 "Use these past results to inform your approach. "
@@ -349,117 +1125,116 @@ class PlanSkill:
             hlines.append("</previous_attempts>")
             parts.append("\n".join(hlines))
 
-        todo = self._session_todos.get(session_id)
-        if not todo:
+        plan = self._session_plans.get(session_id)
+        if not plan:
             return parts[0] if parts else None
 
-        lines = ["<current_todo>", f"Task: {todo.task}"]
+        lines = ["<current_plan>", f"Goal: {plan.goal}"]
 
-        # Classify steps by status
+        # Classify tasks by status
         completed_lines: List[str] = []
-        current_lines: List[str] = []
+        running_lines: List[str] = []
+        blocked_lines: List[str] = []
         pending_lines: List[str] = []
-        first_pending = None
-        in_progress_idx = None
-        failed_idx = None
+        failed_lines: List[str] = []
 
-        for i, step in enumerate(todo.steps):
-            result_part = f" — {step.result}" if step.result else ""
-            entry = f"  {i}. {step.description}{result_part}"
-            if step.status == "completed":
-                completed_lines.append(entry)
-            elif step.status == "in_progress":
-                current_lines.append(entry)
-                in_progress_idx = i
-            elif step.status == "failed":
-                current_lines.append(f"  {i}. [FAILED] {step.description}{result_part}")
-                if failed_idx is None:
-                    failed_idx = i
+        for task in plan.tasks.values():
+            result_part = f" -- {task.result}" if task.result else ""
+            if task.status == "completed":
+                completed_lines.append(f"  {task.id}: {task.description}{result_part}")
+            elif task.status == "in_progress":
+                running_lines.append(f"  {task.id}: {task.description}")
+            elif task.status == "blocked":
+                waiting = ", ".join(task.depends_on)
+                blocked_lines.append(f"  {task.id}: {task.description} (waiting for: {waiting})")
+            elif task.status == "failed":
+                failed_lines.append(f"  {task.id}: [FAILED] {task.description}{result_part}")
             else:  # pending
-                pending_lines.append(entry)
-                if first_pending is None:
-                    first_pending = i
+                pending_lines.append(f"  {task.id}: {task.description}")
 
         if completed_lines:
-            lines.append("<completed_steps>")
+            lines.append("<completed_tasks>")
             lines.extend(completed_lines)
-            lines.append("</completed_steps>")
-        if current_lines:
-            lines.append("<current_step>")
-            lines.extend(current_lines)
-            lines.append("</current_step>")
+            lines.append("</completed_tasks>")
+        if running_lines:
+            lines.append("<running_tasks>")
+            lines.extend(running_lines)
+            lines.append("</running_tasks>")
+        if blocked_lines:
+            lines.append("<blocked_tasks>")
+            lines.extend(blocked_lines)
+            lines.append("</blocked_tasks>")
         if pending_lines:
-            lines.append("<pending_steps>")
+            lines.append("<pending_tasks>")
             lines.extend(pending_lines)
-            lines.append("</pending_steps>")
+            lines.append("</pending_tasks>")
+        if failed_lines:
+            lines.append("<failed_tasks>")
+            lines.extend(failed_lines)
+            lines.append("</failed_tasks>")
 
         # Action directive
-        if failed_idx is not None:
-            lines.append(
-                f"\nSTOP: Step {failed_idx} has failed. "
-                "Do NOT continue with remaining steps. "
-                "Inform the user about the failure and what went wrong. "
-                "If the user asks to retry, create a new plan with a different approach."
-            )
-        elif in_progress_idx is not None:
-            lines.append(
-                f"\nStep {in_progress_idx} is in_progress. "
-                'Call manage_todo(action="update_step") to set this step to '
-                '"completed" or "failed" before responding with text to the user. '
-                f"If the step cannot be completed, mark it as failed: "
-                f'manage_todo(action="update_step", step_index={in_progress_idx}, '
-                f'status="failed", result="reason").'
-            )
-            if first_pending is not None:
-                lines.append(
-                    "Then proceed to the next pending step immediately. "
-                    "Keep any intermediate text to one short sentence at most."
-                )
-            else:
-                lines.append("Then provide a final summary of all completed work.")
-        elif first_pending is not None:
-            lines.append(
-                f'\nCall manage_todo(action="update_step", '
-                f'step_index={first_pending}, status="in_progress") to start the next step.'
-            )
+        unfinished = [
+            t for t in plan.tasks.values() if t.status in ("pending", "in_progress", "blocked")
+        ]
+        if not unfinished:
+            lines.append("\nAll tasks completed. Provide a final summary of all results.")
         else:
-            completed = sum(1 for s in todo.steps if s.status == "completed")
-            if completed == len(todo.steps):
-                lines.append(
-                    "\nAll steps completed. Respond with a final summary only. "
-                    "Do not call any more tools."
-                )
+            lines.append(
+                f"\n{len(unfinished)} task(s) running via sub-agents. "
+                "Wait for them to complete, then synthesize results into a final answer."
+            )
 
-        lines.append("</current_todo>")
+        lines.append("</current_plan>")
         parts.append("\n".join(lines))
         return "\n\n".join(parts)
 
+    # ------------------------------------------------------------------
+    # Session management
+    # ------------------------------------------------------------------
+
     def clear_session(self, session_id: str) -> None:
-        self._session_todos.pop(session_id, None)
+        self._session_plans.pop(session_id, None)
         self._session_history.pop(session_id, None)
 
+    # ------------------------------------------------------------------
+    # Markdown rendering
+    # ------------------------------------------------------------------
+
     @staticmethod
-    def render_markdown(todo: SessionTodo) -> str:
-        lines = ["# TODO", "", f"**Task**: {todo.task}", "", "## Steps"]
+    def render_markdown(plan: SessionPlan) -> str:
+        lines = ["# TODO", "", f"**Goal**: {plan.goal}", "", "## Tasks"]
         completed = 0
         in_progress = False
-        for step in todo.steps:
-            if step.status == "completed":
-                completed += 1
-                lines.append(f"- [x] ~~{step.description}~~ ✓")
-                if step.result:
-                    lines.append(f"  > {step.result}")
-            elif step.status == "in_progress":
-                in_progress = True
-                lines.append(f"- [ ] **{step.description}** ← in progress")
-            elif step.status == "failed":
-                lines.append(f"- [ ] ~~{step.description}~~ ✗")
-                if step.result:
-                    lines.append(f"  > {step.result}")
-            else:
-                lines.append(f"- [ ] {step.description}")
+        for task in plan.tasks.values():
+            deps_str = ""
+            if task.depends_on:
+                deps_str = f" (depends on: {', '.join(task.depends_on)})"
 
-        total = len(todo.steps)
+            if task.status == "completed":
+                completed += 1
+                lines.append(f"- [x] **{task.id}**: ~~{task.description}~~{deps_str} ✓")
+                if task.result:
+                    lines.append(f"  > {task.result}")
+            elif task.status == "in_progress":
+                in_progress = True
+                lines.append(f"- [ ] **{task.id}**: **{task.description}**{deps_str} ← in progress")
+            elif task.status == "failed":
+                lines.append(f"- [ ] **{task.id}**: ~~{task.description}~~{deps_str} ✗")
+                if task.result:
+                    lines.append(f"  > {task.result}")
+            elif task.status == "blocked":
+                lines.append(f"- [ ] **{task.id}**: {task.description}{deps_str} ⏳ blocked")
+            else:
+                lines.append(f"- [ ] **{task.id}**: {task.description}{deps_str}")
+
+            # Render todo items
+            if task.todo_items:
+                for item in task.todo_items:
+                    check = "x" if item.status == "completed" else " "
+                    lines.append(f"  - [{check}] {item.description}")
+
+        total = len(plan.tasks)
         if completed == total:
             status = "Completed"
         elif in_progress:
@@ -470,35 +1245,20 @@ class PlanSkill:
         lines.extend(["", "---", f"Progress: {completed}/{total} completed | Status: {status}"])
         return "\n".join(lines)
 
-    async def _write_todo_file(self, session_id: str, todo: SessionTodo) -> None:
-        if not self._write_tool_fn:
-            logger.warning(
-                "No write tool configured; skipping TODO file write for %s",
-                todo.filename,
-            )
-            return
-        content = self.render_markdown(todo)
-        try:
-            await self._write_tool_fn(
-                "mcp_filesystem__write",
-                {"path": todo.filename, "content": content},
-                session_id=session_id,
-            )
-        except Exception as e:
-            logger.warning("Failed to write %s: %s", todo.filename, e)
-
     @staticmethod
-    def _format_state(todo: SessionTodo) -> str:
-        lines = [f"TODO Plan: {todo.task}", ""]
-        for i, step in enumerate(todo.steps):
-            icon = {
-                "pending": "○",
-                "in_progress": "⟳",
-                "completed": "✓",
-                "failed": "✗",
-            }.get(step.status, "○")
-            result_part = f" — {step.result}" if step.result else ""
-            lines.append(f"  {icon} {i}. {step.description}{result_part}")
-        completed = sum(1 for s in todo.steps if s.status == "completed")
-        lines.append(f"\nProgress: {completed}/{len(todo.steps)} completed")
-        return "\n".join(lines)
+    def _format_state(plan: SessionPlan) -> str:
+        completed = sum(1 for t in plan.tasks.values() if t.status == "completed")
+        return json.dumps({
+            "goal": plan.goal,
+            "tasks": [
+                {
+                    "id": t.id,
+                    "description": t.description,
+                    "status": t.status,
+                    **({"depends_on": t.depends_on} if t.depends_on else {}),
+                    **({"result": t.result} if t.result else {}),
+                }
+                for t in plan.tasks.values()
+            ],
+            "progress": f"{completed}/{len(plan.tasks)}",
+        })

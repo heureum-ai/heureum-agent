@@ -25,8 +25,14 @@ import json
 import logging
 from typing import List, Optional
 
-from app.models import Message
-from app.schemas.open_responses import MessageRole
+from app.services.compaction.tokens import _text_content
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage as LCSystemMessage,
+    ToolMessage,
+)
 from app.services.compaction.repair import repair_tool_use_result_pairing
 from app.services.compaction.settings import CompactionSettings
 from app.services.compaction.tokens import (
@@ -34,7 +40,7 @@ from app.services.compaction.tokens import (
     estimate_messages_tokens,
     estimate_tokens,
 )
-from app.services.prompts.compaction import (
+from app.services.prompts import (
     COMPACTION_MERGE_INSTRUCTIONS,
     COMPACTION_PREFIX,
     COMPACTION_SYSTEM_PROMPT,
@@ -42,13 +48,12 @@ from app.services.prompts.compaction import (
     build_compaction_prompt,
 )
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
 
 def _messages_to_text(
-    messages: List[Message],
+    messages: List[BaseMessage],
     max_chars_per_message: int = 2_000,
 ) -> str:
     """Serialize messages to text for summarization.
@@ -67,7 +72,7 @@ def _messages_to_text(
     Sections are separated by double newlines (``\\n\\n``).
 
     Args:
-        messages (List[Message]): Messages to convert.
+        messages (List[BaseMessage]): Messages to convert.
         max_chars_per_message (int): Maximum characters to keep per message
             content. Defaults to 2000.
 
@@ -76,19 +81,20 @@ def _messages_to_text(
     """
     parts: List[str] = []
     for msg in messages:
-        content = msg.content[:max_chars_per_message]
+        content = _text_content(msg.content)[:max_chars_per_message]
 
-        if msg.role == MessageRole.USER:
+        if isinstance(msg, HumanMessage):
             if content:
                 parts.append(f"[User]: {content}")
 
-        elif msg.role == MessageRole.ASSISTANT:
+        elif isinstance(msg, AIMessage):
             # Emit text and tool_calls as separate sections
             if content:
                 parts.append(f"[Assistant]: {content}")
-            if msg.tool_calls:
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
                 tc_strs: List[str] = []
-                for tc in msg.tool_calls:
+                for tc in tool_calls:
                     name = (
                         tc.get("name", "unknown")
                         if isinstance(tc, dict)
@@ -108,12 +114,13 @@ def _messages_to_text(
                     tc_strs.append(f"{name}({pairs})")
                 parts.append(f"[Assistant tool calls]: {'; '.join(tc_strs)}")
 
-        elif msg.role == MessageRole.TOOL:
-            label = f"[Tool result ({msg.tool_name})]" if msg.tool_name else "[Tool result]"
+        elif isinstance(msg, ToolMessage):
+            tool_name = msg.name
+            label = f"[Tool result ({tool_name})]" if tool_name else "[Tool result]"
             if content:
                 parts.append(f"{label}: {content}")
 
-        elif msg.role == MessageRole.SYSTEM:
+        elif isinstance(msg, LCSystemMessage):
             if content:
                 parts.append(f"[System]: {content}")
 
@@ -121,7 +128,7 @@ def _messages_to_text(
 
 
 async def _generate_summary(
-    messages: List[Message],
+    messages: List[BaseMessage],
     llm: BaseChatModel,
     previous_summary: Optional[str] = None,
 ) -> str:
@@ -131,7 +138,7 @@ async def _generate_summary(
     incremental summary, otherwise generates a fresh one.
 
     Args:
-        messages (List[Message]): Messages to summarize.
+        messages (List[BaseMessage]): Messages to summarize.
         llm (BaseChatModel): Language model used to produce the summary.
         previous_summary (Optional[str]): An existing summary to update
             incrementally. Defaults to ``None``.
@@ -147,7 +154,7 @@ async def _generate_summary(
 
     response = await llm.ainvoke(
         [
-            SystemMessage(content=COMPACTION_SYSTEM_PROMPT),
+            LCSystemMessage(content=COMPACTION_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
         ]
     )
@@ -155,24 +162,24 @@ async def _generate_summary(
 
 
 def _chunk_messages_by_max_tokens(
-    messages: List[Message],
+    messages: List[BaseMessage],
     max_tokens: int,
-) -> List[List[Message]]:
+) -> List[List[BaseMessage]]:
     """Split messages into chunks each fitting within *max_tokens*.
 
     Args:
-        messages (List[Message]): Messages to split into chunks.
+        messages (List[BaseMessage]): Messages to split into chunks.
         max_tokens (int): Maximum estimated token count per chunk.
 
     Returns:
-        List[List[Message]]: List of message chunks, each within the token
+        List[List[BaseMessage]]: List of message chunks, each within the token
             budget. A single message exceeding the budget forms its own chunk.
     """
     if not messages:
         return []
 
-    chunks: List[List[Message]] = []
-    current: List[Message] = []
+    chunks: List[List[BaseMessage]] = []
+    current: List[BaseMessage] = []
     current_tokens = 0
 
     for msg in messages:
@@ -197,17 +204,17 @@ def _chunk_messages_by_max_tokens(
 
 
 def _split_by_token_share(
-    messages: List[Message],
+    messages: List[BaseMessage],
     parts: int = 2,
-) -> List[List[Message]]:
+) -> List[List[BaseMessage]]:
     """Split messages into *parts* roughly equal by token count.
 
     Args:
-        messages (List[Message]): Messages to split.
+        messages (List[BaseMessage]): Messages to split.
         parts (int): Desired number of roughly equal parts. Defaults to 2.
 
     Returns:
-        List[List[Message]]: List of message chunks split approximately
+        List[List[BaseMessage]]: List of message chunks split approximately
             equally by token count.
     """
     if not messages or parts <= 1:
@@ -217,8 +224,8 @@ def _split_by_token_share(
     total_tokens = estimate_messages_tokens(messages)
     target = total_tokens / parts
 
-    chunks: List[List[Message]] = []
-    current: List[Message] = []
+    chunks: List[List[BaseMessage]] = []
+    current: List[BaseMessage] = []
     current_tokens = 0
 
     for msg in messages:
@@ -237,13 +244,13 @@ def _split_by_token_share(
 
 
 def _compute_adaptive_chunk_ratio(
-    messages: List[Message],
+    messages: List[BaseMessage],
     settings: CompactionSettings,
 ) -> float:
     """Reduce chunk ratio when average message size is large.
 
     Args:
-        messages (List[Message]): Messages used to compute average size.
+        messages (List[BaseMessage]): Messages used to compute average size.
         settings (CompactionSettings): Compaction configuration providing
             base and minimum chunk ratios.
 
@@ -266,23 +273,23 @@ def _compute_adaptive_chunk_ratio(
     return settings.base_chunk_ratio
 
 
-def _is_oversized_for_summary(msg: Message, settings: CompactionSettings) -> bool:
+def _is_oversized_for_summary(msg: BaseMessage, settings: CompactionSettings) -> bool:
     """A single message > 50 % of context window cannot be summarized safely.
 
     Args:
-        msg (Message): Message to check.
+        msg (BaseMessage): Message to check.
         settings (CompactionSettings): Compaction configuration providing
             context window size and safety margin.
 
     Returns:
         bool: ``True`` if the message is too large to be summarized safely.
     """
-    tokens = estimate_tokens(msg.content) * settings.safety_margin
+    tokens = estimate_tokens(_text_content(msg.content)) * settings.safety_margin
     return tokens > settings.context_window_tokens * 0.5
 
 
 async def summarize_chunks(
-    messages: List[Message],
+    messages: List[BaseMessage],
     llm: BaseChatModel,
     max_chunk_tokens: int,
     previous_summary: Optional[str] = None,
@@ -290,7 +297,7 @@ async def summarize_chunks(
     """Iteratively summarize message chunks.
 
     Args:
-        messages (List[Message]): Messages to summarize.
+        messages (List[BaseMessage]): Messages to summarize.
         llm (BaseChatModel): Language model used to produce summaries.
         max_chunk_tokens (int): Maximum estimated tokens per chunk.
         previous_summary (Optional[str]): An existing summary to update
@@ -312,7 +319,7 @@ async def summarize_chunks(
 
 
 async def summarize_with_fallback(
-    messages: List[Message],
+    messages: List[BaseMessage],
     llm: BaseChatModel,
     settings: CompactionSettings,
     max_chunk_tokens: int,
@@ -325,7 +332,7 @@ async def summarize_with_fallback(
     3. On total failure, return a descriptive fallback.
 
     Args:
-        messages (List[Message]): Messages to summarize.
+        messages (List[BaseMessage]): Messages to summarize.
         llm (BaseChatModel): Language model used to produce summaries.
         settings (CompactionSettings): Compaction configuration for oversized
             message detection.
@@ -346,14 +353,14 @@ async def summarize_with_fallback(
     except Exception as e:
         logger.warning("Full summarization failed, trying partial: %s", e)
 
-    small: List[Message] = []
+    small: List[BaseMessage] = []
     oversized_notes: List[str] = []
 
     for msg in messages:
         if _is_oversized_for_summary(msg, settings):
             tokens = estimate_tokens(msg.content)
             oversized_notes.append(
-                f"[Large {msg.role} (~{tokens // 1000}K tokens) omitted from summary]"
+                f"[Large {msg.type} (~{tokens // 1000}K tokens) omitted from summary]"
             )
         else:
             small.append(msg)
@@ -373,7 +380,7 @@ async def summarize_with_fallback(
 
 
 async def summarize_in_stages(
-    messages: List[Message],
+    messages: List[BaseMessage],
     llm: BaseChatModel,
     settings: CompactionSettings,
     max_chunk_tokens: int,
@@ -384,7 +391,7 @@ async def summarize_in_stages(
     """Multi-stage summarization: split -> summarize parts -> merge summaries.
 
     Args:
-        messages (List[Message]): Messages to summarize.
+        messages (List[BaseMessage]): Messages to summarize.
         llm (BaseChatModel): Language model used to produce summaries.
         settings (CompactionSettings): Compaction configuration for chunk
             sizing and fallback behaviour.
@@ -438,7 +445,7 @@ async def summarize_in_stages(
     if len(partial_summaries) == 1:
         return partial_summaries[0]
 
-    merge_messages = [Message(role=MessageRole.USER, content=s) for s in partial_summaries]
+    merge_messages = [HumanMessage(content=s) for s in partial_summaries]
     return await summarize_with_fallback(
         merge_messages,
         llm,
@@ -449,10 +456,10 @@ async def summarize_in_stages(
 
 
 async def compact_history(
-    messages: List[Message],
+    messages: List[BaseMessage],
     llm: BaseChatModel,
     settings: CompactionSettings,
-) -> List[Message]:
+) -> List[BaseMessage]:
     """Compact conversation history by LLM summarization.
 
     - Detects a previous compaction summary and updates it incrementally.
@@ -460,13 +467,13 @@ async def compact_history(
     - Uses adaptive chunk sizing based on average message size.
 
     Args:
-        messages (List[Message]): Full conversation message list to compact.
+        messages (List[BaseMessage]): Full conversation message list to compact.
         llm (BaseChatModel): Language model used to produce summaries.
         settings (CompactionSettings): Compaction configuration controlling
             chunk sizing, safety margins, and tail retention.
 
     Returns:
-        List[Message]: Compacted message list starting with a system summary
+        List[BaseMessage]: Compacted message list starting with a system summary
             message followed by the kept tail. Returns the original list
             unchanged if compaction is disabled, unnecessary, or fails.
     """
@@ -476,8 +483,10 @@ async def compact_history(
     previous_summary: Optional[str] = None
     compaction_idx: Optional[int] = None
     for i, msg in enumerate(messages):
-        if msg.role == MessageRole.SYSTEM and msg.content.startswith(COMPACTION_PREFIX):
-            previous_summary = msg.content[len(COMPACTION_PREFIX) :].strip()
+        if isinstance(msg, LCSystemMessage) and _text_content(msg.content).startswith(
+            COMPACTION_PREFIX
+        ):
+            previous_summary = _text_content(msg.content)[len(COMPACTION_PREFIX) :].strip()
             compaction_idx = i
             break
 
@@ -487,7 +496,7 @@ async def compact_history(
     # messages that precede user interaction (OpenClaw pruner.ts:253-257).
     first_user_idx: Optional[int] = None
     for i, msg in enumerate(messages):
-        if msg.role == MessageRole.USER:
+        if isinstance(msg, HumanMessage):
             first_user_idx = i
             break
     if first_user_idx is not None and first_user_idx > start_idx:
@@ -496,7 +505,7 @@ async def compact_history(
     # Compute kept-tail cutoff FIRST so we only summarize messages that will
     # be removed (avoids duplicating tail in both summary and output).
     keep = settings.keep_last_assistants
-    assistant_indices = [i for i, m in enumerate(messages) if m.role == MessageRole.ASSISTANT]
+    assistant_indices = [i for i, m in enumerate(messages) if isinstance(m, AIMessage)]
     if len(assistant_indices) > keep:
         cutoff = assistant_indices[-keep]
     else:
@@ -507,14 +516,14 @@ async def compact_history(
     # tool_results — walk back to keep the pair together.
     while cutoff > start_idx and cutoff < len(messages):
         prev = messages[cutoff - 1] if cutoff > 0 else None
-        if prev and prev.role == MessageRole.ASSISTANT and prev.tool_calls:
+        if prev and isinstance(prev, AIMessage) and getattr(prev, "tool_calls", None):
             # The assistant at cutoff-1 has tool_calls — its tool_results
             # follow.  Move cutoff back to include it in the kept tail.
             cutoff = cutoff - 1
             break
         # If cutoff lands on a tool message, walk back to include the
         # preceding assistant with its tool_calls.
-        if messages[cutoff].role == MessageRole.TOOL:
+        if isinstance(messages[cutoff], ToolMessage):
             cutoff = cutoff - 1
             continue
         break
@@ -547,7 +556,7 @@ async def compact_history(
             )
 
         compacted = [
-            Message(role=MessageRole.SYSTEM, content=f"{COMPACTION_PREFIX}\n{summary_text}"),
+            LCSystemMessage(content=f"{COMPACTION_PREFIX}\n{summary_text}"),
         ] + kept_tail
 
         logger.info(

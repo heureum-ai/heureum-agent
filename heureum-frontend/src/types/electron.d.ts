@@ -1,11 +1,5 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
-interface BashResult {
-  stdout: string
-  stderr: string
-  exitCode: number
-}
-
 interface BrowserCommandResult {
   success: boolean
   output: string
@@ -25,16 +19,26 @@ interface CodingToolResult {
 interface CodingToolSchema {
   type: string
   name: string
+  display_name: string
   description?: string
   parameters?: Record<string, any>
 }
 
+interface BrowserToolSchema {
+  type: string
+  name: string
+  display_name: string
+  description?: string
+  parameters?: Record<string, any>
+  guide?: string
+}
+
 interface ElectronAPI {
-  executeBash: (command: string, cwd?: string) => Promise<BashResult>
   selectCwd: () => Promise<SelectCwdResult>
   getClientId: () => Promise<string>
   canExecuteTools: boolean
   getCodingTools: () => Promise<CodingToolSchema[]>
+  getBrowserTools: () => Promise<BrowserToolSchema[]>
   codingTool: (toolName: string, args: Record<string, unknown>, cwd?: string) => Promise<CodingToolResult>
   browserCommand: (action: string, params: Record<string, unknown>) => Promise<BrowserCommandResult>
   isBrowserExtensionConnected: () => Promise<boolean>
