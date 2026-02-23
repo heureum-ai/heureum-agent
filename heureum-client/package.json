@@ -28,6 +28,7 @@
     "@heureum/ppt": "file:../heureum-client-tools/ppt",
     "@heureum/web": "file:../heureum-client-tools/web",
     "@heureum/docx": "file:../heureum-client-tools/docx",
+    "@heureum/core-tools": "file:../heureum-client-tools/core",
     "@heureum/xlsx": "file:../heureum-client-tools/xlsx",
     "electron-updater": "^6.7.0",
     "ws": "^8.19.0"

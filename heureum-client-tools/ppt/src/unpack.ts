@@ -64,7 +64,12 @@ export async function unpack(
 
   try {
     const fileBuffer = (await fs.promises.readFile(inputFile));
-    const zip = await JSZip.loadAsync(fileBuffer);
+    const zipInput = new Uint8Array(
+      fileBuffer.buffer,
+      fileBuffer.byteOffset,
+      fileBuffer.byteLength,
+    );
+    const zip = await JSZip.loadAsync(zipInput);
 
     ;(await fs.promises.mkdir(outputDirectory, { recursive: true }));
 

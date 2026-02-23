@@ -728,6 +728,80 @@ class TestProxyToAgentNonStreaming:
         assert resp.status_code == 200
         assert resp.data["metadata"]["session_id"] == TEST_SESSION_ID
 
+    def test_skills_snapshot_persisted_and_forwarded(self, api_client, session):
+        """Client-provided snapshot is saved on session and forwarded to agent."""
+        agent_resp_data = {
+            "id": "resp_snapshot",
+            "status": "completed",
+            "model": "test-model",
+            "output": [],
+            "usage": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = agent_resp_data
+        mock_resp.raise_for_status.return_value = None
+        snapshot = {
+            "version": "v1",
+            "prompt": "<available_skills/>",
+            "skills": [{"name": "plan_task", "tools": ["manage_todo"]}],
+        }
+
+        with (
+            patch("proxy.views._agent_client") as mock_client,
+            patch.object(ModelPricing, "get_for_model", return_value=None),
+        ):
+            mock_client.post.return_value = mock_resp
+            payload = {
+                "input": "Hello",
+                "stream": False,
+                "metadata": {"session_id": TEST_SESSION_ID},
+                "skills_snapshot": snapshot,
+            }
+            resp = api_client.post("/api/v1/proxy/", payload, format="json")
+
+        assert resp.status_code == 200
+        session.refresh_from_db()
+        assert session.skills_snapshot == snapshot
+        forwarded = mock_client.post.call_args.kwargs["json"]
+        assert forwarded["skills_snapshot"] == snapshot
+
+    def test_skills_snapshot_reused_when_request_omits_it(self, api_client, session):
+        """Session snapshot is injected when subsequent requests omit it."""
+        snapshot = {
+            "version": "v1",
+            "prompt": "<available_skills/>",
+            "skills": [{"name": "plan_task", "tools": ["manage_todo"]}],
+        }
+        session.skills_snapshot = snapshot
+        session.save(update_fields=["skills_snapshot"])
+
+        agent_resp_data = {
+            "id": "resp_snapshot_reuse",
+            "status": "completed",
+            "model": "test-model",
+            "output": [],
+            "usage": {},
+        }
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = agent_resp_data
+        mock_resp.raise_for_status.return_value = None
+
+        with (
+            patch("proxy.views._agent_client") as mock_client,
+            patch.object(ModelPricing, "get_for_model", return_value=None),
+        ):
+            mock_client.post.return_value = mock_resp
+            payload = {
+                "input": "Hello again",
+                "stream": False,
+                "metadata": {"session_id": TEST_SESSION_ID},
+            }
+            resp = api_client.post("/api/v1/proxy/", payload, format="json")
+
+        assert resp.status_code == 200
+        forwarded = mock_client.post.call_args.kwargs["json"]
+        assert forwarded["skills_snapshot"] == snapshot
+
     def test_invalid_request(self, api_client, session):
         """Invalid input should return 400."""
         resp = api_client.post("/api/v1/proxy/", {}, format="json")

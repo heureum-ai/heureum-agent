@@ -504,15 +504,26 @@ class ToolExecutionController:
                     if t.tool_meta.poll:
                         meta_sets.poll_tools.add(name)
 
+        allowed_skill_tools = self.skill_controller.get_all_tool_names(
+            client_tool_names=client_tool_names,
+            skills_snapshot=request.skills_snapshot,
+        )
+
         for name in self.mcp_client.server_tool_names:
             if name not in client_tool_names:
                 tool_names.append(name)
-        for name in self.skill_controller.get_all_tool_names():
+        for name in allowed_skill_tools:
             if name not in tool_names:
                 tool_names.append(name)
 
         display_names.update(self.mcp_client.display_names)
-        display_names.update(self.skill_controller.display_names)
+        display_names.update(
+            {
+                name: display
+                for name, display in self.skill_controller.display_names.items()
+                if name in allowed_skill_tools
+            }
+        )
 
         return (
             tool_names,

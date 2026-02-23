@@ -107,6 +107,37 @@ class TestSkillDiscovery:
     def test_get_skill_for_unknown_tool(self, provider):
         assert provider.get_skill_for_tool("nonexistent_tool") is None
 
+    def test_resolve_allowed_server_tools_from_snapshot(self, provider):
+        snapshot = {
+            "prompt": "<available_skills/>",
+            "skills": [
+                {
+                    "name": "plan_task",
+                    "description": "Plan tasks",
+                    "location": "/tmp/SKILL.md",
+                    "tools": ["manage_todo"],
+                }
+            ],
+        }
+        allowed = provider.resolve_allowed_server_tools(skills_snapshot=snapshot)
+        assert allowed == {"manage_todo"}
+
+    def test_get_all_tool_schemas_filtered_by_snapshot(self, provider):
+        snapshot = {
+            "prompt": "<available_skills/>",
+            "skills": [
+                {
+                    "name": "plan_task",
+                    "description": "Plan tasks",
+                    "location": "/tmp/SKILL.md",
+                    "tools": ["manage_todo"],
+                }
+            ],
+        }
+        schemas = provider.get_all_tool_schemas(skills_snapshot=snapshot)
+        names = {s["function"]["name"] for s in schemas}
+        assert names == {"manage_todo"}
+
 
 # ---------------------------------------------------------------------------
 # State prompts / session management

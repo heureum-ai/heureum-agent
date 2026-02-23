@@ -237,6 +237,38 @@ class TestPreparePromptAndTools:
         assert "notify_user" in names
         assert len(tools) > 0
 
+    def test_skills_prompt_disables_server_guides(self):
+        """When skills catalog is provided, SKILL.md bodies are not inlined."""
+        svc = _create_service()
+        prompt, _ = svc._prepare_prompt_and_tools(
+            skills_prompt="<available_skills>\n</available_skills>"
+        )
+        assert "<available_skills>" in prompt
+        assert "<tool_guides>" not in prompt
+
+    def test_skills_snapshot_filters_server_tools(self):
+        """Server tool schemas are filtered by snapshot-declared tool list."""
+        svc = _create_service()
+        snapshot = {
+            "prompt": "<available_skills/>",
+            "skills": [
+                {
+                    "name": "plan_task",
+                    "description": "Plan",
+                    "location": "/tmp/SKILL.md",
+                    "tools": ["manage_todo"],
+                }
+            ],
+        }
+        _, tools = svc._prepare_prompt_and_tools(
+            skills_prompt=snapshot["prompt"],
+            skills_snapshot=snapshot,
+        )
+        names = {t["function"]["name"] for t in tools}
+        assert "manage_todo" in names
+        assert "notify_user" not in names
+        assert "manage_periodic_task" not in names
+
 
 # ---------------------------------------------------------------------------
 # _call_llm

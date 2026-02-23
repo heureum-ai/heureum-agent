@@ -20,6 +20,9 @@ importers:
       '@heureum/coding':
         specifier: file:../heureum-client-tools/coding
         version: file:../heureum-client-tools/coding
+      '@heureum/core-tools':
+        specifier: file:../heureum-client-tools/core
+        version: file:../heureum-client-tools/core
       '@heureum/docx':
         specifier: file:../heureum-client-tools/docx
         version: file:../heureum-client-tools/docx
@@ -517,6 +520,9 @@ packages:
 
   '@heureum/coding@file:../heureum-client-tools/coding':
     resolution: {directory: ../heureum-client-tools/coding, type: directory}
+
+  '@heureum/core-tools@file:../heureum-client-tools/core':
+    resolution: {directory: ../heureum-client-tools/core, type: directory}
 
   '@heureum/docx@file:../heureum-client-tools/docx':
     resolution: {directory: ../heureum-client-tools/docx, type: directory}
@@ -3103,6 +3109,8 @@ snapshots:
       diff: 8.0.3
       file-type: 19.6.0
       glob: 11.1.0
+
+  '@heureum/core-tools@file:../heureum-client-tools/core': {}
 
   '@heureum/docx@file:../heureum-client-tools/docx':
     dependencies:

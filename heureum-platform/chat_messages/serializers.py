@@ -54,6 +54,13 @@ class ResponseRequestSerializer(serializers.Serializer):
     instructions = serializers.CharField(required=False, allow_null=True)
     temperature = serializers.FloatField(required=False, min_value=0, max_value=2, allow_null=True)
     max_output_tokens = serializers.IntegerField(required=False, min_value=1, allow_null=True)
+    tool_choice = serializers.JSONField(required=False, allow_null=True)
+    truncation = serializers.ChoiceField(
+        required=False,
+        allow_null=True,
+        choices=["auto", "disabled"],
+    )
+    skills_snapshot = serializers.JSONField(required=False, allow_null=True)
     stream = serializers.BooleanField(default=False)
     metadata = serializers.JSONField(required=False, default=dict)
 

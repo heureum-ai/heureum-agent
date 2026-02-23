@@ -2,7 +2,7 @@
 
 """Prompt-domain controller — system prompt build + tool schema resolution."""
 
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
 from app.services.prompts.base import build_system_prompt
 
@@ -23,15 +23,16 @@ class PromptController:
 
         self.skill_provider = skill_provider
         self.mcp_tool_controller = mcp_tool_controller or MCPToolController()
-        self.skills_prompt: Optional[str] = None
 
     def prepare_prompt_and_tools(
         self,
         instructions: Optional[str] = None,
         client_tool_prompts: Optional[List[str]] = None,
         client_tool_schemas: Optional[List[dict]] = None,
+        client_tool_names: Optional[Set[str]] = None,
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
+        skills_snapshot: Any = None,
     ) -> Tuple[str, list]:
         """Build system prompt and resolve tool schemas together.
 
@@ -39,19 +40,39 @@ class PromptController:
             instructions: Extra instructions to append in ``<instructions>``.
             client_tool_prompts: Guide texts from clients.
             client_tool_schemas: Client-provided OpenAI-format tool schemas.
+            client_tool_names: Client-side tool names available in this turn.
             state_prompts: Per-turn runtime state prompts from skills.
             skills_prompt: Pre-built ``<available_skills>`` block.
+            skills_snapshot: Full skills snapshot payload.
 
         Returns:
             (system_prompt, tool_schemas_for_bind_tools).
         """
-        effective_skills_prompt = skills_prompt or self.skills_prompt
+        effective_skills_prompt = skills_prompt
+
+        # OpenClaw-style snapshot mode: avoid injecting full SKILL.md bodies
+        # when <available_skills> is already present.
+        use_server_guides = not bool(effective_skills_prompt)
 
         server_tool_prompts = (
-            self.skill_provider.get_all_guide_prompts() if self.skill_provider else []
+            (
+                self.skill_provider.get_all_guide_prompts(
+                    client_tool_names=client_tool_names,
+                    skills_snapshot=skills_snapshot,
+                )
+                if self.skill_provider and use_server_guides
+                else []
+            )
         )
         server_tool_schemas = (
-            self.skill_provider.get_all_tool_schemas() if self.skill_provider else []
+            (
+                self.skill_provider.get_all_tool_schemas(
+                    client_tool_names=client_tool_names,
+                    skills_snapshot=skills_snapshot,
+                )
+                if self.skill_provider
+                else []
+            )
         )
 
         prompt = build_system_prompt(

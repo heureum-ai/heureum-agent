@@ -33,12 +33,24 @@ interface BrowserToolSchema {
   guide?: string
 }
 
+interface SkillsSnapshotResult {
+  version: string | null
+  prompt: string
+  skills: Array<{
+    name: string
+    description: string
+    location: string
+    tools: string[]
+  }>
+}
+
 interface ElectronAPI {
   selectCwd: () => Promise<SelectCwdResult>
   getClientId: () => Promise<string>
   canExecuteTools: boolean
   getCodingTools: () => Promise<CodingToolSchema[]>
   getBrowserTools: () => Promise<BrowserToolSchema[]>
+  getSkillsSnapshot: () => Promise<SkillsSnapshotResult>
   codingTool: (toolName: string, args: Record<string, unknown>, cwd?: string) => Promise<CodingToolResult>
   browserCommand: (action: string, params: Record<string, unknown>) => Promise<BrowserCommandResult>
   isBrowserExtensionConnected: () => Promise<boolean>

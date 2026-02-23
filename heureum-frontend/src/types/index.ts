@@ -55,6 +55,19 @@ export interface ToolDefinition {
   display_name: string;
 }
 
+export interface SkillSnapshotItem {
+  name: string;
+  description: string;
+  location: string;
+  tools: string[];
+}
+
+export interface SkillsSnapshot {
+  version?: string | null;
+  prompt: string;
+  skills: SkillSnapshotItem[];
+}
+
 export type OutputItem = MessageItem | FunctionToolCall;
 
 export type InputItem = MessageItem | FunctionToolCall | FunctionToolResult;
@@ -76,6 +89,9 @@ export interface ResponseRequest {
   instructions?: string;
   temperature?: number;
   max_output_tokens?: number;
+  tool_choice?: 'auto' | 'required' | 'none' | Record<string, any>;
+  truncation?: 'auto' | 'disabled';
+  skills_snapshot?: SkillsSnapshot;
   stream?: boolean;
   metadata?: Record<string, string>;
 }

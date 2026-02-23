@@ -1,6 +1,14 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import axios from 'axios';
+import {
+  ASK_QUESTION_TOOL as CORE_ASK_QUESTION_TOOL,
+  buildSelectCwdTool as buildCoreSelectCwdTool,
+} from '@heureum/core-tools';
+import {
+  MOBILE_TOOLS as CORE_MOBILE_TOOLS,
+  MOBILE_TOOL_NAMES as CORE_MOBILE_TOOL_NAMES,
+} from '@heureum/mobile';
 import type {
   ChatRequest,
   ChatResponse,
@@ -20,6 +28,7 @@ import type {
   StreamEvent,
   PeriodicTask,
   PeriodicTaskRun,
+  SkillsSnapshot,
   TodoState,
 } from '../types';
 import { messageToItem, extractTextFromItem, isToolCall, isMessageItem } from '../types';
@@ -68,6 +77,7 @@ export function clearSessionCwd(): void {
 
 // --- Extension connection state ---
 let extensionConnected = false;
+const uploadedSkillsSnapshotSessions = new Set<string>();
 
 export function getExtensionConnected(): boolean {
   return extensionConnected;
@@ -77,61 +87,35 @@ export function setExtensionConnected(connected: boolean): void {
   extensionConnected = connected;
 }
 
+function markSkillsSnapshotUploaded(sessionId?: string): void {
+  if (!sessionId) return;
+  uploadedSkillsSnapshotSessions.add(sessionId);
+}
+
+async function resolveSkillsSnapshotForSession(
+  sessionId?: string,
+): Promise<SkillsSnapshot | undefined> {
+  if (!canExecuteTools() || !window.api?.getSkillsSnapshot) {
+    return undefined;
+  }
+  if (sessionId && uploadedSkillsSnapshotSessions.has(sessionId)) {
+    return undefined;
+  }
+  try {
+    const snapshot = await window.api.getSkillsSnapshot();
+    return snapshot as SkillsSnapshot;
+  } catch {
+    return undefined;
+  }
+}
+
 // --- Dynamic tool builders ---
 
 function buildSelectCwdTool(): ToolDefinition {
-  const cwdStatus = sessionCwd
-    ? `Current working directory is: ${sessionCwd}.`
-    : 'No working directory is currently set.';
-  return {
-    type: 'function',
-    name: 'select_cwd',
-    display_name: 'Select Directory',
-    description: `Open a native folder picker dialog for the user to select a working directory for local command tools. ${cwdStatus} Call this before running command tools if no working directory has been set, or if the user wants to change it.`,
-    parameters: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  };
+  return buildCoreSelectCwdTool(sessionCwd) as ToolDefinition;
 }
 
-const ASK_QUESTION_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'ask_question',
-  display_name: 'Question',
-  description:
-    'Ask the user a multiple-choice question when you need clarification or a decision',
-  parameters: {
-    type: 'object',
-    properties: {
-      question: { type: 'string', description: 'The question to ask the user' },
-      choices: {
-        type: 'array',
-        items: {
-          oneOf: [
-            { type: 'string' },
-            {
-              type: 'object',
-              properties: {
-                label: { type: 'string' },
-                description: { type: 'string' },
-              },
-              required: ['label'],
-            },
-          ],
-        },
-        description: 'List of choices. Each can be a string or {label, description?}.',
-      },
-      allow_user_input: {
-        type: 'boolean',
-        description: 'Whether to allow free-text input',
-        default: false,
-      },
-    },
-    required: ['question', 'choices'],
-  },
-};
+const ASK_QUESTION_TOOL: ToolDefinition = CORE_ASK_QUESTION_TOOL as ToolDefinition;
 
 // --- Browser tools loaded from @heureum/browser package via IPC ---
 let cachedBrowserTools: ToolDefinition[] | null = null;
@@ -149,166 +133,8 @@ export async function initBrowserTools(): Promise<void> {
   }
 }
 
-const GET_DEVICE_INFO_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'get_device_info',
-  display_name: 'Device Info',
-  description: 'Get mobile device info: model, OS, battery, screen size, memory.',
-  parameters: { type: 'object', properties: {} },
-};
-
-const GET_SENSOR_DATA_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'get_sensor_data',
-  display_name: 'Sensor Data',
-  description: 'Get live sensor readings: accelerometer, gyroscope, barometer.',
-  parameters: { type: 'object', properties: {} },
-};
-
-const GET_CONTACTS_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'get_contacts',
-  display_name: 'Contacts',
-  description: 'Search phone contacts. Returns names, phone numbers, and emails.',
-  parameters: {
-    type: 'object',
-    properties: {
-      query: { type: 'string', description: 'Optional name filter' },
-    },
-  },
-};
-
-const GET_LOCATION_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'get_location',
-  display_name: 'Location',
-  description: 'Get current GPS location: latitude, longitude, altitude, accuracy.',
-  parameters: { type: 'object', properties: {} },
-};
-
-const TAKE_PHOTO_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'take_photo',
-  display_name: 'Photo',
-  description: 'Open the camera to take a photo.',
-  parameters: {
-    type: 'object',
-    properties: {
-      camera: { type: 'string', description: 'front or back. Defaults to back.' },
-    },
-  },
-};
-
-const SEND_NOTIFICATION_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'send_notification',
-  display_name: 'Notification',
-  description: 'Send a local push notification with title and body.',
-  parameters: {
-    type: 'object',
-    properties: {
-      title: { type: 'string', description: 'Notification title' },
-      body: { type: 'string', description: 'Notification body' },
-    },
-    required: ['title', 'body'],
-  },
-};
-
-const GET_CLIPBOARD_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'get_clipboard',
-  display_name: 'Clipboard',
-  description: 'Read current clipboard text.',
-  parameters: { type: 'object', properties: {} },
-};
-
-const SET_CLIPBOARD_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'set_clipboard',
-  display_name: 'Clipboard',
-  description: 'Copy text to clipboard.',
-  parameters: {
-    type: 'object',
-    properties: {
-      text: { type: 'string', description: 'Text to copy' },
-    },
-    required: ['text'],
-  },
-};
-
-const SEND_SMS_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'send_sms',
-  display_name: 'SMS',
-  description: 'Open SMS compose screen with pre-filled recipients and message.',
-  parameters: {
-    type: 'object',
-    properties: {
-      phones: { type: 'array', items: { type: 'string' }, description: 'Recipient phone numbers' },
-      message: { type: 'string', description: 'Message text' },
-    },
-    required: ['phones', 'message'],
-  },
-};
-
-const SHARE_CONTENT_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'share_content',
-  display_name: 'Share',
-  description: 'Open native share sheet to share text or URL.',
-  parameters: {
-    type: 'object',
-    properties: {
-      message: { type: 'string', description: 'Text to share' },
-      url: { type: 'string', description: 'Optional URL' },
-    },
-    required: ['message'],
-  },
-};
-
-const TRIGGER_HAPTIC_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'trigger_haptic',
-  display_name: 'Haptic',
-  description: 'Trigger haptic vibration feedback.',
-  parameters: {
-    type: 'object',
-    properties: {
-      style: { type: 'string', description: 'light, medium, or heavy. Defaults to medium.' },
-    },
-  },
-};
-
-const OPEN_URL_TOOL: ToolDefinition = {
-  type: 'function',
-  name: 'open_url',
-  display_name: 'Open URL',
-  description: 'Open a URL in the in-app browser.',
-  parameters: {
-    type: 'object',
-    properties: {
-      url: { type: 'string', description: 'URL to open' },
-    },
-    required: ['url'],
-  },
-};
-
-const MOBILE_TOOLS: ToolDefinition[] = [
-  GET_DEVICE_INFO_TOOL,
-  GET_SENSOR_DATA_TOOL,
-  GET_CONTACTS_TOOL,
-  GET_LOCATION_TOOL,
-  TAKE_PHOTO_TOOL,
-  SEND_NOTIFICATION_TOOL,
-  GET_CLIPBOARD_TOOL,
-  SET_CLIPBOARD_TOOL,
-  SEND_SMS_TOOL,
-  SHARE_CONTENT_TOOL,
-  TRIGGER_HAPTIC_TOOL,
-  OPEN_URL_TOOL,
-];
-
-export const MOBILE_TOOL_NAMES = new Set(MOBILE_TOOLS.map((t) => t.name));
+const MOBILE_TOOLS: ToolDefinition[] = CORE_MOBILE_TOOLS as ToolDefinition[];
+export const MOBILE_TOOL_NAMES = CORE_MOBILE_TOOL_NAMES;
 
 function canExecuteTools(): boolean {
   return typeof window !== 'undefined' && window.api?.canExecuteTools === true;
@@ -701,17 +527,24 @@ export const chatAPI = {
     const inputItems: InputItem[] = request.messages.filter(m => m.content && !m.toolCall && !m.cancelled).map(messageToItem);
 
     const tools = buildTools();
+    let activeSessionId = request.session_id || '';
+    const initialSkillsSnapshot = await resolveSkillsSnapshotForSession(activeSessionId || undefined);
 
     const openRequest: ResponseRequest = {
       input: inputItems,
       tools,
-      metadata: request.session_id ? { session_id: request.session_id } : undefined,
+      skills_snapshot: initialSkillsSnapshot,
+      metadata: activeSessionId ? { session_id: activeSessionId } : undefined,
     };
 
     let response = await apiClient.post<ResponseObject>('/api/v1/proxy/', openRequest);
     let data = response.data;
     if (data.status === 'failed') {
       throw new Error(data.error?.message || 'Server returned an error');
+    }
+    activeSessionId = data.metadata?.session_id || activeSessionId;
+    if (initialSkillsSnapshot && activeSessionId) {
+      markSkillsSnapshotUploaded(activeSessionId);
     }
     let previousResponseId = data.id;
     const collectedToolCalls: ToolCallInfo[] = [];
@@ -1122,7 +955,7 @@ export const chatAPI = {
         input: followUpInput,
         tools: buildTools(),
         previous_response_id: previousResponseId,
-        metadata: request.session_id ? { session_id: request.session_id } : undefined,
+        metadata: activeSessionId ? { session_id: activeSessionId } : undefined,
       };
 
       response = await apiClient.post<ResponseObject>('/api/v1/proxy/', followUpRequest);
@@ -1130,6 +963,7 @@ export const chatAPI = {
       if (data.status === 'failed') {
         throw new Error(data.error?.message || 'Server returned an error');
       }
+      activeSessionId = data.metadata?.session_id || activeSessionId;
       previousResponseId = data.id;
     }
 
@@ -1157,10 +991,12 @@ export const chatAPI = {
       ...(request.extraInput || []),
     ];
     const tools = buildTools();
+    const streamSkillsSnapshot = await resolveSkillsSnapshotForSession(request.session_id);
 
     const openRequest: ResponseRequest = {
       input: inputItems,
       tools,
+      skills_snapshot: streamSkillsSnapshot,
       stream: true,
       metadata: request.session_id ? { session_id: request.session_id } : undefined,
     };
@@ -1217,6 +1053,12 @@ export const chatAPI = {
 
     if (!finalResponse) {
       throw new Error('Stream ended without a final response event');
+    }
+    if (streamSkillsSnapshot) {
+      const sid = String(finalResponse.metadata?.session_id || request.session_id || '');
+      if (sid) {
+        markSkillsSnapshotUploaded(sid);
+      }
     }
     return finalResponse;
   },

@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@heureum/core-tools':
+        specifier: file:../heureum-client-tools/core
+        version: file:../heureum-client-tools/core
+      '@heureum/mobile':
+        specifier: file:../heureum-client-tools/mobile
+        version: file:../heureum-client-tools/mobile
       '@tanstack/react-query':
         specifier: ^5.90.20
         version: 5.90.20(react@19.2.4)
@@ -342,6 +348,12 @@ packages:
   '@eslint/plugin-kit@0.4.1':
     resolution: {integrity: sha512-43/qtrDUokr7LJqoF2c3+RInu/t4zfrpYdoSDfYyhg52rwLV6TnOvdG4fXm7IkSB3wErkcmJS9iEhjVtOSEjjA==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
+
+  '@heureum/core-tools@file:../heureum-client-tools/core':
+    resolution: {directory: ../heureum-client-tools/core, type: directory}
+
+  '@heureum/mobile@file:../heureum-client-tools/mobile':
+    resolution: {directory: ../heureum-client-tools/mobile, type: directory}
 
   '@humanfs/core@0.19.1':
     resolution: {integrity: sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA==}
@@ -1811,6 +1823,10 @@ snapshots:
     dependencies:
       '@eslint/core': 0.17.0
       levn: 0.4.1
+
+  '@heureum/core-tools@file:../heureum-client-tools/core': {}
+
+  '@heureum/mobile@file:../heureum-client-tools/mobile': {}
 
   '@humanfs/core@0.19.1': {}
 

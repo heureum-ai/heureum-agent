@@ -80,6 +80,16 @@ def proxy_to_agent(request: Request) -> Response:
             session_obj.user = request.user
             session_obj.save(update_fields=["user"])
 
+        # Persist client-provided skills snapshot once per session and
+        # automatically reuse it for later turns.
+        incoming_snapshot = data.get("skills_snapshot")
+        if incoming_snapshot:
+            if session_obj.skills_snapshot != incoming_snapshot:
+                session_obj.skills_snapshot = incoming_snapshot
+                session_obj.save(update_fields=["skills_snapshot", "updated_at"])
+        elif session_obj.skills_snapshot:
+            data["skills_snapshot"] = session_obj.skills_snapshot
+
         # Ensure the agent receives the same session_id the platform uses.
         # Without this, a new conversation (no session_id in metadata) causes
         # the platform and agent to generate different IDs, breaking internal
@@ -176,13 +186,13 @@ def proxy_to_agent(request: Request) -> Response:
 
         # Streaming pass-through
         if data.get("stream"):
-            return _proxy_streaming(serializer.validated_data, session_id, response_obj)
+            return _proxy_streaming(data, session_id, response_obj)
 
         # Forward request to agent service (non-streaming)
         agent_url = f"{settings.AGENT_SERVICE_URL}/v1/responses"
         agent_response = _agent_client.post(
             agent_url,
-            json=serializer.validated_data,
+            json=data,
         )
         agent_response.raise_for_status()
         response_data = agent_response.json()

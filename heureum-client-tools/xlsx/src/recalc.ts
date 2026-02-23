@@ -109,7 +109,12 @@ async function inspectWorkbook(xlsxPath: string): Promise<{
   totalFormulas: number;
 }> {
   const buffer = (await fs.promises.readFile(xlsxPath));
-  const zip = await JSZip.loadAsync(buffer);
+  const zipInput = new Uint8Array(
+    buffer.buffer,
+    buffer.byteOffset,
+    buffer.byteLength,
+  );
+  const zip = await JSZip.loadAsync(zipInput);
 
   const parser = new XMLParser({
     ignoreAttributes: false,

@@ -292,6 +292,45 @@ function sendBrowserCommand(
 // --- Deep link handling ---
 
 let mainWindow: BrowserWindow | null = null
+const DEFAULT_FRONTEND_URL = 'http://localhost:5173'
+const FRONTEND_RETRY_INTERVAL_MS = 300
+const FRONTEND_MAX_RETRIES = 100
+
+function getFrontendUrl(): string {
+  const fromEnv = process.env['FRONTEND_URL']?.trim()
+  return fromEnv && fromEnv.length > 0 ? fromEnv : DEFAULT_FRONTEND_URL
+}
+
+function isLocalDevFrontend(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1'
+  } catch {
+    return false
+  }
+}
+
+function loadFrontendWithRetry(targetWindow: BrowserWindow, frontendUrl: string, attempt = 1): void {
+  targetWindow
+    .loadURL(frontendUrl)
+    .then(() => {
+      console.log(`[Heureum] Frontend loaded: ${frontendUrl}`)
+    })
+    .catch((err) => {
+      const shouldRetry = isLocalDevFrontend(frontendUrl) && attempt < FRONTEND_MAX_RETRIES
+      if (!shouldRetry) {
+        console.error(`[Heureum] Failed to load frontend (${frontendUrl}):`, err)
+        return
+      }
+
+      if (targetWindow.isDestroyed()) return
+      setTimeout(() => {
+        if (!targetWindow.isDestroyed()) {
+          loadFrontendWithRetry(targetWindow, frontendUrl, attempt + 1)
+        }
+      }, FRONTEND_RETRY_INTERVAL_MS)
+    })
+}
 
 function handleDeepLink(url: string): void {
   console.log('[Heureum] Deep link received:', url)
@@ -352,8 +391,8 @@ function createWindow(): void {
   })
 
   // Load the frontend URL (heureum-frontend serves the UI)
-  const frontendUrl = process.env['FRONTEND_URL'] || 'http://localhost:5173'
-  mainWindow.loadURL(frontendUrl)
+  const frontendUrl = getFrontendUrl()
+  loadFrontendWithRetry(mainWindow, frontendUrl)
 }
 
 // --- IPC Handlers ---
@@ -811,7 +850,7 @@ if (!gotTheLock) {
     createWindow()
 
     // Auto-update only in production (skip when pointing to localhost)
-    const frontendUrl = process.env['FRONTEND_URL'] || 'http://localhost:5173'
+    const frontendUrl = getFrontendUrl()
     if (!frontendUrl.includes('localhost')) {
       setupAutoUpdater()
       setTimeout(() => {

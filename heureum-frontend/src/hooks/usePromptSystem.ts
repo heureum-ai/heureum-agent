@@ -15,10 +15,6 @@ import type {
   QuestionAnswer,
 } from '../types';
 
-function canExecuteTools(): boolean {
-  return typeof window !== 'undefined' && window.api?.canExecuteTools === true;
-}
-
 export function usePromptSystem() {
   const { addMessage } = useChatStore();
 

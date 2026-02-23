@@ -1,11 +1,9 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
 import { useState, useEffect, useCallback, type KeyboardEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
 import { useChatStore } from '../store/chatStore';
 import { useFileStore } from '../store/fileStore';
 import {
-  getSessionCwd,
   setSessionCwd,
   updateSessionCwd,
   initCodingTools,
@@ -17,16 +15,13 @@ import { useSessionManagement } from '../hooks/useSessionManagement';
 import { useScrollBehavior } from '../hooks/useScrollBehavior';
 import { useStreamingChat } from '../hooks/useStreamingChat';
 import { Sidebar, MessageList, canExecuteTools, pathBasename } from '../components/chat';
-import HeureumIcon from '../components/HeureumIcon';
 import PermissionPrompt from '../components/PermissionPrompt';
 import QuestionPrompt from '../components/QuestionPrompt';
 import CwdPrompt from '../components/CwdPrompt';
-import MarkdownMessage from '../components/MarkdownMessage';
 import FilePanel from '../components/FilePanel';
 import './ChatPage.css';
 
 export default function ChatPage() {
-  const navigate = useNavigate();
   const { messages, sessionId, isLoading, cwd, streamingText, setCwd } = useChatStore();
   const { isFilePanelOpen, toggleFilePanel } = useFileStore();
 

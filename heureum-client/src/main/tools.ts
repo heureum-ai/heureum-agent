@@ -8,6 +8,7 @@ import { handleMdTool, toolsList as mdToolsList, MD_SKILLS } from '@heureum/md'
 import { handleHwpxTool, toolsList as hwpxToolsList, HWPX_SKILLS } from '@heureum/hwpx'
 import { handleWebTool, WEB_TOOLS as WEB_TOOL_DEFINITIONS, WEB_SKILLS } from '@heureum/web'
 import { BROWSER_TOOLS as BROWSER_TOOL_DEFINITIONS, BROWSER_SKILLS } from '@heureum/browser'
+import { CORE_SKILLS, buildSelectCwdTool } from '@heureum/core-tools'
 import * as fs from 'node:fs/promises'
 import * as path from 'node:path'
 import * as os from 'node:os'
@@ -722,25 +723,6 @@ export function getExecutableToolNameSet(params?: ToolPolicyPipelineContext): Se
 
 export const EXECUTABLE_TOOLS: ToolDefinition[] = getExecutableTools()
 
-// --- select_cwd (dynamic description) ---
-
-export function buildSelectCwdTool(cwd: string | null): ToolDefinition {
-  const cwdStatus = cwd
-    ? `Current working directory is: ${cwd}.`
-    : 'No working directory is currently set.'
-  return {
-    type: 'function',
-    name: 'select_cwd',
-    display_name: 'Select Directory',
-    description: `Open a folder picker dialog to let the user select a working directory for subsequent local command tools. ${cwdStatus} Call this before running command tools if the user hasn't selected a working directory yet, or if they want to change it.`,
-    parameters: {
-      type: 'object',
-      properties: {},
-      required: [],
-    },
-  }
-}
-
 // --- browser tools (from @heureum/browser package) ---
 
 const BROWSER_TOOLS = BROWSER_TOOL_DEFINITIONS as ToolDefinition[]
@@ -861,6 +843,7 @@ export interface SkillsSnapshot {
 const SKILLS_CACHE_DIR = path.join(os.homedir(), '.cache', 'heureum-skills')
 
 const ALL_SKILLS: SkillDefinition[] = [
+  ...(CORE_SKILLS as SkillDefinition[]),
   ...CODING_SKILLS,
   ...BASH_SKILLS,
   ...DOCX_SKILLS,

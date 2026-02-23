@@ -98,7 +98,12 @@ export async function pack(
     for (const filePath of allFiles) {
       const relativePath = path.relative(tmpContentDir, filePath);
       const content = (await fs.promises.readFile(filePath));
-      zip.file(relativePath.replace(/\\/g, "/"), content, {
+      const zipInput = new Uint8Array(
+        content.buffer,
+        content.byteOffset,
+        content.byteLength,
+      );
+      zip.file(relativePath.replace(/\\/g, "/"), zipInput, {
         compression: "DEFLATE",
       });
     }

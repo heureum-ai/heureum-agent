@@ -457,8 +457,10 @@ class AgentLoopRunner:
                 instructions=instructions,
                 client_tool_schemas=self.ctx.client_tool_schemas,
                 client_tool_prompts=self.ctx.client_tool_prompts,
+                client_tool_names=self.ctx.client_tool_names,
                 state_prompts=state_prompts,
                 skills_prompt=skills_prompt,
+                skills_snapshot=self.ctx.request.skills_snapshot,
             )
 
             await self._run_prompt_after_middleware(prompt_event)
@@ -525,12 +527,12 @@ class AgentLoopRunner:
             client_tool_names=self.ctx.client_tool_names,
         )
 
-        skill_tool_names = self._skill_controller.get_all_tool_names()
+        available_tool_names = set(self.ctx.tool_names)
         unsupported = [
             tc
             for tc in server_calls
             if not self._mcp_client.is_server_tool(tc.name)
-            and tc.name not in skill_tool_names
+            and tc.name not in available_tool_names
             and not self._mcp_client.needs_approval(tc.name, self.ctx.session_id)
         ]
         if unsupported:
@@ -824,8 +826,10 @@ class AgentLoopRunner:
             instructions=instructions,
             client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
             client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
+            client_tool_names=self.ctx.client_tool_names if use_tools else None,
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
+            skills_snapshot=self.ctx.request.skills_snapshot,
         ):
             reasoning_delta = (
                 self._service._normalize._extract_reasoning(chunk.content) if chunk.content else ""

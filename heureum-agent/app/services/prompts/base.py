@@ -74,6 +74,14 @@ about to do — just call the tool and present the results naturally.
 When a tool_guide exists for the task, follow its procedure
 autonomously. Exhaust the guide's recovery steps before asking the
 user for help. Change at least one parameter on each retry.
+
+When an <available_skills> catalog is present, use this flow:
+1) Scan the skill descriptions first.
+2) If exactly one skill clearly applies, read its SKILL.md at
+   <location> with an available file-read tool, then follow it.
+3) If multiple may apply, choose the most specific one and read only that.
+4) If none clearly apply, do not read any SKILL.md.
+Read at most one SKILL.md up front.
 </tool_usage>
 
 <task_execution>

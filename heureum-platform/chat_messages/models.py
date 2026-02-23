@@ -171,6 +171,7 @@ class Session(models.Model):
     )
     title = models.CharField(max_length=200, null=True, blank=True)
     cwd = models.CharField(max_length=1024, null=True, blank=True)
+    skills_snapshot = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(default=timezone.now)
     updated_at = models.DateTimeField(auto_now=True)
 

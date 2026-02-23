@@ -16,7 +16,7 @@ import asyncio
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from app.config import settings
 from app.models import AgentResponse, LLMResult, LLMResultType, ToolCallInfo
@@ -444,8 +444,10 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_prompts: Optional[List[str]] = None,
         client_tool_schemas: Optional[List[dict]] = None,
+        client_tool_names: Optional[Set[str]] = None,
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
+        skills_snapshot: Any = None,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
@@ -458,10 +460,13 @@ class AgentService:
                 clients for inclusion in the system prompt.
             client_tool_schemas (Optional[List[dict]]): Client-provided
                 OpenAI-format tool schemas.
+            client_tool_names (Optional[Set[str]]): Client-side tool names
+                available in this turn.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills (wrapped inside ``<session_state>``).
             skills_prompt (Optional[str]): Pre-built ``<available_skills>``
                 block from a client skills snapshot.
+            skills_snapshot: Full snapshot payload for tool filtering.
 
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
@@ -470,8 +475,10 @@ class AgentService:
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
+            client_tool_names=client_tool_names,
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
+            skills_snapshot=skills_snapshot,
         )
 
     def _build_lc_messages(
@@ -704,8 +711,10 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        client_tool_names: Optional[Set[str]] = None,
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
+        skills_snapshot: Any = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -723,8 +732,11 @@ class AgentService:
                 schemas.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            client_tool_names (Optional[Set[str]]): Client-side tool names
+                available in this turn.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
+            skills_snapshot: Full snapshot payload for skill filtering.
 
         Returns:
             AIMessage: The successful LLM response.
@@ -745,8 +757,10 @@ class AgentService:
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
+            client_tool_names=client_tool_names,
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
+            skills_snapshot=skills_snapshot,
         )
         lc_new_messages = list(new_messages)
         overflow_retries = 0
@@ -1061,8 +1075,10 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        client_tool_names: Optional[Set[str]] = None,
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
+        skills_snapshot: Any = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1077,8 +1093,11 @@ class AgentService:
                 automatically.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            client_tool_names (Optional[Set[str]]): Client-side tool names
+                available in this turn.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
+            skills_snapshot: Full snapshot payload for skill filtering.
 
         Returns:
             LLMResult: A text result or tool call result with usage.
@@ -1092,8 +1111,10 @@ class AgentService:
                 instructions=instructions,
                 client_tool_schemas=client_tool_schemas,
                 client_tool_prompts=client_tool_prompts,
+                client_tool_names=client_tool_names,
                 state_prompts=state_prompts,
                 skills_prompt=skills_prompt,
+                skills_snapshot=skills_snapshot,
             )
 
             normalized = self._normalize.normalize_llm_response(response)
@@ -1133,8 +1154,10 @@ class AgentService:
         instructions: Optional[str] = None,
         client_tool_schemas: Optional[List[dict]] = None,
         client_tool_prompts: Optional[List[str]] = None,
+        client_tool_names: Optional[Set[str]] = None,
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
+        skills_snapshot: Any = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1150,8 +1173,11 @@ class AgentService:
                 automatically.
             client_tool_prompts (Optional[List[str]]): Guide texts from
                 clients for the system prompt.
+            client_tool_names (Optional[Set[str]]): Client-side tool names
+                available in this turn.
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
+            skills_snapshot: Full snapshot payload for skill filtering.
 
         Yields:
             AIMessageChunk: Incremental response chunks.
@@ -1161,8 +1187,10 @@ class AgentService:
             instructions=instructions,
             client_tool_prompts=client_tool_prompts,
             client_tool_schemas=client_tool_schemas,
+            client_tool_names=client_tool_names,
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
+            skills_snapshot=skills_snapshot,
         )
         lc_new = list(messages)
         overflow_retries = 0

@@ -660,7 +660,13 @@ async function extractXlsxXmlStyleArtifacts(
     processEntities: false,
   });
 
-  const zip = await JSZip.loadAsync((await fs.promises.readFile(inputPath)));
+  const fileBuffer = await fs.promises.readFile(inputPath);
+  const zipInput = new Uint8Array(
+    fileBuffer.buffer,
+    fileBuffer.byteOffset,
+    fileBuffer.byteLength,
+  );
+  const zip = await JSZip.loadAsync(zipInput);
 
   let styleSheet: Record<string, unknown> | null = null;
   const stylesXml = await zip.file("xl/styles.xml")?.async("string");
