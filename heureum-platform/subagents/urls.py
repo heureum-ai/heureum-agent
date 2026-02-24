@@ -15,6 +15,11 @@ urlpatterns = [
         views.complete_run,
         name="subagent-complete-run",
     ),
+    path(
+        "internal/runs/sweep/",
+        views.sweep_stale_runs,
+        name="subagent-sweep-stale",
+    ),
     # Read endpoints (Phase D)
     path("runs/", views.list_runs, name="subagent-list-runs"),
     path(

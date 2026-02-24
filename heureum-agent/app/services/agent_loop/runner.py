@@ -53,6 +53,39 @@ class AgentLoopRunner:
         self._persist_tasks: list[asyncio.Task] = []
         self._pending_events: list[dict] = []
 
+    # -- logging helpers -------------------------------------------------------
+
+    def _log_response(
+        self,
+        *,
+        response_type: str,
+        iteration: int | None = None,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        text: str = "",
+        tool_names: list[str] | None = None,
+    ) -> None:
+        """Centralized agent response logging."""
+        iter_str = f" iter={iteration}" if iteration is not None else ""
+        if response_type == "tool_call":
+            logger.info(
+                "AGENT_RESPONSE session=%s%s type=tool_call tokens={in:%d,out:%d} tools=%s",
+                self.ctx.session_id,
+                iter_str,
+                input_tokens,
+                output_tokens,
+                tool_names or [],
+            )
+        else:
+            logger.info(
+                "AGENT_RESPONSE session=%s%s type=text tokens={in:%d,out:%d} preview=%s",
+                self.ctx.session_id,
+                iter_str,
+                input_tokens,
+                output_tokens,
+                repr(text[:200]) if text else '""',
+            )
+
     # -- pending events helpers ---------------------------------------------
 
     def _drain_events(self) -> list[dict]:
@@ -143,6 +176,14 @@ class AgentLoopRunner:
         )
         await self._skill_controller.await_pending(self.ctx.session_id)
 
+        # Push live state after sub-agent completion (phase may have changed)
+        live_state = self._skill_controller.get_live_state(self.ctx.session_id)
+        if live_state:
+            self._pending_events.append({
+                "type": "response.todo.updated",
+                "todo": live_state,
+            })
+
         if self._skill_controller.has_unfinished_work(self.ctx.session_id):
             # Still unfinished (e.g. plan steps) — inject guidance
             self.ctx.plan_retry_count += 1
@@ -157,6 +198,19 @@ class AgentLoopRunner:
 
             if self.ctx.plan_retry_count > settings.MAX_PLAN_RETRIES:
                 await self._skill_controller.finalize_abandoned(self.ctx.session_id)
+                # If skill rejected abandon (checkpoint wait), keep retrying
+                if self._skill_controller.has_unfinished_work(self.ctx.session_id):
+                    guidance = self._skill_controller.build_retry_guidance(
+                        self.ctx.session_id, text,
+                    )
+                    content, blocked = await self._messages.resolve(
+                        "loop.plan_retry",
+                        session_id=self.ctx.session_id,
+                        guidance=guidance or "Continue with the required checkpoint.",
+                    )
+                    if not blocked:
+                        self.ctx.messages = [HumanMessage(content=content)]
+                    return _IterAction.CONTINUE
                 return _IterAction.NONE  # fall through to normal text handling
             else:
                 guidance = self._skill_controller.build_retry_guidance(
@@ -333,6 +387,13 @@ class AgentLoopRunner:
         if resp.usage:
             self.ctx.total_usage = self.ctx.total_usage.add(resp.usage)
 
+        self._log_response(
+            response_type="text",
+            input_tokens=resp.usage.input_tokens if resp.usage else 0,
+            output_tokens=resp.usage.output_tokens if resp.usage else 0,
+            text=resp.message or "",
+        )
+
         # Persist: assistant text response (with reasoning if present)
         self._persist_assistant_message(resp.message or "", resp.reasoning)
         self._persist_complete("completed")
@@ -451,16 +512,32 @@ class AgentLoopRunner:
                 prompt_event,
             ) = await self._run_prompt_before_middleware(instructions, state_prompts, skills_prompt)
 
+            # Per-iteration progressive skill activation filtering
+            active_tool_names = self._skill_controller.get_active_tool_names(
+                self.ctx.session_id,
+                self.ctx.request.skills_snapshot,
+            )
+            if active_tool_names is not None:
+                filtered_schemas = [
+                    s for s in self.ctx.client_tool_schemas
+                    if s.get("function", {}).get("name") in active_tool_names
+                ]
+                filtered_names = self.ctx.client_tool_names & active_tool_names
+            else:
+                filtered_schemas = self.ctx.client_tool_schemas
+                filtered_names = self.ctx.client_tool_names
+
             result = await self._service.process_messages_with_tools(
                 messages=self.ctx.messages,
                 session_id=self.ctx.session_id,
                 instructions=instructions,
-                client_tool_schemas=self.ctx.client_tool_schemas,
+                client_tool_schemas=filtered_schemas,
                 client_tool_prompts=self.ctx.client_tool_prompts,
-                client_tool_names=self.ctx.client_tool_names,
+                client_tool_names=filtered_names,
                 state_prompts=state_prompts,
                 skills_prompt=skills_prompt,
                 skills_snapshot=self.ctx.request.skills_snapshot,
+                active_tool_names=active_tool_names,
             )
 
             await self._run_prompt_after_middleware(prompt_event)
@@ -469,6 +546,13 @@ class AgentLoopRunner:
                 self.ctx.total_usage = self.ctx.total_usage.add(result.usage)
 
             if result.type == LLMResultType.TEXT:
+                self._log_response(
+                    response_type="text",
+                    iteration=iteration,
+                    input_tokens=result.usage.input_tokens if result.usage else 0,
+                    output_tokens=result.usage.output_tokens if result.usage else 0,
+                    text=result.text or "",
+                )
                 # Priority 1: Skill unfinished work
                 action = await self._handle_skill_unfinished(result.text or "", result.usage)
                 self._drain_events()  # discard SSE events in non-streaming
@@ -497,6 +581,15 @@ class AgentLoopRunner:
                     tool_history=self.ctx.output_items or None,
                 )
 
+            # TOOL_CALL result
+            self._log_response(
+                response_type="tool_call",
+                iteration=iteration,
+                input_tokens=result.usage.input_tokens if result.usage else 0,
+                output_tokens=result.usage.output_tokens if result.usage else 0,
+                tool_names=[tc.name for tc in (result.tool_calls or [])],
+            )
+
             # Skills signal all work done — drop extra tool calls.
             text = ""
             if result.assistant_lc_message:
@@ -522,6 +615,7 @@ class AgentLoopRunner:
         self, result: Any, iteration: int
     ) -> ResponseObject | None:
         all_tool_calls = result.tool_calls or []
+        self._tool_execution.extract_display_names(all_tool_calls, self.ctx.display_names)
         client_calls, server_calls = self._mcp_client.classify_tool_calls(
             all_tool_calls,
             client_tool_names=self.ctx.client_tool_names,
@@ -620,7 +714,13 @@ class AgentLoopRunner:
             self._persist_message(
                 "function_call",
                 "assistant",
-                "",
+                {
+                    "type": "function_call",
+                    "name": tc.name,
+                    "arguments": tc.args if isinstance(tc.args, str) else json.dumps(tc.args),
+                    "call_id": tc.id,
+                    "display_name": self.ctx.display_names[tc.name],
+                },
                 metadata={"name": tc.name, "arguments": tc.args, "call_id": tc.id},
             )
 
@@ -820,16 +920,37 @@ class AgentLoopRunner:
         else:
             prompt_event = None
 
+        # Per-iteration progressive skill activation filtering
+        if use_tools:
+            active_tool_names = self._skill_controller.get_active_tool_names(
+                self.ctx.session_id,
+                self.ctx.request.skills_snapshot,
+            )
+            if active_tool_names is not None:
+                filtered_schemas = [
+                    s for s in self.ctx.client_tool_schemas
+                    if s.get("function", {}).get("name") in active_tool_names
+                ]
+                filtered_names = self.ctx.client_tool_names & active_tool_names
+            else:
+                filtered_schemas = self.ctx.client_tool_schemas
+                filtered_names = self.ctx.client_tool_names
+        else:
+            filtered_schemas = None
+            filtered_names = None
+            active_tool_names = None
+
         async for chunk in self._service.stream_messages_with_tools(
             messages=self.ctx.messages,
             session_id=self.ctx.session_id,
             instructions=instructions,
-            client_tool_schemas=self.ctx.client_tool_schemas if use_tools else None,
+            client_tool_schemas=filtered_schemas if use_tools else None,
             client_tool_prompts=self.ctx.client_tool_prompts if use_tools else None,
-            client_tool_names=self.ctx.client_tool_names if use_tools else None,
+            client_tool_names=filtered_names if use_tools else None,
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
             skills_snapshot=self.ctx.request.skills_snapshot,
+            active_tool_names=active_tool_names,
         ):
             reasoning_delta = (
                 self._service._normalize._extract_reasoning(chunk.content) if chunk.content else ""
@@ -869,6 +990,13 @@ class AgentLoopRunner:
             full_text = ""
             reasoning = ""
             usage = Usage.zero()
+
+        self._log_response(
+            response_type="text",
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            text=full_text,
+        )
 
         if accumulated:
             self.ctx.total_usage = self.ctx.total_usage.add(usage)
@@ -944,6 +1072,13 @@ class AgentLoopRunner:
             self.ctx.total_usage = self.ctx.total_usage.add(usage)
 
             if not normalized.tool_calls:
+                self._log_response(
+                    response_type="text",
+                    iteration=iteration,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    text=normalized.text or "",
+                )
                 # TEXT result — check shared helpers
                 action = await self._handle_skill_unfinished(
                     normalized.text, usage, raw_message=normalized.raw_message
@@ -1009,6 +1144,13 @@ class AgentLoopRunner:
 
             # TOOL_CALL: discard narration text that was streamed alongside
             # tool_calls (e.g. "mcp_web__search를 사용하여...").
+            self._log_response(
+                response_type="tool_call",
+                iteration=iteration,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                tool_names=[tc["name"] for tc in normalized.tool_calls],
+            )
             yield self._service.responses.sse_event(
                 {"type": "response.output_text.abandoned", "reason": "tool_call"}
             )
@@ -1035,6 +1177,7 @@ class AgentLoopRunner:
                 ToolCallInfo(name=tc["name"], args=tc["args"], id=tc["id"])
                 for tc in accumulated.tool_calls
             ]
+            self._tool_execution.extract_display_names(tool_calls_info, self.ctx.display_names)
 
             usage_dump = usage.model_dump()
             for tc in tool_calls_info:

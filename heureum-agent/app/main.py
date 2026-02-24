@@ -27,6 +27,15 @@ from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s %(name)s: %(message)s",
+)
+# Silence noisy third-party loggers
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+logging.getLogger("hpack").setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,6 +120,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     logger.info("Starting Heureum Agent Service...")
     shutdown.register()
+    # Sweep stale subagent runs from previous instance
+    if persist_controller:
+        swept = await persist_controller.sweep_stale_runs()
+        if swept:
+            logger.info("Swept %d stale subagent run(s) from DB", swept)
     yield
     logger.info("Shutting down Heureum Agent Service...")
     await _on_shutdown()

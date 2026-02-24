@@ -6,10 +6,12 @@ from app.config import settings
 from app.services.prompts.base import (
     AGENT_IDENTITY_PROMPT,
     HARD_CLEAR_PLACEHOLDER,
+    SUBAGENT_IDENTITY_PROMPT,
     SystemPromptBuilder,
     build_system_prompt,
 )
 from app.services.prompts.compaction import COMPACTION_PREFIX
+from app.services.prompts.controller import PromptController
 from app.services.skills import SkillController
 
 # ---------------------------------------------------------------------------
@@ -258,3 +260,75 @@ class TestPromptConstants:
 
     def test_hard_clear_placeholder_value(self):
         assert HARD_CLEAR_PLACEHOLDER == "[Previous tool results have been cleared]"
+
+
+# ---------------------------------------------------------------------------
+# TestSubagentPrompt
+# ---------------------------------------------------------------------------
+
+
+class TestSubagentPrompt:
+    """Tests for subagent-mode prompt optimizations."""
+
+    def test_subagent_identity_is_shorter(self):
+        assert len(SUBAGENT_IDENTITY_PROMPT) < len(AGENT_IDENTITY_PROMPT)
+
+    def test_subagent_identity_has_essential_sections(self):
+        for tag in ["<identity>", "<safety>", "<tool_usage>", "<language>"]:
+            assert tag in SUBAGENT_IDENTITY_PROMPT, f"Missing section: {tag}"
+
+    def test_subagent_identity_omits_main_agent_sections(self):
+        for tag in ["<task_execution>", "<conversation>", "<response_style>"]:
+            assert tag not in SUBAGENT_IDENTITY_PROMPT, f"Unexpected section: {tag}"
+
+    def test_build_system_prompt_subagent_mode(self):
+        result = build_system_prompt(is_subagent=True)
+        assert "<identity>" in result
+        assert "sub-agent" in result
+        # Should NOT have main-agent-only sections
+        assert "<task_execution>" not in result
+        assert "<conversation>" not in result
+
+    def test_build_system_prompt_default_is_main_agent(self):
+        result = build_system_prompt()
+        assert "<task_execution>" in result
+        assert "<conversation>" in result
+
+    def test_builder_subagent_mode(self):
+        result = SystemPromptBuilder(is_subagent=True).build()
+        assert "sub-agent" in result
+        assert "<task_execution>" not in result
+
+
+# ---------------------------------------------------------------------------
+# TestPromptControllerSubagent
+# ---------------------------------------------------------------------------
+
+
+class TestPromptControllerSubagent:
+    """Tests for PromptController is_subagent=True behavior."""
+
+    def test_display_name_injected_by_default(self):
+        ctrl = PromptController(skill_provider=None)
+        _, tools = ctrl.prepare_prompt_and_tools(
+            client_tool_schemas=[
+                {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}, "required": []}}}
+            ],
+        )
+        assert any(
+            "display_name" in t.get("function", {}).get("parameters", {}).get("properties", {})
+            for t in tools
+        )
+
+    def test_display_name_skipped_for_subagent(self):
+        ctrl = PromptController(skill_provider=None)
+        _, tools = ctrl.prepare_prompt_and_tools(
+            client_tool_schemas=[
+                {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}, "required": []}}}
+            ],
+            is_subagent=True,
+        )
+        assert not any(
+            "display_name" in t.get("function", {}).get("parameters", {}).get("properties", {})
+            for t in tools
+        )

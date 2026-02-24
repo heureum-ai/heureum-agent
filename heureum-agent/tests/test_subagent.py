@@ -24,6 +24,7 @@ from app.skills.plan_task.service import (
     get_subagent_depth,
     spawn_subagent,
 )
+from app.services.skills.types import SkillMeta
 from app.services.subagent import (
     SubagentContext,
     _announce_completion,
@@ -470,6 +471,15 @@ class TestBuildSubagentInstructions:
         result = _build_subagent_instructions("task", [], can_spawn=False)
         assert "Do NOT spawn sub-agents" in result
 
+    def test_workflow_section_included_when_can_spawn(self):
+        result = _build_subagent_instructions("task", [], can_spawn=True)
+        assert "## Workflow" in result
+        assert "manage_todo" in result
+
+    def test_workflow_section_excluded_for_leaf(self):
+        result = _build_subagent_instructions("task", [], can_spawn=False)
+        assert "## Workflow" not in result
+
 
 # ---------------------------------------------------------------------------
 # _FilteredSkillController
@@ -532,9 +542,22 @@ class TestFilteredSkillProvider:
 # _resolve_child_tools
 # ---------------------------------------------------------------------------
 
+# Mock deny-list side effect matching real SKILL.md declarations
+_DENY_NEVER = {"activate_skill", "notify_user", "manage_periodic_task"}
+_DENY_ORCH = {"manage_todo", "sessions_spawn", "sessions_spawn_status"}
+
+
+def _mock_deny_side_effect(depth: int, max_depth: int) -> set:
+    denied = set(_DENY_NEVER)
+    if depth >= max_depth:
+        denied |= _DENY_ORCH
+    return denied
+
 
 class TestResolveChildTools:
     def _set_ctx(self, mock_svc, mock_mcp, mock_skill):
+        mock_skill.get_subagent_denied_tools.side_effect = _mock_deny_side_effect
+        mock_skill.get_subagent_orchestrator_tools.return_value = set(_DENY_ORCH)
         set_subagent_context(
             SubagentContext(
                 agent_service=mock_svc,
@@ -583,14 +606,14 @@ class TestResolveChildTools:
         assert len(mcp_tools) == 2
         assert "write" not in names
 
-    def test_excludes_approval_required_tools(self):
+    def test_inherits_all_tools_including_approval_required(self):
         mock_svc = MagicMock()
         mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
             {"function": {"name": "bash"}},
-            {"function": {"name": "dangerous"}},
+            {"function": {"name": "mcp_web__search"}},
         ]
         mock_mcp = MagicMock()
-        mock_mcp._approval_required_tools = {"dangerous"}
+        mock_mcp._approval_required_tools = {"mcp_web__search"}
         mock_skill = MagicMock()
         mock_skill.get_all_tool_schemas.return_value = []
 
@@ -598,8 +621,8 @@ class TestResolveChildTools:
         request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
         mcp_tools, sp, names = _resolve_child_tools(request)
 
-        assert len(mcp_tools) == 1
-        assert "dangerous" not in names
+        assert len(mcp_tools) == 2
+        assert "mcp_web__search" in names
 
     def test_includes_skill_tool_names(self):
         mock_svc = MagicMock()
@@ -608,14 +631,21 @@ class TestResolveChildTools:
         mock_mcp._approval_required_tools = set()
         mock_skill = MagicMock()
         mock_skill.get_all_tool_schemas.return_value = [
-            {"function": {"name": "plan_task"}},
+            {"function": {"name": "manage_todo"}},
         ]
+        # The filtered controller also needs to return schemas
+        filtered_mock = MagicMock()
+        filtered_mock.get_all_tool_schemas.return_value = [
+            {"function": {"name": "manage_todo"}},
+        ]
+        mock_skill.filtered.return_value = filtered_mock
 
         self._set_ctx(mock_svc, mock_mcp, mock_skill)
+        _session_depth["p1"] = 0
         request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
         mcp_tools, sp, names = _resolve_child_tools(request)
 
-        assert "plan_task" in names
+        assert "manage_todo" in names
 
 
 # ---------------------------------------------------------------------------
@@ -634,6 +664,11 @@ class TestRunSubagent:
         request = SpawnRequest(parent_session_id="p1", task="test", cleanup="delete")
         mock_clear_depth = MagicMock()
 
+        mock_usage = Usage(
+            input_tokens=100, output_tokens=50, total_tokens=150,
+            input_tokens_details=InputTokenDetails(),
+            output_tokens_details=OutputTokenDetails(),
+        )
         set_subagent_context(
             SubagentContext(
                 agent_service=MagicMock(),
@@ -647,7 +682,7 @@ class TestRunSubagent:
         with (
             patch(
                 "app.services.subagent._execute_subagent_task",
-                new=AsyncMock(return_value="Done"),
+                new=AsyncMock(return_value=("Done", mock_usage)),
             ),
             patch("app.services.subagent._announce_completion", new=AsyncMock()) as mock_announce,
             patch("app.services.subagent.cleanup_session_state"),
@@ -733,6 +768,11 @@ class TestRunSubagent:
         from app.skills.plan_task.service import _registry
         from app.services.subagent import _run_subagent
 
+        mock_usage = Usage(
+            input_tokens=10, output_tokens=5, total_tokens=15,
+            input_tokens_details=InputTokenDetails(),
+            output_tokens_details=OutputTokenDetails(),
+        )
         record = SubagentRunRecord(child_session_id="c1", parent_session_id="p1", task="test")
         _registry.register(record)
         request = SpawnRequest(parent_session_id="p1", task="test", cleanup="keep")
@@ -741,7 +781,7 @@ class TestRunSubagent:
         with (
             patch(
                 "app.services.subagent._execute_subagent_task",
-                new=AsyncMock(return_value="Done"),
+                new=AsyncMock(return_value=("Done", mock_usage)),
             ),
             patch("app.services.subagent._announce_completion", new=AsyncMock()),
         ):
@@ -818,9 +858,12 @@ class TestExecuteSubagentTask:
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
         ):
-            result = await _execute_subagent_task(record, request, _registry)
+            text, usage = await _execute_subagent_task(record, request, _registry)
 
-        assert result == "All done"
+        assert text == "All done"
+        assert usage.input_tokens == 10
+        assert usage.output_tokens == 5
+        assert usage.total_tokens == 15
         mock_service.aclose.assert_called_once()
 
     @pytest.mark.asyncio
@@ -851,9 +894,13 @@ class TestExecuteSubagentTask:
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
         ):
-            result = await _execute_subagent_task(record, request, _registry)
+            text, usage = await _execute_subagent_task(record, request, _registry)
 
-        assert result == "Finished"
+        assert text == "Finished"
+        # Two iterations: tool call (10 in, 5 out) + text (10 in, 5 out)
+        assert usage.input_tokens == 20
+        assert usage.output_tokens == 10
+        assert usage.total_tokens == 30
         assert record.current_iteration == 2
         assert len(record.progress_log) == 1
         assert record.progress_log[0].tool_name == "bash"
@@ -890,9 +937,10 @@ class TestExecuteSubagentTask:
             patch("app.services.subagent._resolve_child_tools", return_value=([], None, [])),
             patch("app.services.subagent.AgentService", return_value=mock_service),
         ):
-            result = await _execute_subagent_task(record, request, _registry)
+            text, usage = await _execute_subagent_task(record, request, _registry)
 
-        assert result == "Done anyway"
+        assert text == "Done anyway"
+        assert usage.input_tokens == 20  # two iterations
         assert record.progress_log[0].status == "failed"
 
     @pytest.mark.asyncio
@@ -920,9 +968,10 @@ class TestExecuteSubagentTask:
         ):
             mock_settings.SUBAGENT_MAX_ITERATIONS = 3
             mock_settings.MAX_PLAN_RETRIES = 3
-            result = await _execute_subagent_task(record, request, _registry)
+            text, usage = await _execute_subagent_task(record, request, _registry)
 
-        assert "maximum iterations" in result.lower()
+        assert "maximum iterations" in text.lower()
+        assert usage.input_tokens == 30  # 3 iterations × 10
         mock_service.aclose.assert_called_once()
 
 
@@ -974,6 +1023,56 @@ class TestAwaitActiveSubagents:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# PersistController.sweep_stale_runs
+# ---------------------------------------------------------------------------
+
+
+class TestPersistControllerSweep:
+    @pytest.mark.asyncio
+    async def test_sweep_returns_count(self):
+        from app.services.messages.persist import PersistController
+
+        ctrl = PersistController("http://fake")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ok": True, "swept_count": 5}
+
+        with patch.object(ctrl._client, "post", new=AsyncMock(return_value=mock_resp)) as mock_post:
+            result = await ctrl.sweep_stale_runs(stale_seconds=300)
+
+        assert result == 5
+        mock_post.assert_called_once_with(
+            "http://fake/api/v1/subagents/internal/runs/sweep/",
+            json={"stale_seconds": 300},
+            timeout=ctrl.TIMEOUT,
+        )
+
+    @pytest.mark.asyncio
+    async def test_sweep_returns_zero_on_error(self):
+        from app.services.messages.persist import PersistController
+
+        ctrl = PersistController("http://fake")
+
+        with patch.object(ctrl._client, "post", new=AsyncMock(side_effect=Exception("conn refused"))):
+            result = await ctrl.sweep_stale_runs()
+
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_sweep_default_stale_seconds(self):
+        from app.services.messages.persist import PersistController
+
+        ctrl = PersistController("http://fake")
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = {"ok": True, "swept_count": 0}
+
+        with patch.object(ctrl._client, "post", new=AsyncMock(return_value=mock_resp)) as mock_post:
+            await ctrl.sweep_stale_runs()
+
+        call_json = mock_post.call_args[1]["json"]
+        assert call_json["stale_seconds"] == 600
+
+
 class TestAnnounceCompletionExhaustedRetries:
     @pytest.mark.asyncio
     async def test_all_retries_fail(self):
@@ -998,3 +1097,308 @@ class TestAnnounceCompletionExhaustedRetries:
         with patch("asyncio.sleep", new=AsyncMock()):
             # Should not raise even after all retries exhausted
             await _announce_completion(record, "done", max_retries=2)
+
+
+# ---------------------------------------------------------------------------
+# SkillController deny-list methods
+# ---------------------------------------------------------------------------
+
+
+def _make_skill_meta(name: str, tools: list, subagent_access: str = "always") -> SkillMeta:
+    return SkillMeta(
+        name=name, description="", body="",
+        tools=tools, depends_on=[],
+        subagent_access=subagent_access,
+    )
+
+
+class TestSkillControllerDenyList:
+    def _build_controller(self):
+        from app.services.skills.controller import SkillController
+
+        ctrl = SkillController()
+        return ctrl
+
+    def test_deny_never_tools_at_any_depth(self):
+        ctrl = self._build_controller()
+        denied = ctrl.get_subagent_denied_tools(depth=1, max_depth=2)
+        # activate_skill (never), notify_user (never), manage_periodic_task (never)
+        assert "activate_skill" in denied
+        assert "notify_user" in denied
+        assert "manage_periodic_task" in denied
+        # orchestrator tools NOT denied at non-leaf depth
+        assert "manage_todo" not in denied
+        assert "sessions_spawn" not in denied
+
+    def test_deny_orchestrator_tools_at_leaf_depth(self):
+        ctrl = self._build_controller()
+        denied = ctrl.get_subagent_denied_tools(depth=2, max_depth=2)
+        # never tools
+        assert "activate_skill" in denied
+        assert "notify_user" in denied
+        assert "manage_periodic_task" in denied
+        # orchestrator tools denied at leaf
+        assert "manage_todo" in denied
+        assert "sessions_spawn" in denied
+        assert "sessions_spawn_status" in denied
+
+    def test_beyond_max_depth_denies_orchestrator(self):
+        ctrl = self._build_controller()
+        denied = ctrl.get_subagent_denied_tools(depth=5, max_depth=2)
+        assert "manage_todo" in denied
+        assert "sessions_spawn" in denied
+
+    def test_orchestrator_tools_excludes_never(self):
+        ctrl = self._build_controller()
+        orch_tools = ctrl.get_subagent_orchestrator_tools()
+        assert "manage_todo" in orch_tools
+        assert "sessions_spawn" in orch_tools
+        assert "sessions_spawn_status" in orch_tools
+        # never tools excluded
+        assert "activate_skill" not in orch_tools
+        assert "notify_user" not in orch_tools
+        assert "manage_periodic_task" not in orch_tools
+
+
+# ---------------------------------------------------------------------------
+# _resolve_child_tools — deny-list filtering
+# ---------------------------------------------------------------------------
+
+
+class TestResolveChildToolsDenyList:
+    def _set_ctx(self, mock_svc, mock_mcp, mock_skill):
+        mock_skill.get_subagent_denied_tools.side_effect = _mock_deny_side_effect
+        mock_skill.get_subagent_orchestrator_tools.return_value = set(_DENY_ORCH)
+        set_subagent_context(
+            SubagentContext(
+                agent_service=mock_svc,
+                mcp_client=mock_mcp,
+                skill_controller=mock_skill,
+                tool_controller=MagicMock(),
+                execute_tool=AsyncMock(),
+            )
+        )
+
+    def test_deny_list_removes_deny_always_from_all_tools(self):
+        """When no tools/skills specified, DENY_ALWAYS tools are denied."""
+        mock_svc = MagicMock()
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "bash"}},
+            {"function": {"name": "read"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill.get_all_tool_schemas.return_value = [
+            {"function": {"name": "activate_skill"}},
+            {"function": {"name": "notify_user"}},
+            {"function": {"name": "manage_periodic_task"}},
+            {"function": {"name": "manage_todo"}},
+        ]
+        mock_skill._session_snapshots = {}
+        mock_skill._skills = {"plan_task": MagicMock()}
+        mock_skill._tools_by_skill = {"plan_task": {"manage_todo"}}
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 0  # parent at depth 0, child will be depth 1
+
+        request = SpawnRequest(parent_session_id="p1", task="t", tools=None)
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        assert "activate_skill" not in names
+        assert "notify_user" not in names
+        assert "manage_periodic_task" not in names
+        assert "bash" in names
+        assert "read" in names
+
+    def test_deny_list_applied_to_explicit_tools(self):
+        """Explicit tools whitelist also gets deny-list filtering."""
+        mock_svc = MagicMock()
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "bash"}},
+            {"function": {"name": "activate_skill"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill.get_all_tool_schemas.return_value = []
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 0
+
+        request = SpawnRequest(
+            parent_session_id="p1", task="t", tools=["bash", "activate_skill"]
+        )
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        assert "activate_skill" not in names
+        assert "bash" in names
+
+    def test_skill_based_resolution_orchestrator(self):
+        """When request.skills is set at non-leaf depth, include server tools."""
+        mock_svc = MagicMock()
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "bash"}},
+            {"function": {"name": "write_file"}},
+            {"function": {"name": "web_search"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill._session_snapshots = {
+            "p1": {
+                "skills": [
+                    {"name": "coding_task", "tools": ["bash", "write_file"]},
+                    {"name": "web_task", "tools": ["web_search"]},
+                ]
+            }
+        }
+        mock_skill._build_snapshot_skill_map.return_value = {
+            "coding_task": ["bash", "write_file"],
+            "web_task": ["web_search"],
+        }
+        mock_skill._norm_name = lambda name: name.strip().lower()
+        mock_skill._skills = {"plan_task": MagicMock()}
+        mock_skill._tools_by_skill = {"plan_task": {"manage_todo"}}
+        mock_skill.filtered.return_value = mock_skill
+        mock_skill.get_all_tool_schemas.return_value = [
+            {"function": {"name": "manage_todo"}},
+        ]
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 0  # child will be depth 1, max=2 → orchestrator
+
+        request = SpawnRequest(
+            parent_session_id="p1", task="t", skills=["coding_task"]
+        )
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        # coding_task tools + server tools for orchestrator
+        assert "bash" in names
+        assert "write_file" in names
+        assert "manage_todo" in names
+        # web_task tools NOT included
+        assert "web_search" in names  # all parent MCP tools included
+        # DENY_ALWAYS tools denied
+        assert "activate_skill" not in names
+        assert "notify_user" not in names
+
+    def test_skill_based_resolution_leaf_no_server_tools(self):
+        """When request.skills is set at leaf depth, exclude server tools."""
+        mock_svc = MagicMock()
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "bash"}},
+            {"function": {"name": "write_file"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill._session_snapshots = {
+            "p1": {
+                "skills": [
+                    {"name": "coding_task", "tools": ["bash", "write_file"]},
+                ]
+            }
+        }
+        mock_skill._build_snapshot_skill_map.return_value = {
+            "coding_task": ["bash", "write_file"],
+        }
+        mock_skill._norm_name = lambda name: name.strip().lower()
+        mock_skill._skills = {"plan_task": MagicMock()}
+        mock_skill._tools_by_skill = {"plan_task": {"manage_todo"}}
+        mock_skill.filtered.return_value = mock_skill
+        mock_skill.get_all_tool_schemas.return_value = []
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 1  # child will be depth 2, max=2 → leaf
+
+        request = SpawnRequest(
+            parent_session_id="p1", task="t", skills=["coding_task"]
+        )
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        # coding_task tools only
+        assert "bash" in names
+        assert "write_file" in names
+        # No server tools for leaf
+        assert "manage_todo" not in names
+        assert "sessions_spawn" not in names
+        assert "sessions_spawn_status" not in names
+
+    def test_skill_based_resolution_includes_all_mcp_tools(self):
+        """Skills-based resolution includes ALL parent MCP tools, not just snapshot ones."""
+        mock_svc = MagicMock()
+        # Parent has 3 MCP tools; snapshot only references mcp_web__search
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "mcp_web__search"}},
+            {"function": {"name": "mcp_web__fetch"}},
+            {"function": {"name": "mcp_filesystem__bash"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill._session_snapshots = {
+            "p1": {
+                "skills": [
+                    {
+                        "name": "web_search_task",
+                        "tools": ["mcp_web__search", "web_fetch", "read"],
+                    },
+                ]
+            }
+        }
+        mock_skill._build_snapshot_skill_map.return_value = {
+            "web_search_task": ["mcp_web__search", "web_fetch", "read"],
+        }
+        mock_skill._norm_name = lambda name: name.strip().lower()
+        mock_skill._skills = {"plan_task": MagicMock()}
+        mock_skill._tools_by_skill = {"plan_task": {"manage_todo"}}
+        mock_skill.filtered.return_value = mock_skill
+        mock_skill.get_all_tool_schemas.return_value = [
+            {"function": {"name": "manage_todo"}},
+        ]
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 0  # orchestrator depth
+
+        request = SpawnRequest(
+            parent_session_id="p1", task="t", skills=["web_search_task"]
+        )
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        # All 3 parent MCP tools must be included
+        assert "mcp_web__search" in names
+        assert "mcp_web__fetch" in names  # was missing before the fix
+        assert "mcp_filesystem__bash" in names
+
+    def test_skill_based_resolution_leaf_includes_all_mcp_tools(self):
+        """At leaf depth, MCP tools are still included but DENY_LEAF server tools are excluded."""
+        mock_svc = MagicMock()
+        mock_svc.mcp_tool_controller.get_tool_schemas.return_value = [
+            {"function": {"name": "mcp_web__search"}},
+            {"function": {"name": "mcp_web__fetch"}},
+        ]
+        mock_skill = MagicMock()
+        mock_skill._session_snapshots = {
+            "p1": {
+                "skills": [
+                    {
+                        "name": "web_search_task",
+                        "tools": ["mcp_web__search"],
+                    },
+                ]
+            }
+        }
+        mock_skill._build_snapshot_skill_map.return_value = {
+            "web_search_task": ["mcp_web__search"],
+        }
+        mock_skill._norm_name = lambda name: name.strip().lower()
+        mock_skill._skills = {"plan_task": MagicMock()}
+        mock_skill._tools_by_skill = {"plan_task": {"manage_todo"}}
+        mock_skill.filtered.return_value = mock_skill
+        mock_skill.get_all_tool_schemas.return_value = []
+
+        self._set_ctx(mock_svc, MagicMock(), mock_skill)
+        _session_depth["p1"] = 1  # child will be depth 2, max=2 → leaf
+
+        request = SpawnRequest(
+            parent_session_id="p1", task="t", skills=["web_search_task"]
+        )
+        mcp_tools, sp, names = _resolve_child_tools(request)
+
+        # MCP tools included even at leaf depth
+        assert "mcp_web__search" in names
+        assert "mcp_web__fetch" in names
+        # DENY_LEAF server tools excluded
+        assert "manage_todo" not in names
+        assert "sessions_spawn" not in names

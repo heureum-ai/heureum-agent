@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as os from 'os'
 import * as path from 'path'
 import { WEB_DEFAULTS } from './configs.js'
+import { sanitizePathSegment } from './path-safety.js'
 import type { TaskContext } from './types.js'
 
 async function pathExists(targetPath: string): Promise<boolean> {
@@ -38,7 +39,10 @@ export class WebPipeline {
 
   constructor(ctx: WebTaskContext) {
     const base = resolveWebWorkDir(ctx.workDir)
-    this._taskDir = path.join(base, ctx.sessionId, ctx.taskType, ctx.taskId)
+    const sessionId = sanitizePathSegment(ctx.sessionId, { fallback: 'session' })
+    const taskType = sanitizePathSegment(ctx.taskType, { fallback: 'task' })
+    const taskId = sanitizePathSegment(ctx.taskId, { fallback: 'task' })
+    this._taskDir = path.join(base, sessionId, taskType, taskId)
   }
 
   get taskDir(): string {

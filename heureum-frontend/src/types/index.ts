@@ -126,6 +126,7 @@ export interface TodoTask {
 
 export interface TodoState {
   team: string;
+  phase?: string;
   tasks: TodoTask[];
 }
 
@@ -218,6 +219,7 @@ export interface ChatRequest {
   messages: Message[];
   session_id?: string;
   extraInput?: InputItem[];
+  previous_response_id?: string;
 }
 
 export interface ChatResponse {

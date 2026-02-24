@@ -43,7 +43,7 @@ MANAGE_TODO_TOOL_SCHEMA = {
             "properties": {
                 "action": {
                     "type": "string",
-                    "enum": ["create", "update_task", "add_tasks"],
+                    "enum": ["create", "update_task", "add_tasks", "thinking_checkpoint"],
                     "description": "Action to perform",
                 },
                 "goal": {
@@ -90,6 +90,15 @@ MANAGE_TODO_TOOL_SCHEMA = {
                 "result": {
                     "type": "string",
                     "description": "Brief result description for completed/failed tasks",
+                },
+                "phase": {
+                    "type": "string",
+                    "enum": ["pre_plan", "post_plan"],
+                    "description": "Checkpoint phase (required when action='thinking_checkpoint')",
+                },
+                "note": {
+                    "type": "string",
+                    "description": "Reflection note for the checkpoint",
                 },
             },
             "required": ["action"],
@@ -178,6 +187,7 @@ class SpawnRequest:
     parent_session_id: str
     task: str
     tools: Optional[List[str]] = None
+    skills: Optional[List[str]] = None  # PSA skill names inherited from parent
     cleanup: str = "delete"  # "keep" or "delete"
     skills_prompt: Optional[str] = None
 
@@ -455,6 +465,8 @@ class SessionPlan:
 
     goal: str
     tasks: Dict[str, PlanTask] = field(default_factory=dict)
+    phase: str = "awaiting_pre_thinking"
+    # phases: awaiting_pre_thinking → executing → ready_for_final → finalized
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
 
@@ -487,18 +499,22 @@ class SessionsSpawnSkill:
     def __init__(self) -> None:
         self._create_subagent_task_fn: Any = None
         self._get_skills_prompt: Any = None
+        self._skill_controller: Any = None
 
     def set_dependencies(
         self,
         *,
         create_subagent_task_fn: Any = None,
         get_skills_prompt: Any = None,
+        skill_controller: Any = None,
     ) -> None:
         """Inject runtime dependencies (called by PlanSkill.on_init)."""
         if create_subagent_task_fn is not None:
             self._create_subagent_task_fn = create_subagent_task_fn
         if get_skills_prompt is not None:
             self._get_skills_prompt = get_skills_prompt
+        if skill_controller is not None:
+            self._skill_controller = skill_controller
 
     def has_unfinished_steps(self, session_id: str) -> bool:
         try:
@@ -546,6 +562,16 @@ class SessionsSpawnSkill:
             return await self._status(args, session_id)
         return json.dumps({"error": f"Unknown tool: {name}"})
 
+    def _get_parent_skills(self, session_id: str) -> Optional[List[str]]:
+        """Resolve active PSA skill names from the parent session."""
+        if not self._skill_controller:
+            return None
+        try:
+            names = self._skill_controller.get_active_skill_names(session_id)
+            return list(names) if names else None
+        except Exception:
+            return None
+
     async def _spawn(self, args: Dict[str, Any], session_id: str) -> str:
         try:
             task = (args.get("task") or "").strip()
@@ -559,10 +585,13 @@ class SessionsSpawnSkill:
                 except Exception:
                     pass
 
+            parent_skills = self._get_parent_skills(session_id)
+
             request = SpawnRequest(
                 parent_session_id=session_id,
                 task=task,
                 tools=args.get("tools"),
+                skills=parent_skills,
                 cleanup=args.get("cleanup", "delete"),
                 skills_prompt=parent_skills_prompt,
             )
@@ -635,6 +664,7 @@ class PlanSkill:
         self._session_history: Dict[str, List[SessionPlan]] = {}
         self._create_subagent_task_fn: Any = None
         self._get_skills_prompt: Any = None
+        self._skill_controller: Any = None
         self._spawn_skill = SessionsSpawnSkill()
 
     async def on_init(self, **kwargs: Any) -> None:
@@ -644,6 +674,9 @@ class PlanSkill:
         get_skills_prompt = kwargs.get("get_skills_prompt")
         if get_skills_prompt is not None:
             self._get_skills_prompt = get_skills_prompt
+        skill_controller = kwargs.get("skill_controller")
+        if skill_controller is not None:
+            self._skill_controller = skill_controller
         # Inject config (max_spawn_depth, max_children, etc.)
         subagent_config = kwargs.get("subagent_config")
         if subagent_config:
@@ -652,6 +685,7 @@ class PlanSkill:
         self._spawn_skill.set_dependencies(
             create_subagent_task_fn=self._create_subagent_task_fn,
             get_skills_prompt=self._get_skills_prompt,
+            skill_controller=self._skill_controller,
         )
 
     async def execute(self, name: str, arguments: Dict[str, Any], session_id: str) -> str:
@@ -678,8 +712,37 @@ class PlanSkill:
                 session_id,
                 arguments.get("tasks", []),
             )
+        elif action == "thinking_checkpoint":
+            return await self._thinking_checkpoint(
+                session_id,
+                arguments.get("phase", ""),
+                arguments.get("note", ""),
+            )
         else:
             return f"Unknown action: {action}"
+
+    # ------------------------------------------------------------------
+    # Thinking checkpoint
+    # ------------------------------------------------------------------
+
+    async def _thinking_checkpoint(self, session_id: str, phase: str, note: str) -> str:
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return "Error: no active plan"
+        if phase == "pre_plan":
+            if plan.phase != "awaiting_pre_thinking":
+                return f"Error: pre checkpoint not expected in phase '{plan.phase}'"
+            plan.phase = "executing"
+            plan.updated_at = time.time()
+            await self._spawn_ready_tasks(session_id, plan)
+            return self._format_state(plan)
+        elif phase == "post_plan":
+            if plan.phase != "ready_for_final":
+                return f"Error: post checkpoint not expected in phase '{plan.phase}'"
+            plan.phase = "finalized"
+            plan.updated_at = time.time()
+            return self._format_state(plan)
+        return f"Error: unknown phase '{phase}'"
 
     # ------------------------------------------------------------------
     # Plan creation
@@ -756,17 +819,27 @@ class PlanSkill:
         plan = SessionPlan(goal=goal, tasks=tasks)
         self._session_plans[session_id] = plan
 
-        # Spawn ready tasks
-        await self._spawn_ready_tasks(session_id, plan)
-
+        # Phase = awaiting_pre_thinking — spawn deferred until pre checkpoint
         return self._format_state(plan)
 
     # ------------------------------------------------------------------
     # Task spawning
     # ------------------------------------------------------------------
 
+    def _get_parent_skills(self, session_id: str) -> Optional[List[str]]:
+        """Resolve active PSA skill names from the parent session."""
+        if not self._skill_controller:
+            return None
+        try:
+            names = self._skill_controller.get_active_skill_names(session_id)
+            return list(names) if names else None
+        except Exception:
+            return None
+
     async def _spawn_ready_tasks(self, session_id: str, plan: SessionPlan) -> None:
         """Spawn sub-agents for all ready (pending, deps satisfied) tasks."""
+        if plan.phase == "awaiting_pre_thinking":
+            return  # pre checkpoint 전 spawn 금지
         ready = plan.get_ready_tasks()
         if not ready:
             return
@@ -777,6 +850,8 @@ class PlanSkill:
                 skills_prompt = self._get_skills_prompt()
             except Exception:
                 pass
+
+        parent_skills = self._get_parent_skills(session_id)
 
         max_children = _config["max_children"]
         active_count = _registry.count_active(session_id)
@@ -810,6 +885,7 @@ class PlanSkill:
                     SpawnRequest(
                         parent_session_id=session_id,
                         task=instruction,
+                        skills=parent_skills,
                         skills_prompt=skills_prompt,
                     ),
                     self._create_subagent_task_fn,
@@ -884,15 +960,22 @@ class PlanSkill:
             # 2. Sync statuses from registry
             self._sync_task_statuses(session_id, plan)
 
-            # 3. Check for newly ready tasks
+            # 3. Transition: all_terminal + executing → ready_for_final
+            if plan.all_terminal() and plan.phase == "executing":
+                plan.phase = "ready_for_final"
+                plan.updated_at = time.time()
+
+            # 4. Check for newly ready tasks
             ready = plan.get_ready_tasks()
             if not ready:
                 break
+            if plan.phase == "awaiting_pre_thinking":
+                break  # pre checkpoint 전 spawn 금지
 
-            # 4. Spawn new tasks
+            # 5. Spawn new tasks
             await self._spawn_ready_tasks(session_id, plan)
 
-            # 5. Loop to wait for new sub-agents
+            # 6. Loop to wait for new sub-agents
 
     # ------------------------------------------------------------------
     # Manual task update
@@ -919,6 +1002,7 @@ class PlanSkill:
 
         # Cascade: promote blocked tasks and spawn newly ready ones
         self._sync_task_statuses(session_id, plan)
+        self._recalculate_phase(plan)
         await self._spawn_ready_tasks(session_id, plan)
 
         return self._format_state(plan)
@@ -963,8 +1047,27 @@ class PlanSkill:
             plan.tasks[tid] = task
 
         plan.updated_at = time.time()
+        self._recalculate_phase(plan)
         await self._spawn_ready_tasks(session_id, plan)
         return self._format_state(plan)
+
+    # ------------------------------------------------------------------
+    # Phase recalculation
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _recalculate_phase(plan: SessionPlan) -> None:
+        """Recalculate phase after task mutations (update/add).
+
+        Checkpoint transitions (awaiting_pre_thinking, finalized) require
+        explicit thinking_checkpoint action — never auto-transition into or out of them.
+        """
+        if plan.phase in ("awaiting_pre_thinking", "finalized"):
+            return
+        if plan.all_terminal():
+            plan.phase = "ready_for_final"
+        else:
+            plan.phase = "executing"
 
     # ------------------------------------------------------------------
     # State accessors
@@ -986,10 +1089,12 @@ class PlanSkill:
         plan = self._session_plans.get(session_id)
         if not plan:
             return False
-        return plan.all_terminal()
+        return plan.phase == "finalized"
 
     def has_unfinished_steps(self, session_id: str) -> bool:
         plan = self._session_plans.get(session_id)
+        if plan and plan.phase != "finalized":
+            return True
         if plan and any(
             t.status in ("in_progress", "pending", "blocked") for t in plan.tasks.values()
         ):
@@ -1004,6 +1109,18 @@ class PlanSkill:
         plan = self._session_plans.get(session_id)
         if not plan:
             return None
+
+        # Phase-specific checkpoint guidance (takes priority)
+        if plan.phase == "awaiting_pre_thinking":
+            return (
+                "Call manage_todo(action='thinking_checkpoint', phase='pre_plan', "
+                "note='<your review>') to begin execution."
+            )
+        if plan.phase == "ready_for_final":
+            return (
+                "All tasks completed. Call manage_todo(action='thinking_checkpoint', "
+                "phase='post_plan', note='<your verification>') before final summary."
+            )
 
         in_progress = []
         pending = []
@@ -1068,6 +1185,9 @@ class PlanSkill:
     async def finalize_abandoned_steps(self, session_id: str) -> None:
         plan = self._session_plans.get(session_id)
         if not plan:
+            return
+        # Reject abandon during checkpoint waits
+        if plan.phase in ("awaiting_pre_thinking", "ready_for_final"):
             return
         changed = False
         child_sids_to_cancel: list[str] = []
@@ -1173,17 +1293,32 @@ class PlanSkill:
             lines.extend(failed_lines)
             lines.append("</failed_tasks>")
 
-        # Action directive
-        unfinished = [
-            t for t in plan.tasks.values() if t.status in ("pending", "in_progress", "blocked")
-        ]
-        if not unfinished:
-            lines.append("\nAll tasks completed. Provide a final summary of all results.")
-        else:
+        # Phase-based action directive
+        if plan.phase == "awaiting_pre_thinking":
             lines.append(
-                f"\n{len(unfinished)} task(s) running via sub-agents. "
-                "Wait for them to complete, then synthesize results into a final answer."
+                "\nPlan created but NOT yet executing. "
+                "Review your plan, then call manage_todo(action='thinking_checkpoint', "
+                "phase='pre_plan', note='<your review>') to approve and begin execution."
             )
+        elif plan.phase == "executing":
+            unfinished = [
+                t for t in plan.tasks.values() if t.status in ("pending", "in_progress", "blocked")
+            ]
+            if unfinished:
+                lines.append(
+                    f"\n{len(unfinished)} task(s) running via sub-agents. "
+                    "Wait for them to complete, then synthesize results into a final answer."
+                )
+            else:
+                lines.append("\nAll tasks completed. Awaiting phase transition.")
+        elif plan.phase == "ready_for_final":
+            lines.append(
+                "\nAll tasks completed. Call manage_todo(action='thinking_checkpoint', "
+                "phase='post_plan', note='<your verification>') to verify results "
+                "before providing the final summary."
+            )
+        elif plan.phase == "finalized":
+            lines.append("\nPlan finalized. Provide a final summary of all results.")
 
         lines.append("</current_plan>")
         parts.append("\n".join(lines))
@@ -1250,6 +1385,7 @@ class PlanSkill:
         completed = sum(1 for t in plan.tasks.values() if t.status == "completed")
         return json.dumps({
             "goal": plan.goal,
+            "phase": plan.phase,
             "tasks": [
                 {
                     "id": t.id,

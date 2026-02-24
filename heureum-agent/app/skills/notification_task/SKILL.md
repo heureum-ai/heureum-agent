@@ -1,9 +1,9 @@
 ---
 name: notification_task
 description: Push notifications to user devices
-server_tools: notify_user
-client_tools:
+tools: notify_user
 depends_on:
+subagent_access: never
 ---
 You have a `notify_user` tool to send push notifications directly to the user's devices.
 

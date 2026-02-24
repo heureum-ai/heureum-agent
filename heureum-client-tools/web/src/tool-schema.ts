@@ -158,7 +158,7 @@ const WEB_FETCH: ToolDefinition = {
     type: 'object',
     properties: {
       url: { type: 'string', description: 'The URL to fetch (must include http:// or https://)' },
-      max_length: { type: 'integer', description: 'Maximum content length in characters. Defaults to 20000.' },
+      max_length: { type: 'integer', description: 'Maximum content length in characters. Defaults to 5000.' },
       start_index: { type: 'integer', description: 'Character offset to start from (for pagination). Defaults to 0.' },
       extract_mode: {
         type: 'string',

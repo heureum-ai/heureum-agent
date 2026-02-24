@@ -83,6 +83,14 @@ export default function TodoProgress({ plan, collapsed = false }: TodoProgressPr
         <ListTree size={15} className="tp-plan-icon" />
         <span className="tp-label">Plan</span>
         <span className="tp-plan-goal">({plan.team})</span>
+        {plan.phase && plan.phase !== 'finalized' && (
+          <span className={`tp-phase tp-phase-${plan.phase}`}>
+            {plan.phase === 'awaiting_pre_thinking' ? 'reviewing'
+              : plan.phase === 'executing' ? 'executing'
+              : plan.phase === 'ready_for_final' ? 'verifying'
+              : plan.phase}
+          </span>
+        )}
         {collapsed && (
           <ChevronRight size={13} className={`tp-chevron-icon ${!isCollapsed ? 'expanded' : ''}`} />
         )}

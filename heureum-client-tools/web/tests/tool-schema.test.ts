@@ -133,6 +133,19 @@ describe('buildSnippet', () => {
     expect(result).toContain(`[Truncated. Use read(path="${outputPath}") for full content.]`)
   })
 
+  it('escapes backslashes in read hint path', () => {
+    const content = 'word '.repeat(1000)
+    const parsed = {
+      title: 'Windows',
+      url: 'https://x.com',
+      status: 200,
+      total_length: 5000,
+      text: content,
+    }
+    const result = buildSnippet(parsed, 'C:\\temp\\fetch_example.md')
+    expect(result).toContain('read(path="C:\\\\temp\\\\fetch_example.md")')
+  })
+
   it('strips security wrapper before building snippet', () => {
     const inner = 'Actual page content here'
     const wrapped = `${BOUNDARY_START}\nSource: Web Fetch\n---\n${inner}\n${BOUNDARY_END}`
@@ -208,6 +221,70 @@ describe('handleWebTool', () => {
       const mdContent = fs.readFileSync(path.join(sessionDir, mdFiles[0]), 'utf-8')
       expect(mdContent.length).toBeGreaterThan(0)
       expect(() => JSON.parse(mdContent)).toThrow() // not JSON
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('sanitizes IPv6 hostnames for cross-platform filenames', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-test-'))
+    try {
+      const result = await handleWebTool(FETCH_TOOL, {
+        url: 'http://[::1]/',
+        working_directory: tmpDir,
+        session_id: 'sid',
+      })
+      expect(result.success).toBe(true)
+
+      const sessionDir = path.join(tmpDir, 'tmp', 'sid')
+      const files = fs.readdirSync(sessionDir).sort()
+      expect(files.some((name) => /[:<>"\/\\|?*\[\]]/.test(name))).toBe(false)
+      expect(files.filter((name) => name.endsWith('.json')).length).toBe(1)
+      expect(files.filter((name) => name.endsWith('.md')).length).toBe(1)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('sanitizes unsafe session ids before creating directories', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-test-'))
+    try {
+      const result = await handleWebTool(FETCH_TOOL, {
+        url: 'http://localhost',
+        working_directory: tmpDir,
+        session_id: '..\\..\\CON',
+      })
+      expect(result.success).toBe(true)
+
+      const tmpRoot = path.join(tmpDir, 'tmp')
+      const dirs = fs
+        .readdirSync(tmpRoot, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name)
+      expect(dirs.length).toBe(1)
+      expect(dirs[0]).not.toContain('..')
+      expect(dirs[0]).toMatch(/^[\p{L}\p{N}._-]+$/u)
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true })
+    }
+  })
+
+  it('always writes a .md artifact even when extracted content is empty', async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'web-test-'))
+    try {
+      const result = await handleWebTool(FETCH_TOOL, {
+        url: 'http://localhost',
+        working_directory: tmpDir,
+        session_id: 'sid',
+      })
+      expect(result.success).toBe(true)
+
+      const sessionDir = path.join(tmpDir, 'tmp', 'sid')
+      const mdFiles = fs.readdirSync(sessionDir).filter((name) => name.endsWith('.md'))
+      expect(mdFiles.length).toBe(1)
+      const mdPath = path.join(sessionDir, mdFiles[0])
+      expect(fs.existsSync(mdPath)).toBe(true)
+      expect(typeof fs.readFileSync(mdPath, 'utf-8')).toBe('string')
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true })
     }

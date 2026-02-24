@@ -1,8 +1,7 @@
 ---
 name: web_search_task
 description: Web search and content retrieval workflow
-server_tools: mcp_web__search
-client_tools: web_fetch, read
+tools: mcp_web__search, web_fetch, read
 depends_on:
 ---
 You have `mcp_web__search`, `web_fetch` and `read` tools for web research.

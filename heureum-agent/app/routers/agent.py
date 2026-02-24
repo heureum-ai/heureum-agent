@@ -101,7 +101,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         client_tool_prompts,
         display_names,
         tool_meta_sets,
-    ) = resolve_tools(request)
+    ) = await resolve_tools(request, session_id=session_id, persist_controller=persist_controller)
 
     # Store tool metadata in ToolController for per-session access
     tool_controller.set_tool_meta(session_id, tool_meta_sets)
@@ -128,7 +128,7 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         else:
             (
                 approval_early,
-                _,
+                approval_remaining,
                 approval_tc_count,
                 approval_usage,
             ) = await handle_approval_continuation(
@@ -143,15 +143,19 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
             )
             if approval_early:
                 return approval_early
-            # Approval was handled; strip the consumed tool messages so
-            # prepare_messages_for_session doesn't try to process them again.
-            pending_call_ids = set()
-            for m in raw_messages:
-                if isinstance(m, ToolMessage):
-                    pending_call_ids.add(m.tool_call_id)
-            messages = [
-                m for m in messages if getattr(m, "tool_call_id", None) not in pending_call_ids
-            ]
+            # Strip consumed tool messages only when approval was actually
+            # matched (allow or deny).  handle_approval_continuation returns
+            # [] when matched, original messages when not matched (e.g.
+            # stale call_id).  Stripping unmatched messages would leave an
+            # empty context → Gemini "contents are required" error.
+            if not approval_remaining:
+                pending_call_ids = set()
+                for m in raw_messages:
+                    if isinstance(m, ToolMessage):
+                        pending_call_ids.add(m.tool_call_id)
+                messages = [
+                    m for m in messages if getattr(m, "tool_call_id", None) not in pending_call_ids
+                ]
 
     if not _defer_approval_to_stream:
         history = agent_service.get_history(session_id)

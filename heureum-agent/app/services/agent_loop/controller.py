@@ -221,7 +221,76 @@ class AgentLoopController:
                 )
                 return
 
+            # Register tools and skills to Platform DB
+            if self.persist_controller:
+                try:
+                    await self._register_to_platform(mcp_tools)
+                except Exception:
+                    logger.debug("Platform schema registration failed", exc_info=True)
+
             self._initialized = True
+
+    async def _register_to_platform(self, mcp_tools: list) -> None:
+        """Register MCP tools and skills to Platform DB on startup."""
+        # MCP tools
+        mcp_items = []
+        for schema in mcp_tools:
+            func = schema.get("function", {})
+            name = func.get("name")
+            if not name:
+                continue
+            meta = schema.get("meta") or {}
+            mcp_items.append({
+                "tool_name": name,
+                "description": func.get("description", ""),
+                "parameters_schema": func.get("parameters", {}),
+                "display_name": self.mcp_client.display_names.get(name, ""),
+                "source": "mcp",
+                "requires_approval": meta.get("requires_approval", False),
+            })
+
+        # Skill tool schemas
+        skill_tool_items = []
+        for skill_key, skill in self.skill_controller._skills.items():
+            for ts in getattr(skill, "tool_schemas", []):
+                func = ts.get("function", {})
+                tn = func.get("name")
+                if tn:
+                    skill_tool_items.append({
+                        "tool_name": tn,
+                        "description": func.get("description", ""),
+                        "parameters_schema": func.get("parameters", {}),
+                        "display_name": ts.get("display_name", ""),
+                        "source": "skill",
+                    })
+
+        all_tool_items = mcp_items + skill_tool_items
+        if all_tool_items:
+            await self.persist_controller.register_tool_schemas(all_tool_items)
+
+        # Skills
+        skill_items = []
+        for skill_key, skill in self.skill_controller._skills.items():
+            meta = self.skill_controller._skill_meta_by_key.get(skill_key)
+            if not meta:
+                continue
+            skill_items.append({
+                "skill_name": meta.name or skill_key,
+                "description": meta.description,
+                "tools": meta.tools,
+                "depends_on": meta.depends_on,
+                "subagent_access": meta.subagent_access,
+                "source": "server",
+                "body": meta.body,
+            })
+        if skill_items:
+            await self.persist_controller.register_skill_schemas(skill_items)
+
+        logger.info(
+            "Registered to Platform: %d tool(s), %d skill(s)",
+            len(all_tool_items),
+            len(skill_items),
+        )
 
     # -- cleanup -----------------------------------------------------------
 

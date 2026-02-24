@@ -57,10 +57,11 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
         history: [...state.history, ...historyAddition],
         plan: {
           team: todo.team,
+          phase: todo.phase,
           tasks: newTasks,
           activeTaskId:
             todo.tasks.find((t) => t.status === 'in_progress')?.id ?? null,
-          finalized: false,
+          finalized: todo.phase === 'finalized',
         },
       };
     });
@@ -126,15 +127,18 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
 
   finalize: () => {
     set((state) => {
-      if (!state.plan) return state;
-
-      const tasks = state.plan.tasks.map((t) =>
-        t.status === 'failed' ? t : { ...t, status: 'completed' as const },
-      );
-
-      return {
-        plan: { ...state.plan, tasks, activeTaskId: null, finalized: true },
-      };
+      if (!state.plan) return { plan: null };
+      const tasks = state.plan.tasks.map((t) => {
+        const hasRunning = t.toolCalls.some((tc) => tc.status === 'running');
+        if (!hasRunning) return t;
+        return {
+          ...t,
+          toolCalls: t.toolCalls.map((tc) =>
+            tc.status === 'running' ? { ...tc, status: 'completed' as const } : tc
+          ),
+        };
+      });
+      return { plan: { ...state.plan, tasks, finalized: true } };
     });
   },
 

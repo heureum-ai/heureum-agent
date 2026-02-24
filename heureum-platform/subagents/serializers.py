@@ -26,6 +26,10 @@ class SubagentRunCompleteSerializer(serializers.Serializer):
     status = serializers.ChoiceField(choices=["completed", "timeout", "failed"])
     result_summary = serializers.CharField(required=False, default="")
     completed_at = serializers.FloatField()
+    input_tokens = serializers.IntegerField(required=False, default=0)
+    output_tokens = serializers.IntegerField(required=False, default=0)
+    total_tokens = serializers.IntegerField(required=False, default=0)
+    cached_tokens = serializers.IntegerField(required=False, default=0)
 
 
 class SubagentRunReadSerializer(serializers.ModelSerializer):
@@ -40,6 +44,10 @@ class SubagentRunReadSerializer(serializers.ModelSerializer):
             "result_summary",
             "started_at",
             "completed_at",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "cached_tokens",
             "metadata",
             "created_at",
         ]

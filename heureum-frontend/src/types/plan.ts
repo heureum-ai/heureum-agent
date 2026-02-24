@@ -42,6 +42,7 @@ export interface PlanTask {
 
 export interface PlanState {
   team: string;
+  phase?: string;
   tasks: PlanTask[];
   activeTaskId: string | null;
   finalized: boolean;

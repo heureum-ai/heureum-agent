@@ -150,15 +150,17 @@ async def _run_subagent(
     """
     final_status = "failed"
     final_summary = ""
+    final_usage = None
     try:
-        result = await asyncio.wait_for(
+        summary, usage = await asyncio.wait_for(
             _execute_subagent_task(record, request, registry),
             timeout=settings.SUBAGENT_TIMEOUT_SECONDS,
         )
         final_status = "completed"
-        final_summary = result
-        registry.mark_completed(record.child_session_id, "completed", result)
-        await _announce_completion(record, result)
+        final_summary = summary
+        final_usage = usage
+        registry.mark_completed(record.child_session_id, "completed", summary)
+        await _announce_completion(record, summary)
     except asyncio.TimeoutError:
         logger.warning("Sub-agent %s timed out", record.child_session_id)
         final_status = "timeout"
@@ -191,7 +193,10 @@ async def _run_subagent(
         try:
             pc = _get_context().persist_controller
             if pc:
-                await pc.subagent_run_complete(record, final_status, final_summary)
+                usage_dict = final_usage.model_dump() if final_usage else None
+                await pc.subagent_run_complete(
+                    record, final_status, final_summary, usage=usage_dict
+                )
         except Exception:
             pass
 
@@ -212,12 +217,15 @@ def _build_subagent_instructions(task: str, tool_names: List[str], can_spawn: bo
     ]
     if tool_names:
         lines.append(f"\n## Available Tools\n{', '.join(tool_names)}")
-    lines.append(
-        "\n## Workflow\n"
-        '1. First, call manage_todo(action="create") to break your task into steps.\n'
-        "2. Execute each step, updating status via manage_todo as you go.\n"
-        "3. After all steps are completed, provide a concise result summary."
-    )
+    if can_spawn:
+        lines.append(
+            "\n## Workflow\n"
+            '1. First, call manage_todo(action="create") to break your task into steps.\n'
+            '2. Call manage_todo(action="thinking_checkpoint", phase="pre_plan", note="...") to review and begin execution.\n'
+            "3. Execute each step, updating status via manage_todo as you go.\n"
+            '4. After all steps complete, call manage_todo(action="thinking_checkpoint", phase="post_plan", note="...") to verify.\n'
+            "5. Provide a concise result summary."
+        )
     constraint_lines = [
         "\n## Constraints",
         "- Complete the task autonomously without user interaction.",
@@ -234,9 +242,12 @@ def _resolve_child_tools(
 ) -> tuple:
     """Resolve MCP tools and skill_controller for the child agent.
 
-    Inherits from the global parent agent_service, optionally filtered
-    by request.tools whitelist.  Approval-required tools are always
-    excluded because sub-agents cannot perform interactive approval.
+    Uses a three-tier priority:
+      1. ``request.tools`` — explicit tool whitelist (backward compat)
+      2. ``request.skills`` — skill-based resolution from PSA snapshot
+      3. Fallback — all tools minus deny-list
+
+    Deny-list filtering (depth-based) is always applied.
 
     Returns:
         (mcp_tools, skill_controller, tool_names) — ready for AgentService init.
@@ -246,29 +257,61 @@ def _resolve_child_tools(
     parent_mcp_tools = ctx.agent_service.mcp_tool_controller.get_tool_schemas() or []
     child_skill_controller = ctx.skill_controller
 
-    # Approval-required tools cannot be used by sub-agents (no interactive approval)
-    approval_required = getattr(ctx.mcp_client, "_approval_required_tools", set())
+    # Resolve depth for deny-list
+    from app.skills.plan_task.service import get_subagent_depth, _config
 
+    depth = get_subagent_depth(request.parent_session_id) + 1
+    max_depth = _config["max_spawn_depth"]
+    denied = ctx.skill_controller.get_subagent_denied_tools(depth, max_depth)
+
+    # Priority: explicit tools > skills > all
     if request.tools:
-        # Filter MCP tools to whitelist, excluding approval-required
-        allowed = set(request.tools)
+        allowed = set(request.tools) - denied
+    elif getattr(request, "skills", None):
+        # Resolve skill names → tool names from cached snapshot
+        snapshot = ctx.skill_controller._session_snapshots.get(request.parent_session_id)
+        skill_map = ctx.skill_controller._build_snapshot_skill_map(snapshot)
+        allowed: set[str] = set()
+        for skill_name in request.skills:
+            norm = ctx.skill_controller._norm_name(skill_name)
+            allowed.update(skill_map.get(norm, []))
+        # Only include server tools needed at this depth
+        # Orchestrator (depth < max): manage_todo + spawn tools
+        # Leaf (depth >= max): no server tools — client skill tools only
+        if depth < max_depth:
+            allowed.update(ctx.skill_controller.get_subagent_orchestrator_tools())
+        # MCP tools are server-side resources → always include all parent MCP tools
+        for t in parent_mcp_tools:
+            name = t.get("function", {}).get("name")
+            if name:
+                allowed.add(name)
+        allowed -= denied
+    else:
+        # Fallback: all tools minus deny-list
+        if denied:
+            all_names = {
+                t.get("function", {}).get("name") for t in parent_mcp_tools
+            }
+            if child_skill_controller:
+                for s in child_skill_controller.get_all_tool_schemas():
+                    all_names.add(s.get("function", {}).get("name"))
+            allowed = all_names - denied
+        else:
+            allowed = None  # no filtering
+
+    # Apply filtering
+    if allowed is not None:
         child_mcp_tools = [
             t
             for t in parent_mcp_tools
             if t.get("function", {}).get("name") in allowed
-            and t.get("function", {}).get("name") not in approval_required
         ]
-        # Wrap skill provider with allowlist filter
         if ctx.skill_controller:
             child_skill_controller = ctx.skill_controller.filtered(allowed)
     else:
-        child_mcp_tools = [
-            t
-            for t in parent_mcp_tools
-            if t.get("function", {}).get("name") not in approval_required
-        ]
+        child_mcp_tools = list(parent_mcp_tools)
 
-    # Collect tool names for the instructions
+    # Collect tool names for instructions
     tool_names = [t.get("function", {}).get("name", "?") for t in child_mcp_tools]
     if child_skill_controller:
         for schema in child_skill_controller.get_all_tool_schemas():
@@ -326,7 +369,7 @@ async def _execute_subagent_task(
     record: Any,
     request: Any,
     registry: Any,
-) -> str:
+) -> tuple[str, "Usage"]:
     """Run a simplified agent loop for the sub-agent.
 
     Creates a fresh AgentService instance with dynamically inherited tools
@@ -357,6 +400,11 @@ async def _execute_subagent_task(
     can_spawn = depth < _config["max_spawn_depth"]
     instructions = _build_subagent_instructions(request.task, tool_names, can_spawn=can_spawn)
 
+    # Usage accumulator for token tracking
+    from app.schemas.open_responses import Usage
+
+    total_usage = Usage.zero()
+
     # Pre-initialize child session to avoid rehydration network calls.
     child_service.message_controller.session_state_controller.set_session(session_id, [])
     messages = [HumanMessage(content=request.task)]
@@ -365,7 +413,7 @@ async def _execute_subagent_task(
     pc = ctx.persist_controller
     root_sid = _root_session_id(request.parent_session_id, registry)
     try:
-        prompt, _ = child_service._prepare_prompt_and_tools(instructions=instructions)
+        prompt, _ = child_service._prepare_prompt_and_tools(instructions=instructions, is_subagent=True)
     except Exception:
         prompt = ""
     if pc:
@@ -396,7 +444,12 @@ async def _execute_subagent_task(
                 session_id=session_id,
                 instructions=instructions,
                 skills_prompt=request.skills_prompt,
+                is_subagent=True,
             )
+
+            # Accumulate usage from each iteration
+            if result and result.usage:
+                total_usage = total_usage.add(result.usage)
 
             if result.type == LLMResultType.TEXT:
                 text = result.text or "Task completed."
@@ -445,7 +498,7 @@ async def _execute_subagent_task(
                     asyncio.create_task(
                         pc.subagent_message(record, seq=msg_seq, role="assistant", content=text)
                     )
-                return text
+                return text, total_usage
 
             # Tool calls — execute them in parallel
             if result.tool_calls:
@@ -546,8 +599,8 @@ async def _execute_subagent_task(
                 "subagent.max_iterations",
                 session_id=session_id,
             )
-            return max_iterations_message
-        return "Sub-agent reached maximum iterations."
+            return max_iterations_message, total_usage
+        return "Sub-agent reached maximum iterations.", total_usage
     finally:
         await child_service.aclose()
 

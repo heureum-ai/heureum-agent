@@ -1,6 +1,6 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
-import { useState, useRef, useCallback, type KeyboardEvent } from 'react';
+import { useState, useRef, useCallback, useEffect, type KeyboardEvent } from 'react';
 import { useChatStore } from '../store/chatStore';
 import { useFileStore } from '../store/fileStore';
 import {
@@ -65,6 +65,12 @@ export function useStreamingChat({
 
   const [activeToolCalls, setActiveToolCalls] = useState<ToolCallInfo[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const previousResponseIdRef = useRef<string | null>(null);
+
+  // Reset previous_response_id when switching sessions
+  useEffect(() => {
+    previousResponseIdRef.current = null;
+  }, [sessionId]);
 
   // Stable ref to handleStreamingSend for use in polling useEffect
   const handleStreamingSendRef = useRef<(allMessages: Message[], currentSessionId: string | null, extraInput?: InputItem[]) => Promise<void>>(async () => {});
@@ -76,10 +82,11 @@ export function useStreamingChat({
     setActiveToolCalls([]);
     clearStreamingText();
 
-    const req: ChatRequest = { messages: allMessages, session_id: currentSessionId || undefined, extraInput };
+    const req: ChatRequest = { messages: allMessages, session_id: currentSessionId || undefined, extraInput, previous_response_id: previousResponseIdRef.current || undefined };
     const collectedToolCalls: ToolCallInfo[] = [];
     const spawnCallIds = new Set<string>();
     let streamSessionId = currentSessionId || '';
+    let flushedStreamingText = false;
 
     try {
       const finalResponse = await chatAPI.sendMessageStream(req, (event: StreamEvent) => {
@@ -105,6 +112,7 @@ export function useStreamingChat({
             if (currentText) {
               addMessage({ role: 'assistant', content: currentText });
               clearStreamingText();
+              flushedStreamingText = true;
             }
 
             const tc = event.item;
@@ -168,10 +176,6 @@ export function useStreamingChat({
             updateOrAddTodo(event.todo);
             break;
           case 'response.output_text.abandoned': {
-            const abandonedText = useChatStore.getState().streamingText;
-            if (abandonedText && event.reason === 'unfinished_skill') {
-              addMessage({ role: 'assistant', content: abandonedText });
-            }
             clearStreamingText();
             break;
           }
@@ -179,6 +183,7 @@ export function useStreamingChat({
       });
 
       clearStreamingText();
+      previousResponseIdRef.current = finalResponse.id;
       const newSessionId = finalResponse.metadata?.session_id || currentSessionId || '';
       const isNewSession = !currentSessionId && !!newSessionId;
 
@@ -265,11 +270,13 @@ export function useStreamingChat({
         .filter((m) => m.role === 'assistant')
         .map(extractTextFromItem)
         .join('');
-      addMessage({
-        role: 'assistant',
-        content: assistantOutput,
-        cost: finalResponse.usage?.total_cost,
-      });
+      if (assistantOutput && !flushedStreamingText) {
+        addMessage({
+          role: 'assistant',
+          content: assistantOutput,
+          cost: finalResponse.usage?.total_cost,
+        });
+      }
 
       // Finalize plan: mark non-failed tasks as completed
       finalizePlan();
@@ -536,6 +543,7 @@ export function useStreamingChat({
     const content = input.trim();
     setInput('');
     if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    if (!sessionId) previousResponseIdRef.current = null;
     const userMessage: Message = { role: 'user', content };
     addMessage(userMessage);
     handleStreamingSend([...messages, userMessage], sessionId);

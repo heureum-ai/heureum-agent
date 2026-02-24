@@ -6,6 +6,11 @@ URL configuration for heureum_platform project.
 
 from chat_messages.internal_views import (
     complete_response as internal_complete_response,
+    get_skill_body as internal_get_skill_body,
+    lookup_skill_schemas as internal_lookup_skill_schemas,
+    lookup_tool_schemas as internal_lookup_tool_schemas,
+    register_skill_schemas as internal_register_skill_schemas,
+    register_tool_schemas as internal_register_tool_schemas,
     save_message as internal_save_message,
     save_tool_history as internal_save_tool_history,
 )
@@ -60,4 +65,10 @@ urlpatterns = [
         name="internal_complete_response",
     ),
     path("api/v1/messages/internal/tool-history/", internal_save_tool_history, name="internal_save_tool_history"),
+    # Tool & Skill Schema Registry (agent → platform)
+    path("api/v1/messages/internal/tools/register/", internal_register_tool_schemas, name="internal_register_tool_schemas"),
+    path("api/v1/messages/internal/tools/lookup/", internal_lookup_tool_schemas, name="internal_lookup_tool_schemas"),
+    path("api/v1/messages/internal/skills/register/", internal_register_skill_schemas, name="internal_register_skill_schemas"),
+    path("api/v1/messages/internal/skills/lookup/", internal_lookup_skill_schemas, name="internal_lookup_skill_schemas"),
+    path("api/v1/messages/internal/skills/<str:skill_name>/", internal_get_skill_body, name="internal_get_skill_body"),
 ]

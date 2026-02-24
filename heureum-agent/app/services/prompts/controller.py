@@ -33,6 +33,8 @@ class PromptController:
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
+        active_tool_names: Optional[Set[str]] = None,
+        is_subagent: bool = False,
     ) -> Tuple[str, list]:
         """Build system prompt and resolve tool schemas together.
 
@@ -57,7 +59,6 @@ class PromptController:
         server_tool_prompts = (
             (
                 self.skill_provider.get_all_guide_prompts(
-                    client_tool_names=client_tool_names,
                     skills_snapshot=skills_snapshot,
                 )
                 if self.skill_provider and use_server_guides
@@ -67,7 +68,6 @@ class PromptController:
         server_tool_schemas = (
             (
                 self.skill_provider.get_all_tool_schemas(
-                    client_tool_names=client_tool_names,
                     skills_snapshot=skills_snapshot,
                 )
                 if self.skill_provider
@@ -81,6 +81,7 @@ class PromptController:
             instructions=instructions,
             state_prompts=state_prompts,
             skills_prompt=effective_skills_prompt,
+            is_subagent=is_subagent,
         )
 
         tools: list = []
@@ -97,14 +98,18 @@ class PromptController:
             if name and name not in seen_names:
                 seen_names.add(name)
                 tools.append(t)
-        # MCP-discovered tools
+        # MCP-discovered tools — apply active skill filter
         for t in self.mcp_tool_controller.get_tool_schemas():
             name = t.get("function", {}).get("name")
             if name and name not in seen_names:
+                if active_tool_names is not None and name not in active_tool_names:
+                    continue
                 seen_names.add(name)
                 tools.append(t)
 
         tools = self._normalize_tool_schemas(tools)
+        if not is_subagent:
+            tools = self._inject_display_name_param(tools)
 
         return prompt, tools
 
@@ -151,3 +156,33 @@ class PromptController:
             return obj
 
         return [_rewrite(t) for t in tools]
+
+    @staticmethod
+    def _inject_display_name_param(tools: list) -> list:
+        """Add a required display_name parameter to every tool schema.
+
+        Forces the LLM to generate a short PascalCase display name for each
+        tool call, so the UI always has a human-readable label.
+        """
+        for t in tools:
+            func = t.get("function", {})
+            params = func.get("parameters")
+            if not isinstance(params, dict):
+                continue
+            props = params.get("properties")
+            if not isinstance(props, dict):
+                continue
+            if "display_name" in props:
+                continue
+            props["display_name"] = {
+                "type": "string",
+                "description": (
+                    "A short PascalCase display label for this tool call "
+                    "(e.g. 'WebSearch', 'ManageTodo', 'ReadFile'). "
+                    "Derive it from the tool name and current task context."
+                ),
+            }
+            required = params.get("required")
+            if isinstance(required, list) and "display_name" not in required:
+                required.append("display_name")
+        return tools

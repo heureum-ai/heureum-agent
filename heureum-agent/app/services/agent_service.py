@@ -412,30 +412,90 @@ class AgentService:
             serialized.append(item)
         return serialized
 
-    def _log_pre_llm_history(
+    def _log_pre_llm(
         self,
         *,
         stage: str,
         session_id: str,
         lc_messages: list[BaseMessage],
+        new_message_count: int,
         tools: list,
-    ) -> None:
-        """Log message history right before each LLM invocation."""
+    ) -> float:
+        """Log summary before LLM invocation. Returns start time for latency calc."""
+        start = time.monotonic()
         try:
-            payload = self._serialize_lc_history_for_log(lc_messages)
-            logger.warning(
-                "LLM_PRECALL_HISTORY stage=%s session=%s tool_schema_count=%d message_count=%d payload=%s",
+            logger.info(
+                "LLM_REQUEST stage=%s session=%s history_len=%d new_msg_count=%d tool_count=%d",
                 stage,
                 session_id,
+                len(lc_messages) - new_message_count - 1,  # exclude system prompt + new
+                new_message_count,
                 len(tools),
-                len(lc_messages),
-                payload,
             )
+            if logger.isEnabledFor(logging.DEBUG):
+                # Only serialize the new messages (tail), not the full history
+                tail = lc_messages[-new_message_count:] if new_message_count > 0 else []
+                payload = self._serialize_lc_history_for_log(tail)
+                logger.debug(
+                    "LLM_REQUEST_DETAIL stage=%s session=%s new_messages=%s",
+                    stage,
+                    session_id,
+                    payload,
+                )
         except Exception:
-            logger.warning(
-                "LLM_PRECALL_HISTORY stage=%s session=%s failed to serialize",
+            logger.debug(
+                "LLM_REQUEST stage=%s session=%s failed to serialize",
                 stage,
                 session_id,
+                exc_info=True,
+            )
+        return start
+
+    def _log_post_llm(
+        self,
+        *,
+        stage: str,
+        session_id: str,
+        response: Any,
+        start_time: float,
+    ) -> None:
+        """Log LLM response summary after call completes."""
+        latency = time.monotonic() - start_time
+        try:
+            tool_calls = getattr(response, "tool_calls", None) or []
+            tool_names = [tc.get("name", "?") if isinstance(tc, dict) else "?" for tc in tool_calls]
+            usage = getattr(response, "usage_metadata", None)
+            usage_summary = {}
+            if isinstance(usage, dict):
+                usage_summary = {
+                    "in": usage.get("input_tokens", 0),
+                    "out": usage.get("output_tokens", 0),
+                    "total": usage.get("total_tokens", 0),
+                }
+            stop_reason = "tool_use" if tool_names else "end_turn"
+            logger.info(
+                "LLM_RESPONSE stage=%s session=%s latency=%.2fs stop=%s tokens=%s tool_calls=%s",
+                stage,
+                session_id,
+                latency,
+                stop_reason,
+                usage_summary or "-",
+                tool_names or "-",
+            )
+            if logger.isEnabledFor(logging.DEBUG):
+                preview = self._preview_text(getattr(response, "content", ""))
+                logger.debug(
+                    "LLM_RESPONSE_DETAIL stage=%s session=%s preview=%s",
+                    stage,
+                    session_id,
+                    preview,
+                )
+        except Exception:
+            logger.debug(
+                "LLM_RESPONSE stage=%s session=%s failed to serialize (latency=%.2fs)",
+                stage,
+                session_id,
+                latency,
                 exc_info=True,
             )
 
@@ -448,6 +508,8 @@ class AgentService:
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
+        active_tool_names: Optional[Set[str]] = None,
+        is_subagent: bool = False,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
@@ -467,6 +529,7 @@ class AgentService:
             skills_prompt (Optional[str]): Pre-built ``<available_skills>``
                 block from a client skills snapshot.
             skills_snapshot: Full snapshot payload for tool filtering.
+            active_tool_names: Progressive skill activation filter set.
 
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
@@ -479,6 +542,8 @@ class AgentService:
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
             skills_snapshot=skills_snapshot,
+            active_tool_names=active_tool_names,
+            is_subagent=is_subagent,
         )
 
     def _build_lc_messages(
@@ -715,6 +780,8 @@ class AgentService:
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
+        active_tool_names: Optional[Set[str]] = None,
+        is_subagent: bool = False,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -761,6 +828,8 @@ class AgentService:
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
             skills_snapshot=skills_snapshot,
+            active_tool_names=active_tool_names,
+            is_subagent=is_subagent,
         )
         lc_new_messages = list(new_messages)
         overflow_retries = 0
@@ -781,13 +850,16 @@ class AgentService:
             lc_messages.extend(lc_new_messages)
             lc_messages = self._normalize.strip_tool_call_narration(lc_messages)
             try:
-                self._log_pre_llm_history(
+                _t = self._log_pre_llm(
                     stage="primary",
                     session_id=session_id,
                     lc_messages=lc_messages,
+                    new_message_count=len(lc_new_messages),
                     tools=tools,
                 )
-                return await self._call_llm(lc_messages, tools)
+                result = await self._call_llm(lc_messages, tools)
+                self._log_post_llm(stage="primary", session_id=session_id, response=result, start_time=_t)
+                return result
             except Exception as e:
                 if LLMErrorClassifier.is_context_overflow(e):
                     (
@@ -828,13 +900,16 @@ class AgentService:
                         e,
                     )
                     try:
-                        self._log_pre_llm_history(
+                        _t = self._log_pre_llm(
                             stage="fallback_no_tools",
                             session_id=session_id,
                             lc_messages=lc_messages,
+                            new_message_count=len(lc_new_messages),
                             tools=[],
                         )
-                        return await self._call_llm(lc_messages, [])
+                        result = await self._call_llm(lc_messages, [])
+                        self._log_post_llm(stage="fallback_no_tools", session_id=session_id, response=result, start_time=_t)
+                        return result
                     except Exception as fallback_err:
                         logger.warning("No-tools fallback also failed: %s", fallback_err)
 
@@ -845,13 +920,16 @@ class AgentService:
                 if changed:
                     logger.warning("Retrying with tool messages stripped from history")
                     try:
-                        self._log_pre_llm_history(
-                            stage="fallback_stripped_tool_messages",
+                        _t = self._log_pre_llm(
+                            stage="fallback_stripped",
                             session_id=session_id,
                             lc_messages=clean,
+                            new_message_count=len(lc_new_messages),
                             tools=[],
                         )
-                        return await self._call_llm(clean, [])
+                        result = await self._call_llm(clean, [])
+                        self._log_post_llm(stage="fallback_stripped", session_id=session_id, response=result, start_time=_t)
+                        return result
                     except Exception as clean_err:
                         logger.warning("Clean-context fallback also failed: %s", clean_err)
 
@@ -1079,6 +1157,8 @@ class AgentService:
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
+        active_tool_names: Optional[Set[str]] = None,
+        is_subagent: bool = False,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1115,6 +1195,8 @@ class AgentService:
                 state_prompts=state_prompts,
                 skills_prompt=skills_prompt,
                 skills_snapshot=skills_snapshot,
+                active_tool_names=active_tool_names,
+                is_subagent=is_subagent,
             )
 
             normalized = self._normalize.normalize_llm_response(response)
@@ -1158,6 +1240,7 @@ class AgentService:
         state_prompts: Optional[List[str]] = None,
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
+        active_tool_names: Optional[Set[str]] = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1191,6 +1274,7 @@ class AgentService:
             state_prompts=state_prompts,
             skills_prompt=skills_prompt,
             skills_snapshot=skills_snapshot,
+            active_tool_names=active_tool_names,
         )
         lc_new = list(messages)
         overflow_retries = 0
@@ -1206,14 +1290,20 @@ class AgentService:
             lc_messages = self._normalize.strip_tool_call_narration(lc_messages)
 
             try:
-                self._log_pre_llm_history(
-                    stage="stream_primary",
+                _t = self._log_pre_llm(
+                    stage="stream",
                     session_id=session_id,
                     lc_messages=lc_messages,
+                    new_message_count=len(lc_new),
                     tools=tools,
                 )
                 async for chunk in self._call_llm_stream(lc_messages, tools):
                     yield chunk
+                logger.info(
+                    "LLM_RESPONSE stage=stream session=%s latency=%.2fs (stream_end)",
+                    session_id,
+                    time.monotonic() - _t,
+                )
                 return
             except Exception as e:
                 if LLMErrorClassifier.is_context_overflow(e):

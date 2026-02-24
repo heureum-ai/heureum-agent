@@ -1,9 +1,9 @@
 ---
 name: periodic_task
 description: Scheduled recurring task management
-server_tools: manage_periodic_task
-client_tools:
+tools: manage_periodic_task
 depends_on: web_search_task, notification_task
+subagent_access: never
 ---
 You have a `manage_periodic_task` tool for creating and managing scheduled recurring tasks.
 You also have a `notify_user` tool to send push notifications to the user's devices.

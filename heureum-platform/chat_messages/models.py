@@ -307,6 +307,73 @@ class ModelPricing(models.Model):
         return result
 
 
+class ToolSchema(models.Model):
+    """Global tool schema registry."""
+
+    tool_name = models.CharField(max_length=100, unique=True, db_index=True)
+    description = models.TextField(blank=True, default="")
+    parameters_schema = models.JSONField(default=dict, blank=True)
+
+    display_name = models.CharField(max_length=100, blank=True, default="")
+    guide = models.TextField(blank=True, default="")
+
+    # source × execution_target matrix:
+    #   mcp   + server → MCP server tool (e.g. mcp_web__search)
+    #   mcp   + client → client MCP tool
+    #   tool  + server → server standalone tool
+    #   tool  + client → client standalone tool (e.g. web_fetch, read)
+    #   skill + server → server skill tool (e.g. tool_approval, manage_todo)
+    #   skill + client → client skill tool
+    source = models.CharField(max_length=20, default="unknown")
+    execution_target = models.CharField(max_length=20, default="server")
+
+    # Tool classification
+    is_snapshot = models.BooleanField(default=False)
+    is_mutating = models.BooleanField(default=False)
+    is_read_only = models.BooleanField(default=False)
+    is_poll = models.BooleanField(default=False)
+    requires_approval = models.BooleanField(default=False)
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["tool_name"]
+
+    def __str__(self) -> str:
+        return f"{self.tool_name} ({self.source}/{self.execution_target})"
+
+    def to_openai_schema(self) -> dict:
+        """Reconstruct OpenAI-format tool schema for LLM binding."""
+        return {
+            "type": "function",
+            "function": {
+                "name": self.tool_name,
+                "description": self.description,
+                "parameters": self.parameters_schema,
+            },
+        }
+
+
+class SkillSchema(models.Model):
+    """Global skill registry. Stores skill metadata + body separately."""
+
+    skill_name = models.CharField(max_length=100, unique=True, db_index=True)
+    description = models.TextField(blank=True, default="")
+    tools = models.JSONField(default=list)
+    depends_on = models.JSONField(default=list)
+    subagent_access = models.CharField(max_length=20, default="always")
+    source = models.CharField(max_length=20, default="server")  # "server" or "client"
+    body = models.TextField(blank=True, default="")
+
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["skill_name"]
+
+    def __str__(self) -> str:
+        return f"{self.skill_name} ({self.source})"
+
+
 class SuggestedQuestion(models.Model):
     """Recommended questions shown on the new chat page."""
 

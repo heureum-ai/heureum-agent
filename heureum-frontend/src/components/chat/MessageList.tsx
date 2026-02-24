@@ -31,8 +31,10 @@ export default function MessageList({
   onScroll,
 }: MessageListProps) {
   const hasPlan = usePlanStore((state) => state.plan !== null || state.history.length > 0);
+  const hasActivePlan = usePlanStore((state) => state.plan !== null && !state.plan.finalized);
   const hasTodoMarker = messages.some((m) => m.todo);
   let todoRendered = false;
+  let pastTodo = false;
 
   const renderMessage = (msg: Message, i: number) => {
     if (msg.periodicRun) {
@@ -43,6 +45,7 @@ export default function MessageList({
       );
     }
     if (msg.todo) {
+      pastTodo = true;
       if (!hasPlan || todoRendered) return null;
       todoRendered = true;
       return (
@@ -53,7 +56,7 @@ export default function MessageList({
     }
     if (msg.subagentProgress) return null;
     if (msg.toolCall) {
-      if (hasPlan) return null;
+      if (hasActivePlan && pastTodo) return null;
       return (
         <div key={i} className="ac-msg-row ac-msg-tool">
           <ToolBlock toolCall={msg.toolCall} />
@@ -139,7 +142,7 @@ export default function MessageList({
           </div>
         )}
         {messages.map(renderMessage)}
-        {!hasPlan && activeToolCalls.map((tc, i) => (
+        {!hasActivePlan && activeToolCalls.map((tc, i) => (
           <div key={`active-tc-${i}`} className="ac-msg-row ac-msg-tool">
             <ToolBlock toolCall={tc} />
           </div>

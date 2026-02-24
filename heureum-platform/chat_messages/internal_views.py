@@ -20,7 +20,7 @@ from rest_framework.decorators import api_view, permission_classes, throttle_cla
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response as DRFResponse
 
-from chat_messages.models import Message, Response, Session
+from chat_messages.models import Message, Response, Session, SkillSchema, ToolSchema
 
 logger = logging.getLogger(__name__)
 
@@ -132,6 +132,11 @@ def complete_response(request, response_id):
 
     response_obj.save()
 
+    # Touch session updated_at (QuerySet.update bypasses auto_now)
+    Session.objects.filter(session_id=response_obj.session_id).update(
+        updated_at=timezone.now()
+    )
+
     return DRFResponse({"ok": True})
 
 
@@ -201,3 +206,145 @@ def save_tool_history(request):
         created_count += 1
 
     return DRFResponse({"ok": True, "created": created_count}, status=status.HTTP_201_CREATED)
+
+
+# ---------------------------------------------------------------------------
+# Tool / Skill Schema Registry
+# ---------------------------------------------------------------------------
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def register_tool_schemas(request):
+    """Bulk upsert tool schemas from agent.
+
+    Body: { "tools": [{ "tool_name", "description", "parameters_schema", "source", ... }] }
+    Platform sets execution_target="server" for all agent-registered tools.
+    """
+    items = request.data.get("tools", [])
+    count = 0
+    for item in items:
+        name = item.get("tool_name")
+        if not name:
+            continue
+        ToolSchema.objects.update_or_create(
+            tool_name=name,
+            defaults={
+                "description": item.get("description", ""),
+                "parameters_schema": item.get("parameters_schema", {}),
+                "display_name": item.get("display_name", ""),
+                "guide": item.get("guide", ""),
+                "source": item.get("source", "mcp"),
+                "execution_target": "server",
+                "requires_approval": item.get("requires_approval", False),
+            },
+        )
+        count += 1
+    return DRFResponse({"registered": count})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def lookup_tool_schemas(request):
+    """Fetch tool schemas by names.
+
+    Query: ?names=web_fetch,read
+    """
+    names = [n.strip() for n in request.query_params.get("names", "").split(",") if n.strip()]
+    if not names:
+        return DRFResponse({"tools": []})
+    schemas = ToolSchema.objects.filter(tool_name__in=names)
+    return DRFResponse({
+        "tools": [
+            {
+                "tool_name": s.tool_name,
+                "source": s.source,
+                "execution_target": s.execution_target,
+                "display_name": s.display_name,
+                "guide": s.guide,
+                "requires_approval": s.requires_approval,
+                "schema": s.to_openai_schema(),
+            }
+            for s in schemas
+        ]
+    })
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def register_skill_schemas(request):
+    """Bulk upsert skill schemas.
+
+    Body: { "skills": [{ "skill_name", "description", "tools", "depends_on",
+                          "subagent_access", "source", "body" }] }
+    """
+    items = request.data.get("skills", [])
+    count = 0
+    for item in items:
+        name = item.get("skill_name")
+        if not name:
+            continue
+        SkillSchema.objects.update_or_create(
+            skill_name=name,
+            defaults={
+                "description": item.get("description", ""),
+                "tools": item.get("tools", []),
+                "depends_on": item.get("depends_on", []),
+                "subagent_access": item.get("subagent_access", "always"),
+                "source": item.get("source", "server"),
+                "body": item.get("body", ""),
+            },
+        )
+        count += 1
+    return DRFResponse({"registered": count})
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def lookup_skill_schemas(request):
+    """Fetch skill metadata (without body).
+
+    Query: ?names=web_search_task,plan_task  (optional, omit for all)
+    """
+    names = request.query_params.get("names", "")
+    qs = SkillSchema.objects.all()
+    if names:
+        name_list = [n.strip() for n in names.split(",") if n.strip()]
+        qs = qs.filter(skill_name__in=name_list)
+    return DRFResponse({
+        "skills": [
+            {
+                "skill_name": s.skill_name,
+                "description": s.description,
+                "tools": s.tools,
+                "depends_on": s.depends_on,
+                "subagent_access": s.subagent_access,
+                "source": s.source,
+            }
+            for s in qs
+        ]
+    })
+
+
+@api_view(["GET"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def get_skill_body(request, skill_name):
+    """Fetch full skill including body (for activated skills)."""
+    try:
+        s = SkillSchema.objects.get(skill_name=skill_name)
+    except SkillSchema.DoesNotExist:
+        return DRFResponse({"error": "not found"}, status=status.HTTP_404_NOT_FOUND)
+    return DRFResponse({
+        "skill_name": s.skill_name,
+        "description": s.description,
+        "tools": s.tools,
+        "depends_on": s.depends_on,
+        "subagent_access": s.subagent_access,
+        "source": s.source,
+        "body": s.body,
+    })

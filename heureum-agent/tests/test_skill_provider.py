@@ -26,8 +26,7 @@ class TestParseSkillMd:
         assert meta.name == "test"
         assert meta.description == "A test skill"
         assert meta.body == "Body content here."
-        assert meta.server_tools == []
-        assert meta.client_tools == []
+        assert meta.tools == []
 
     def test_no_frontmatter(self, tmp_path):
         md = tmp_path / "SKILL.md"
@@ -35,8 +34,7 @@ class TestParseSkillMd:
         meta = parse_skill_md(str(md))
         assert meta.name == ""
         assert meta.body == "Just plain markdown."
-        assert meta.server_tools == []
-        assert meta.client_tools == []
+        assert meta.tools == []
 
     def test_empty_frontmatter(self, tmp_path):
         md = tmp_path / "SKILL.md"
@@ -45,26 +43,23 @@ class TestParseSkillMd:
         assert meta.name == ""
         assert meta.body == "Body only."
 
-    def test_server_and_client_tools_parsed(self, tmp_path):
+    def test_tools_parsed(self, tmp_path):
         md = tmp_path / "SKILL.md"
         md.write_text(
             "---\nname: test\ndescription: desc\n"
-            "server_tools: tool_a, tool_b\n"
-            "client_tools: web_search, web_fetch\n"
+            "tools: tool_a, tool_b, web_search, web_fetch\n"
             "---\nBody."
         )
         meta = parse_skill_md(str(md))
-        assert meta.server_tools == ["tool_a", "tool_b"]
-        assert meta.client_tools == ["web_search", "web_fetch"]
+        assert meta.tools == ["tool_a", "tool_b", "web_search", "web_fetch"]
 
-    def test_empty_client_tools(self, tmp_path):
+    def test_empty_tools(self, tmp_path):
         md = tmp_path / "SKILL.md"
         md.write_text(
-            "---\nname: test\ndescription: desc\nserver_tools: my_tool\nclient_tools:\n---\nBody."
+            "---\nname: test\ndescription: desc\ntools:\n---\nBody."
         )
         meta = parse_skill_md(str(md))
-        assert meta.server_tools == ["my_tool"]
-        assert meta.client_tools == []
+        assert meta.tools == []
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,6 @@ class SkillMeta:
     name: str
     description: str
     body: str
-    server_tools: List[str]
-    client_tools: List[str]
+    tools: List[str]
     depends_on: List[str]
+    subagent_access: str = "always"  # "always" | "orchestrator" | "never"

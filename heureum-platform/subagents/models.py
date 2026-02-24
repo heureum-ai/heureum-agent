@@ -13,6 +13,10 @@ class SubagentRun(models.Model):
     result_summary = models.TextField(blank=True)
     started_at = models.FloatField()
     completed_at = models.FloatField(null=True, blank=True)
+    input_tokens = models.IntegerField(default=0)
+    output_tokens = models.IntegerField(default=0)
+    total_tokens = models.IntegerField(default=0)
+    cached_tokens = models.IntegerField(default=0)
     metadata = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

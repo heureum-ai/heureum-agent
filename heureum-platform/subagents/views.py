@@ -1,4 +1,5 @@
 import logging
+import time
 
 from django.db import IntegrityError
 from rest_framework import status
@@ -81,7 +82,14 @@ def complete_run(request: Request, child_session_id: str) -> Response:
     run.status = data["status"]
     run.result_summary = data.get("result_summary", "")
     run.completed_at = data["completed_at"]
-    run.save(update_fields=["status", "result_summary", "completed_at"])
+    run.input_tokens = data.get("input_tokens", 0)
+    run.output_tokens = data.get("output_tokens", 0)
+    run.total_tokens = data.get("total_tokens", 0)
+    run.cached_tokens = data.get("cached_tokens", 0)
+    run.save(update_fields=[
+        "status", "result_summary", "completed_at",
+        "input_tokens", "output_tokens", "total_tokens", "cached_tokens",
+    ])
 
     return Response({"ok": True}, status=status.HTTP_200_OK)
 
@@ -122,3 +130,27 @@ def list_messages(request: Request, child_session_id: str) -> Response:
 
     serializer = SubagentMessageReadSerializer(run.messages.all(), many=True)
     return Response({"messages": serializer.data})
+
+
+@api_view(["POST"])
+@permission_classes([AllowAny])
+@throttle_classes([])
+def sweep_stale_runs(request: Request) -> Response:
+    """POST /api/v1/subagents/internal/runs/sweep/
+
+    Mark stale "running" records as "timeout".
+    Body: {"stale_seconds": 600}  (default 600 = 10 min)
+    """
+    stale_seconds = request.data.get("stale_seconds", 600)
+    cutoff = time.time() - stale_seconds
+
+    updated = SubagentRun.objects.filter(
+        status="running",
+        started_at__lt=cutoff,
+    ).update(
+        status="timeout",
+        result_summary="Swept as stale on agent startup",
+        completed_at=time.time(),
+    )
+
+    return Response({"ok": True, "swept_count": updated})

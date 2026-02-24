@@ -40,6 +40,11 @@ export { WEB_DEFAULTS, WEB_SETTINGS, type WebSettings } from './configs.js'
 export type { TaskContext, WebToolResult } from './types.js'
 export { WEB_WORKFLOW_PROMPT, buildWebWorkflowPrompt } from './prompt.js'
 export type { WebPromptOptions } from './prompt.js'
+export {
+  sanitizeFileToken,
+  sanitizePathSegment,
+  escapePathForReadHint,
+} from './path-safety.js'
 
 export {
   webInitTask,

@@ -21,7 +21,10 @@ class SkillController:
         self._skill_meta_by_key: Dict[str, SkillMeta] = {}
         self._skill_aliases: Dict[str, Set[str]] = {}
         self._alias_to_key: Dict[str, str] = {}
-        self._server_tools_by_skill: Dict[str, Set[str]] = {}
+        self._tools_by_skill: Dict[str, Set[str]] = {}
+        # Progressive Skill Activation state
+        self._active_skills: Dict[str, Set[str]] = {}  # session_id → active skill names
+        self._session_snapshots: Dict[str, Any] = {}  # session_id → cached snapshot
 
         for skill_key, skill in self._skills.items():
             meta = load_skill_meta(skill)
@@ -37,7 +40,25 @@ class SkillController:
             for alias in aliases:
                 self._alias_to_key.setdefault(alias, skill_key)
 
-            self._server_tools_by_skill[skill_key] = self._resolve_server_tools(skill, meta)
+            self._tools_by_skill[skill_key] = self._resolve_tools(skill, meta)
+
+    def get_subagent_denied_tools(self, depth: int, max_depth: int) -> Set[str]:
+        """Return tool names to deny at the given sub-agent depth."""
+        denied: Set[str] = set()
+        for skill_key, meta in self._skill_meta_by_key.items():
+            if meta.subagent_access == "never":
+                denied |= self._tools_by_skill.get(skill_key, set())
+            elif meta.subagent_access == "orchestrator" and depth >= max_depth:
+                denied |= self._tools_by_skill.get(skill_key, set())
+        return denied
+
+    def get_subagent_orchestrator_tools(self) -> Set[str]:
+        """Return tools available at orchestrator depth (subagent_access != 'never')."""
+        tools: Set[str] = set()
+        for skill_key, meta in self._skill_meta_by_key.items():
+            if meta.subagent_access != "never":
+                tools |= self._tools_by_skill.get(skill_key, set())
+        return tools
 
     def filtered(self, allowed_tools: Set[str]) -> "_FilteredSkillController":
         """Return a wrapper that restricts tools to *allowed_tools*."""
@@ -46,6 +67,7 @@ class SkillController:
     async def startup(self, **kwargs: Any) -> None:
         if not self._skills:
             return
+        kwargs["skill_controller"] = self
         coroutines = []
         names: List[str] = []
         for skill in self._skills.values():
@@ -73,8 +95,8 @@ class SkillController:
     def _norm_name(name: str) -> str:
         return (name or "").strip().lower()
 
-    def _resolve_server_tools(self, skill: Any, meta: SkillMeta) -> Set[str]:
-        names = {tool for tool in meta.server_tools if tool}
+    def _resolve_tools(self, skill: Any, meta: SkillMeta) -> Set[str]:
+        names = {tool for tool in meta.tools if tool}
         if names:
             return names
         fallback: Set[str] = set()
@@ -137,38 +159,17 @@ class SkillController:
             return True
         return bool(self._skill_aliases.get(skill_key, set()) & snapshot_skills)
 
-    def _client_tools_available(self, skill_key: str, client_tools: Optional[Set[str]]) -> bool:
-        meta = self._skill_meta_by_key.get(skill_key)
-        if not meta or not meta.client_tools:
-            return True
-        required = {tool for tool in meta.client_tools if tool}
-        if not required:
-            return True
-        # Treat missing/empty client tool lists as "unknown availability"
-        # so server skills remain usable in text-only or legacy clients.
-        if not client_tools:
-            return True
-        return required.issubset(client_tools)
-
     def resolve_active_skill_names(
         self,
         *,
-        client_tool_names: Optional[Set[str]] = None,
         skills_snapshot: Any = None,
     ) -> Set[str]:
         """Resolve active skill keys for the current request context."""
-        client_tools = (
-            None
-            if client_tool_names is None
-            else {tool for tool in client_tool_names if tool}
-        )
         snapshot_skills = self._resolve_snapshot_skills(skills_snapshot)
 
         active: Set[str] = set()
         for skill_key in self._skills.keys():
             if not self._skill_in_snapshot(skill_key, snapshot_skills):
-                continue
-            if not self._client_tools_available(skill_key, client_tools):
                 continue
             active.add(skill_key)
 
@@ -183,27 +184,33 @@ class SkillController:
                 dep_key = self._resolve_skill_key(dep)
                 if dep_key is None or dep_key in active:
                     continue
-                if not self._client_tools_available(dep_key, client_tools):
-                    continue
                 active.add(dep_key)
                 frontier.append(dep_key)
 
         return active
 
+    def get_missing_tool_names(
+        self, available_names: Set[str], skills_snapshot: Any = None
+    ) -> Set[str]:
+        """Return tool names needed by active skills but not currently available."""
+        active = self.resolve_active_skill_names(skills_snapshot=skills_snapshot)
+        needed: Set[str] = set()
+        for skill_key in active:
+            needed.update(self._tools_by_skill.get(skill_key, set()))
+        return needed - available_names
+
     def resolve_allowed_server_tools(
         self,
         *,
-        client_tool_names: Optional[Set[str]] = None,
         skills_snapshot: Any = None,
     ) -> Set[str]:
-        """Resolve server tool allowlist from active skills + optional snapshot."""
+        """Resolve tool allowlist from active skills + optional snapshot."""
         allowed: Set[str] = set()
         active = self.resolve_active_skill_names(
-            client_tool_names=client_tool_names,
             skills_snapshot=skills_snapshot,
         )
         for skill_key in active:
-            allowed.update(self._server_tools_by_skill.get(skill_key, set()))
+            allowed.update(self._tools_by_skill.get(skill_key, set()))
 
         snapshot_tools = self._resolve_snapshot_tools(skills_snapshot)
         if snapshot_tools:
@@ -214,14 +221,12 @@ class SkillController:
         self,
         *,
         allowed_tools: Optional[Set[str]] = None,
-        client_tool_names: Optional[Set[str]] = None,
         skills_snapshot: Any = None,
     ) -> List[Dict[str, Any]]:
         if allowed_tools is not None:
             allowed = set(allowed_tools)
-        elif client_tool_names is not None or skills_snapshot is not None:
+        elif skills_snapshot is not None:
             allowed = self.resolve_allowed_server_tools(
-                client_tool_names=client_tool_names,
                 skills_snapshot=skills_snapshot,
             )
         else:
@@ -242,15 +247,13 @@ class SkillController:
         self,
         *,
         allowed_tools: Optional[Set[str]] = None,
-        client_tool_names: Optional[Set[str]] = None,
         skills_snapshot: Any = None,
     ) -> Set[str]:
         if allowed_tools is not None:
             return set(self._tool_to_skill.keys()) & set(allowed_tools)
-        if client_tool_names is None and skills_snapshot is None:
+        if skills_snapshot is None:
             return set(self._tool_to_skill.keys())
         return self.resolve_allowed_server_tools(
-            client_tool_names=client_tool_names,
             skills_snapshot=skills_snapshot,
         )
 
@@ -258,17 +261,150 @@ class SkillController:
     def display_names(self) -> Dict[str, str]:
         return dict(self._display_names)
 
+    def enrich_snapshot(self, skills_snapshot: Any, session_id: Optional[str] = None) -> Any:
+        """Inject server-only skills into the client snapshot.
+
+        Server-side skills (e.g. plan_task) that the client doesn't know
+        about would otherwise be filtered out by the snapshot allowlist.
+        This ensures they are always present.
+
+        When *session_id* is provided, caches the snapshot for later use
+        by :meth:`activate_skills`.
+        """
+        if session_id and skills_snapshot:
+            self._session_snapshots[session_id] = skills_snapshot
+        if skills_snapshot is None:
+            return skills_snapshot
+
+        # Resolve which skill names the client already declared
+        snapshot_skills = self._resolve_snapshot_skills(skills_snapshot)
+        if snapshot_skills is None:
+            return skills_snapshot
+
+        # Find server-only skills not in the client snapshot
+        items_to_inject: list = []
+        for skill_key in self._skills:
+            aliases = self._skill_aliases.get(skill_key, set())
+            if aliases & snapshot_skills:
+                continue  # Client already knows this skill
+            server_tools = list(self._tools_by_skill.get(skill_key, set()))
+            if not server_tools:
+                continue
+            meta = self._skill_meta_by_key.get(skill_key)
+            items_to_inject.append({
+                "name": skill_key,
+                "description": meta.description if meta else "",
+                "location": "",
+                "tools": server_tools,
+            })
+
+        if not items_to_inject:
+            return skills_snapshot
+
+        # Append to the snapshot's skills list
+        if isinstance(skills_snapshot, dict):
+            existing = skills_snapshot.get("skills", [])
+            skills_snapshot["skills"] = list(existing) + items_to_inject
+        else:
+            existing = getattr(skills_snapshot, "skills", []) or []
+            from app.schemas.open_responses import SkillSnapshotItem
+            new_items = [SkillSnapshotItem(**item) for item in items_to_inject]
+            skills_snapshot.skills = list(existing) + new_items
+
+        return skills_snapshot
+
+    # -- Progressive Skill Activation ----------------------------------------
+
+    def _build_snapshot_skill_map(self, skills_snapshot: Any) -> Dict[str, List[str]]:
+        """Build ``{normalized_skill_name: [tool_names]}`` from snapshot."""
+        if not skills_snapshot:
+            return {}
+        items = (
+            getattr(skills_snapshot, "skills", None)
+            if not isinstance(skills_snapshot, dict)
+            else skills_snapshot.get("skills")
+        )
+        if not isinstance(items, list) or not items:
+            return {}
+        mapping: Dict[str, List[str]] = {}
+        for item in items:
+            if isinstance(item, dict):
+                name = item.get("name")
+                item_tools = item.get("tools")
+            else:
+                name = getattr(item, "name", None)
+                item_tools = getattr(item, "tools", None)
+            if name and item_tools:
+                mapping[self._norm_name(name)] = list(item_tools)
+        return mapping
+
+    def activate_skills(
+        self, session_id: str, skill_names: List[str]
+    ) -> Dict[str, List[str]]:
+        """Activate client skills for the session.
+
+        Validates *skill_names* against the cached snapshot.  Returns
+        ``{name: [tools]}`` for each successfully activated skill.
+        """
+        current = self._active_skills.setdefault(session_id, set(self._skills.keys()))
+        snapshot = self._session_snapshots.get(session_id)
+        snapshot_skill_map = self._build_snapshot_skill_map(snapshot)
+        activated: Dict[str, List[str]] = {}
+        for name in skill_names:
+            norm = self._norm_name(name)
+            if norm in snapshot_skill_map:
+                current.add(norm)
+                activated[name] = snapshot_skill_map[norm]
+        return activated
+
+    def get_active_skill_names(self, session_id: str) -> Set[str]:
+        """Return the set of activated client skill names for the session.
+
+        Excludes server skill keys (which are always active).
+        Returns empty set if no PSA state exists for this session.
+        """
+        active = self._active_skills.get(session_id)
+        if active is None:
+            return set()
+        # Exclude server skill keys — return only client skills
+        return active - set(self._skills.keys())
+
+    def get_active_tool_names(
+        self, session_id: str, skills_snapshot: Any = None
+    ) -> Optional[Set[str]]:
+        """Return tool-name set for active skills, or *None* if no filtering.
+
+        Server-skill tools are always included.  Client-skill tools are
+        included only when their skill has been activated.
+        """
+        active = self._active_skills.get(session_id)
+        if active is None:
+            # First call — only server skills are active
+            active = set(self._skills.keys())
+            self._active_skills[session_id] = active
+
+        tools: Set[str] = set()
+        # Server skill tools: always included
+        for skill_key in self._skills:
+            tools.update(self._tools_by_skill.get(skill_key, set()))
+
+        # Activated client skill tools: from snapshot mapping
+        snapshot = skills_snapshot or self._session_snapshots.get(session_id)
+        snapshot_skill_map = self._build_snapshot_skill_map(snapshot)
+        for skill_name in active:
+            if skill_name in snapshot_skill_map:
+                tools.update(snapshot_skill_map[skill_name])
+        return tools
+
     def get_all_guide_prompts(
         self,
         *,
         allowed_tools: Optional[Set[str]] = None,
-        client_tool_names: Optional[Set[str]] = None,
         skills_snapshot: Any = None,
     ) -> List[str]:
         active_skills: Set[str]
-        if client_tool_names is not None or skills_snapshot is not None:
+        if skills_snapshot is not None:
             active_skills = self.resolve_active_skill_names(
-                client_tool_names=client_tool_names,
                 skills_snapshot=skills_snapshot,
             )
         else:
@@ -279,8 +415,8 @@ class SkillController:
             if skill_key not in active_skills:
                 continue
             if allowed_tools is not None:
-                server_tools = self._server_tools_by_skill.get(skill_key, set())
-                if not server_tools or not (server_tools & allowed_tools):
+                skill_tools = self._tools_by_skill.get(skill_key, set())
+                if not skill_tools or not (skill_tools & allowed_tools):
                     continue
             body = load_guide_prompt(skill)
             if body:
@@ -314,6 +450,8 @@ class SkillController:
         return prompts
 
     def clear_session(self, session_id: str) -> None:
+        self._active_skills.pop(session_id, None)
+        self._session_snapshots.pop(session_id, None)
         for skill in self._skills.values():
             fn = getattr(skill, "clear_session", None)
             if fn is not None:
@@ -377,6 +515,7 @@ class SkillController:
             if hasattr(state, "goal") and hasattr(state, "tasks"):
                 return {
                     "team": state.goal,
+                    "phase": getattr(state, "phase", None),
                     "tasks": [
                         {
                             "id": task.id,
@@ -452,6 +591,9 @@ class _FilteredSkillController:
 
     def get_skill(self, name: str) -> Optional[Any]:
         return self._base.get_skill(name)
+
+    def get_active_skill_names(self, session_id: str) -> Set[str]:
+        return self._base.get_active_skill_names(session_id)
 
     def get_all_guide_prompts(self, **kwargs: Any) -> List[str]:
         incoming = kwargs.pop("allowed_tools", None)

@@ -17,9 +17,9 @@ def parse_skill_md(path: str) -> SkillMeta:
     name = ""
     description = ""
     body = text
-    server_tools: list[str] = []
-    client_tools: list[str] = []
+    tools: list[str] = []
     depends_on: list[str] = []
+    subagent_access: str = "always"
 
     parts = text.split("---", 2)
     if len(parts) >= 3:
@@ -36,20 +36,20 @@ def parse_skill_md(path: str) -> SkillMeta:
                 name = value
             elif key == "description":
                 description = value
-            elif key == "server_tools":
-                server_tools = [tool.strip() for tool in value.split(",") if tool.strip()]
-            elif key == "client_tools":
-                client_tools = [tool.strip() for tool in value.split(",") if tool.strip()]
+            elif key == "tools":
+                tools = [tool.strip() for tool in value.split(",") if tool.strip()]
             elif key == "depends_on":
                 depends_on = [tool.strip() for tool in value.split(",") if tool.strip()]
+            elif key == "subagent_access":
+                subagent_access = value.lower()
 
     return SkillMeta(
         name=name,
         description=description,
         body=body,
-        server_tools=server_tools,
-        client_tools=client_tools,
+        tools=tools,
         depends_on=depends_on,
+        subagent_access=subagent_access,
     )
 
 
@@ -70,8 +70,7 @@ def load_skill_meta(skill: Any) -> SkillMeta:
             name=skill.name,
             description="",
             body="",
-            server_tools=[],
-            client_tools=[],
+            tools=[],
             depends_on=[],
         )
 

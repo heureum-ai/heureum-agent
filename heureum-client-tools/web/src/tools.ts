@@ -4,6 +4,11 @@ import { webFetch } from './fetch.js'
 import { settings } from './config.js'
 import { BOUNDARY_START, BOUNDARY_END } from './content-safety.js'
 import {
+  escapePathForReadHint,
+  sanitizeFileToken,
+  sanitizePathSegment,
+} from './path-safety.js'
+import {
   WebPipeline,
   WEB_STEP_INTERMEDIATE,
   WEB_STEP_OUTPUT,
@@ -20,6 +25,24 @@ async function pathExists(targetPath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function resolveUniqueArtifactStem(
+  sessionDir: string,
+  baseStem: string,
+): Promise<string> {
+  let stem = baseStem
+  let attempt = 1
+
+  while (
+    (await pathExists(path.join(sessionDir, `${stem}.json`)))
+    || (await pathExists(path.join(sessionDir, `${stem}.md`)))
+  ) {
+    stem = `${baseStem}_${attempt}`
+    attempt += 1
+  }
+
+  return stem
 }
 
 
@@ -82,7 +105,7 @@ export function buildSnippet(parsed: Record<string, unknown>, outputPath: string
     + '\n\n---\n'
     + truncateAtWord(content, maxLen)
     + '\n---'
-    + `\n\n[Truncated. Use read(path="${outputPath}") for full content.]`
+    + `\n\n[Truncated. Use read(path="${escapePathForReadHint(outputPath)}") for full content.]`
   )
 }
 
@@ -365,28 +388,32 @@ export async function handleWebTool(
           return { success: true, output: result }
         }
 
-        const sessionDir = sessionId
-          ? path.join(workingDir, 'tmp', sessionId)
+        const safeSessionId = sessionId
+          ? sanitizePathSegment(sessionId, { fallback: 'session' })
+          : null
+        const sessionDir = safeSessionId
+          ? path.join(workingDir, 'tmp', safeSessionId)
           : path.join(workingDir, 'tmp')
 
-        const hostname = new URL(url).hostname.replace(/\./g, '_')
-        const timestamp = Date.now()
-        const filename = `fetch_${hostname}_${timestamp}.json`
-        const outputPath = path.join(sessionDir, filename)
-
         ;(await fs.promises.mkdir(sessionDir, { recursive: true }))
+
+        const hostname = sanitizeFileToken(new URL(url).hostname.replace(/\./g, '_'), {
+          fallback: 'unknown_host',
+          maxLength: 80,
+        })
+        const baseStem = `fetch_${hostname}_${Date.now()}`
+        const stem = await resolveUniqueArtifactStem(sessionDir, baseStem)
+
+        const outputPath = path.join(sessionDir, `${stem}.json`)
         ;(await fs.promises.writeFile(outputPath, result, 'utf-8'))
 
         // Save .md file with clean text for read tool
-        const mdFilename = `fetch_${hostname}_${timestamp}.md`
-        const mdPath = path.join(sessionDir, mdFilename)
+        const mdPath = path.join(sessionDir, `${stem}.md`)
 
         try {
           const parsed = JSON.parse(result)
-          const cleanText = stripSecurityWrapper(parsed.text || '')
-          if (cleanText) {
-            ;(await fs.promises.writeFile(mdPath, cleanText, 'utf-8'))
-          }
+          const cleanText = stripSecurityWrapper(String(parsed.text ?? ''))
+          ;(await fs.promises.writeFile(mdPath, cleanText, 'utf-8'))
           return { success: true, output: buildSnippet(parsed, mdPath), outputPath: mdPath }
         } catch {
           return { success: true, output: `Saved to ${outputPath}`, outputPath }

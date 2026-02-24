@@ -25,6 +25,27 @@ function makeTempDir(prefix: string): string {
 }
 
 describe("Web pipeline roundtrip", () => {
+  it("sanitizes unsafe task segments in initialized task paths", async () => {
+    const workDir = makeTempDir("web-roundtrip-");
+
+    const init = await webInitTask({
+      session_id: "..\\..\\CON",
+      task_id: "task:with*chars",
+      work_dir: workDir,
+    });
+
+    expect(init.success).toBe(true);
+    const taskDir = String(init.outputPath);
+    const relative = path.relative(workDir, taskDir);
+    const segments = relative.split(path.sep).filter(Boolean);
+
+    expect(segments.length).toBe(3); // session/taskType/taskId
+    for (const segment of segments) {
+      expect(segment).toMatch(/^[\p{L}\p{N}._-]+$/u);
+      expect(segment).not.toContain("..");
+    }
+  });
+
   it("packs generated fetch payload and reads it back via unpack/read pipeline", async () => {
     const workDir = makeTempDir("web-roundtrip-");
 

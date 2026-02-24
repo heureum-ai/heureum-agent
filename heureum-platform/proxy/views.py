@@ -2,6 +2,8 @@
 
 """Views for proxying requests to agent service using Open Responses spec."""
 
+import hashlib
+import logging
 import json as json_mod
 import uuid
 from datetime import datetime
@@ -9,7 +11,7 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal
 
 import httpx
-from chat_messages.models import Message, ModelPricing, Question
+from chat_messages.models import Message, ModelPricing, Question, ToolSchema
 from chat_messages.models import Response as ResponseModel
 from chat_messages.models import Session
 from chat_messages.serializers import ResponseRequestSerializer
@@ -23,6 +25,8 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
+
+logger = logging.getLogger(__name__)
 
 # Module-level persistent client — reuses TCP connections across requests
 # instead of opening/closing a connection per request.
@@ -68,6 +72,41 @@ def proxy_to_agent(request: Request) -> Response:
         metadata = data.get("metadata") or {}
         session_id = metadata.get("session_id") or f"sess_{uuid.uuid4().hex}"
 
+        # Log incoming request
+        input_data = data.get("input")
+        is_stream = bool(data.get("stream"))
+        _user_preview = ""
+        if isinstance(input_data, str):
+            _user_preview = input_data[:200]
+        elif isinstance(input_data, list):
+            last_user = next(
+                (m for m in reversed(input_data)
+                 if m.get("type", "message") == "message" and m.get("role") == "user"),
+                None,
+            )
+            if last_user:
+                content = last_user.get("content", [])
+                if isinstance(content, list):
+                    _user_preview = next(
+                        (c.get("text", "")[:200] for c in content
+                         if c.get("type") in ("input_text", "output_text")),
+                        "",
+                    )
+                elif isinstance(content, str):
+                    _user_preview = content[:200]
+        _tool_result_count = (
+            sum(1 for m in input_data if m.get("type") == "function_call_output")
+            if isinstance(input_data, list) else 0
+        )
+        logger.info(
+            "REQUEST session=%s stream=%s user=%s tool_results=%d prev_response=%s",
+            session_id,
+            is_stream,
+            repr(_user_preview) if _user_preview else "(follow-up)",
+            _tool_result_count,
+            data.get("previous_response_id") or "-",
+        )
+
         # Ensure session exists and is associated with the current user
         session_defaults = {}
         if request.user.is_authenticated:
@@ -82,13 +121,18 @@ def proxy_to_agent(request: Request) -> Response:
 
         # Persist client-provided skills snapshot once per session and
         # automatically reuse it for later turns.
+        # Strip the bulky `prompt` key (~14KB) before saving — it's only
+        # needed on the first request and the agent caches it internally.
         incoming_snapshot = data.get("skills_snapshot")
         if incoming_snapshot:
-            if session_obj.skills_snapshot != incoming_snapshot:
-                session_obj.skills_snapshot = incoming_snapshot
+            lightweight = {k: v for k, v in incoming_snapshot.items() if k != "prompt"}
+            if session_obj.skills_snapshot != lightweight:
+                session_obj.skills_snapshot = lightweight
                 session_obj.save(update_fields=["skills_snapshot", "updated_at"])
         elif session_obj.skills_snapshot:
-            data["skills_snapshot"] = session_obj.skills_snapshot
+            reinjected = dict(session_obj.skills_snapshot)
+            reinjected.setdefault("prompt", "")
+            data["skills_snapshot"] = reinjected
 
         # Ensure the agent receives the same session_id the platform uses.
         # Without this, a new conversation (no session_id in metadata) causes
@@ -99,6 +143,14 @@ def proxy_to_agent(request: Request) -> Response:
         data["metadata"]["session_id"] = session_id
         if session_obj.cwd:
             data["metadata"]["cwd"] = session_obj.cwd
+
+        # Auto-register client tool schemas to global registry
+        client_tools = data.get("tools") or []
+        if client_tools:
+            try:
+                _register_client_tools(client_tools)
+            except Exception:
+                logger.debug("Client tool auto-registration failed", exc_info=True)
 
         # Create a Response object
         response_obj = ResponseModel.objects.create(
@@ -280,6 +332,45 @@ def proxy_subagent_status(request: Request, session_id: str) -> Response:
         )
 
 
+_tool_fingerprint_cache: set[str] = set()
+
+
+def _register_client_tools(tools: list) -> None:
+    """Auto-register client-provided tool schemas to the global registry."""
+    fingerprint = hashlib.md5(
+        json_mod.dumps(tools, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    if fingerprint in _tool_fingerprint_cache:
+        return
+
+    for t in tools:
+        func = t.get("function", {})
+        name = func.get("name") or t.get("name")
+        if not name:
+            continue
+        meta = t.get("tool_meta") or {}
+        ToolSchema.objects.update_or_create(
+            tool_name=name,
+            defaults={
+                "description": func.get("description", ""),
+                "parameters_schema": func.get("parameters", {}),
+                "display_name": t.get("display_name", ""),
+                "guide": t.get("guide", ""),
+                "source": "tool",
+                "execution_target": "client",
+                "is_snapshot": meta.get("snapshot", False),
+                "is_mutating": meta.get("mutating", False),
+                "is_read_only": meta.get("read_only", False),
+                "is_poll": meta.get("poll", False),
+                "requires_approval": meta.get("requires_approval", False),
+            },
+        )
+
+    if len(_tool_fingerprint_cache) > 100:
+        _tool_fingerprint_cache.clear()
+    _tool_fingerprint_cache.add(fingerprint)
+
+
 def _calculate_cost(input_tokens, output_tokens, pricing):
     """Calculate input and output costs given token counts and pricing."""
     if not pricing:
@@ -377,6 +468,32 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
                 total_cost=msg_input_cost + msg_output_cost,
             )
 
+    # Backfill per-message token/cost on agent-persisted messages that were
+    # skipped above (they have seq set but no token data).
+    if agent_persisted and text_usages:
+        skipped = (
+            Message.objects.filter(response=response_obj, seq__isnull=False)
+            .exclude(type="function_call")
+            .order_by("seq")
+        )
+        for idx, msg in enumerate(skipped):
+            if idx >= len(text_usages):
+                break
+            usage = text_usages[idx]
+            m_in = usage.get("input_tokens", 0)
+            m_out = usage.get("output_tokens", 0)
+            m_total = usage.get("total_tokens", 0)
+            m_in_cost, m_out_cost = _calculate_cost(m_in, m_out, pricing)
+            Message.objects.filter(pk=msg.pk).update(
+                input_tokens=m_in,
+                output_tokens=m_out,
+                total_tokens=m_total,
+                input_cost=m_in_cost,
+                output_cost=m_out_cost,
+                total_cost=m_in_cost + m_out_cost,
+                model=model_name,
+            )
+
     # Persist server-side tool calls from tool_history (not in output array)
     tool_history = (response_data.get("metadata") or {}).get("tool_history", [])
     for th_item in tool_history:
@@ -451,6 +568,7 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
         total_output_tokens=F("total_output_tokens") + response_obj.output_tokens,
         total_tokens=F("total_tokens") + response_obj.total_tokens,
         total_cost=F("total_cost") + response_obj.total_cost,
+        updated_at=timezone.now(),
     )
 
     # Bust session list cache for this user
@@ -486,96 +604,105 @@ def _proxy_streaming(request_data, session_id, response_obj):
         last_todo_state = None  # Capture latest todo snapshot from SSE
 
         try:
-            with _agent_client.stream(
-                "POST",
-                agent_url,
-                json=request_data,
-                timeout=300.0,
-            ) as resp:
-                resp.raise_for_status()
-                for line in resp.iter_lines():
-                    # Parse to collect usage and find the final response
-                    if line.startswith("data: ") and line[6:] != "[DONE]":
-                        try:
-                            event = json_mod.loads(line[6:])
-                            evt_type = event.get("type", "")
-
-                            if evt_type == "response.created":
-                                # Look up pricing once from the model name
-                                model_name = event.get("response", {}).get("model", "")
-                                pricing = ModelPricing.get_for_model(model_name)
-                                yield line + "\n"
-
-                            elif evt_type == "response.output_text.done":
-                                usage = event.get("usage")
-                                if usage:
-                                    item_usages.append({"type": "text", "usage": usage})
-                                    _inject_usage_cost(usage, pricing)
-                                    yield f"data: {json_mod.dumps(event)}\n"
-                                else:
-                                    yield line + "\n"
-
-                            elif evt_type == "response.function_call.done":
-                                usage = event.get("usage")
-                                if usage:
-                                    _inject_usage_cost(usage, pricing)
-                                    yield f"data: {json_mod.dumps(event)}\n"
-                                else:
-                                    yield line + "\n"
-
-                            elif evt_type == "response.todo.updated":
-                                last_todo_state = event.get("todo")
-                                yield line + "\n"
-
-                            elif evt_type in (
-                                "response.completed",
-                                "response.incomplete",
-                                "response.failed",
-                            ):
-                                final_response_data = event.get("response", {})
-                                # Inject session_id into metadata
-                                if "metadata" not in final_response_data:
-                                    final_response_data["metadata"] = {}
-                                final_response_data["metadata"]["session_id"] = session_id
-
-                                # Inject costs into final response usage
-                                resp_usage = final_response_data.get("usage", {})
-                                _inject_usage_cost(resp_usage, pricing)
-
-                                event["response"] = final_response_data
-                                yield f"data: {json_mod.dumps(event)}\n"
-                            else:
-                                yield line + "\n"
-                        except (json_mod.JSONDecodeError, Exception):
-                            yield line + "\n"
-                    else:
-                        yield line + "\n"
-        except Exception as e:
-            # Emit error event to frontend
-            error_event = {
-                "type": "response.failed",
-                "response": {
-                    "status": "failed",
-                    "error": {"type": "server_error", "message": str(e)},
-                    "metadata": {"session_id": session_id},
-                },
-            }
-            yield f"data: {json_mod.dumps(error_event)}\n"
-            yield "data: [DONE]\n"
-            final_response_data = error_event.get("response")
-
-        # Persist the final response after stream completes
-        if final_response_data:
             try:
-                _persist_output(
-                    final_response_data,
-                    session_id,
-                    response_obj,
-                    item_usages=item_usages,
-                    todo_state=last_todo_state,
-                )
-            except Exception:
-                pass
+                with _agent_client.stream(
+                    "POST",
+                    agent_url,
+                    json=request_data,
+                    timeout=300.0,
+                ) as resp:
+                    resp.raise_for_status()
+                    for line in resp.iter_lines():
+                        # Parse to collect usage and find the final response
+                        if line.startswith("data: ") and line[6:] != "[DONE]":
+                            try:
+                                event = json_mod.loads(line[6:])
+                                evt_type = event.get("type", "")
+
+                                if evt_type == "response.created":
+                                    # Look up pricing once from the model name
+                                    model_name = event.get("response", {}).get("model", "")
+                                    pricing = ModelPricing.get_for_model(model_name)
+                                    yield line + "\n"
+
+                                elif evt_type == "response.output_text.done":
+                                    usage = event.get("usage")
+                                    if usage:
+                                        item_usages.append({"type": "text", "usage": usage})
+                                        _inject_usage_cost(usage, pricing)
+                                        yield f"data: {json_mod.dumps(event)}\n"
+                                    else:
+                                        yield line + "\n"
+
+                                elif evt_type == "response.function_call.done":
+                                    usage = event.get("usage")
+                                    if usage:
+                                        _inject_usage_cost(usage, pricing)
+                                        yield f"data: {json_mod.dumps(event)}\n"
+                                    else:
+                                        yield line + "\n"
+
+                                elif evt_type == "response.todo.updated":
+                                    last_todo_state = event.get("todo")
+                                    yield line + "\n"
+
+                                elif evt_type in (
+                                    "response.completed",
+                                    "response.incomplete",
+                                    "response.failed",
+                                ):
+                                    final_response_data = event.get("response", {})
+                                    # Inject session_id into metadata
+                                    if "metadata" not in final_response_data:
+                                        final_response_data["metadata"] = {}
+                                    final_response_data["metadata"]["session_id"] = session_id
+
+                                    # Inject costs into final response usage
+                                    resp_usage = final_response_data.get("usage", {})
+                                    _inject_usage_cost(resp_usage, pricing)
+
+                                    event["response"] = final_response_data
+                                    yield f"data: {json_mod.dumps(event)}\n"
+                                else:
+                                    yield line + "\n"
+                            except (json_mod.JSONDecodeError, Exception):
+                                yield line + "\n"
+                        else:
+                            yield line + "\n"
+            except Exception as e:
+                # Emit error event to frontend
+                error_event = {
+                    "type": "response.failed",
+                    "response": {
+                        "status": "failed",
+                        "error": {"type": "server_error", "message": str(e)},
+                        "metadata": {"session_id": session_id},
+                    },
+                }
+                yield f"data: {json_mod.dumps(error_event)}\n"
+                yield "data: [DONE]\n"
+                final_response_data = error_event.get("response")
+        finally:
+            # Persist the final response or mark incomplete on client disconnect
+            if final_response_data:
+                try:
+                    _persist_output(
+                        final_response_data,
+                        session_id,
+                        response_obj,
+                        item_usages=item_usages,
+                        todo_state=last_todo_state,
+                    )
+                except Exception:
+                    pass
+            else:
+                # Client disconnected mid-stream — no final event received
+                try:
+                    response_obj.status = "incomplete"
+                    response_obj.completed_at = timezone.now()
+                    response_obj.save(update_fields=["status", "completed_at"])
+                except Exception:
+                    pass
 
     resp = StreamingHttpResponse(
         event_stream(),

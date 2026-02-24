@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple
 
@@ -39,6 +40,9 @@ logger = logging.getLogger(__name__)
 
 class ToolExecutionController:
     """Tool execution pipeline with constructor-injected dependencies."""
+
+    _tool_schema_cache: Dict[frozenset, tuple[float, list]] = {}
+    _TOOL_SCHEMA_CACHE_TTL = 300.0  # 5 minutes
 
     def __init__(
         self,
@@ -196,6 +200,17 @@ class ToolExecutionController:
         """Adapter matching the ``(name, args, session_id) -> str`` signature."""
         return await self.execute_tool(name, arguments, session_id=session_id)
 
+    @staticmethod
+    def extract_display_names(
+        tool_calls: List[ToolCallInfo], display_names: Dict[str, str]
+    ) -> None:
+        """Pop LLM-generated display_name from args into the shared dict."""
+        for tc in tool_calls:
+            if isinstance(tc.args, dict):
+                dn = tc.args.pop("display_name", None)
+                if dn and tc.name not in display_names:
+                    display_names[tc.name] = dn
+
     async def execute_tool_calls(
         self,
         tool_calls: List[ToolCallInfo],
@@ -206,6 +221,7 @@ class ToolExecutionController:
         """Execute tool calls in parallel and append call/result items to history."""
         if not tool_calls:
             return []
+        self.extract_display_names(tool_calls, display_names)
 
         results = await self.tool_controller.execute_parallel(
             tool_calls, self._execute_tool_adapter, session_id
@@ -269,6 +285,7 @@ class ToolExecutionController:
             ``(all_results, deferred_approval)`` — all result Messages and
             any chained calls that still need user approval.
         """
+        self.extract_display_names(tool_calls, display_names)
         if max_depth <= 0:
             max_depth = settings.MAX_CHAIN_DEPTH
 
@@ -465,16 +482,24 @@ class ToolExecutionController:
 
         return None, [], tool_call_count, total_usage
 
-    def resolve_tools(
+    async def resolve_tools(
         self,
         request: ResponseRequest,
+        session_id: str | None = None,
+        persist_controller: Any | None = None,
     ) -> Tuple[List[str], List[dict], Set[str], List[str], Dict[str, str], ToolMetaSets]:
         """Resolve tool names, schemas, client tool names, guides, display names, and metadata.
+
+        When *persist_controller* is provided, tools needed by active skills
+        but not supplied by the client or MCP are fetched from Platform DB.
 
         Returns:
             (tool_names, client_tool_schemas, client_tool_names, client_tool_prompts,
              display_names, tool_meta_sets)
         """
+        # Inject server-only skills into snapshot so they pass allowlist filters
+        self.skill_controller.enrich_snapshot(request.skills_snapshot, session_id=session_id)
+
         client_tool_names: Set[str] = set()
         client_tool_schemas: List[dict] = []
         tool_names: List[str] = []
@@ -504,26 +529,60 @@ class ToolExecutionController:
                     if t.tool_meta.poll:
                         meta_sets.poll_tools.add(name)
 
+        # 1. Collect available tool names (client + MCP)
+        available = client_tool_names | set(self.mcp_client.server_tool_names)
+
+        # 2. Fetch missing tools from DB if persist_controller available
+        missing = self.skill_controller.get_missing_tool_names(
+            available_names=available,
+            skills_snapshot=request.skills_snapshot,
+        )
+        if missing and persist_controller:
+            cache_key = frozenset(missing)
+            now = time.monotonic()
+            cached = self._tool_schema_cache.get(cache_key)
+            if cached and (now - cached[0]) < self._TOOL_SCHEMA_CACHE_TTL:
+                db_tools = cached[1]
+            else:
+                db_tools = await persist_controller.fetch_tool_schemas(list(missing))
+                # Evict stale entries when cache grows too large
+                if len(self._tool_schema_cache) > 50:
+                    stale_keys = [
+                        k for k, v in self._tool_schema_cache.items()
+                        if (now - v[0]) >= self._TOOL_SCHEMA_CACHE_TTL
+                    ]
+                    for k in stale_keys:
+                        del self._tool_schema_cache[k]
+                self._tool_schema_cache[cache_key] = (now, db_tools)
+            for item in db_tools:
+                name = item["tool_name"]
+                client_tool_schemas.append(item["schema"])
+                tool_names.append(name)
+                # Only mark as client tool if execution_target is "client".
+                # Server-side tools (skill, mcp) stay out of client_tool_names
+                # so they get routed to server execution.
+                if item.get("execution_target") == "client":
+                    client_tool_names.add(name)
+                if item.get("guide"):
+                    client_tool_prompts.append(item["guide"])
+                if item.get("display_name"):
+                    display_names[name] = item["display_name"]
+
+        # 3. Resolve allowed skill tools
         allowed_skill_tools = self.skill_controller.get_all_tool_names(
-            client_tool_names=client_tool_names,
             skills_snapshot=request.skills_snapshot,
         )
 
-        for name in self.mcp_client.server_tool_names:
-            if name not in client_tool_names:
-                tool_names.append(name)
+        if client_tool_names:
+            for name in self.mcp_client.server_tool_names:
+                if name not in client_tool_names:
+                    tool_names.append(name)
         for name in allowed_skill_tools:
             if name not in tool_names:
                 tool_names.append(name)
 
         display_names.update(self.mcp_client.display_names)
-        display_names.update(
-            {
-                name: display
-                for name, display in self.skill_controller.display_names.items()
-                if name in allowed_skill_tools
-            }
-        )
+        display_names.update(self.skill_controller.display_names)
 
         return (
             tool_names,

@@ -67,8 +67,10 @@ export function restorePlanFromMessages(msgs: Message[]): void {
   if (todoMsgs.length === 0) return;
   const store = usePlanStore.getState();
   store.reset();
-  for (const msg of todoMsgs) {
-    store.applyTodoUpdate(msg.todo!);
-    store.finalize();
+  for (let i = 0; i < todoMsgs.length; i++) {
+    store.applyTodoUpdate(todoMsgs[i].todo!);
+    if (i < todoMsgs.length - 1) {
+      store.finalize();
+    }
   }
 }

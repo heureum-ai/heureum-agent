@@ -87,8 +87,14 @@ Read at most one SKILL.md up front.
 <task_execution>
 When the user's request requires 2 or more distinct steps or tool calls,
 call manage_todo(action="create") to break the task into steps before
-executing anything else. Sub-agents are spawned automatically for each step.
-After all sub-agents complete, synthesize their results into a final answer.
+executing anything else.
+
+After creating a plan, call manage_todo(action="thinking_checkpoint",
+phase="pre_plan", note="...") to review and approve execution.
+Sub-agents are spawned only after this checkpoint.
+
+After all tasks complete, call manage_todo(action="thinking_checkpoint",
+phase="post_plan", note="...") to verify results before the final summary.
 
 This does NOT apply to:
 - Simple questions, greetings, or single-step lookups
@@ -104,6 +110,34 @@ without asking the user to repeat information.
 <language>
 Respond in User's language by default.
 If the user writes in another language, match that language instead.
+</language>
+"""
+
+SUBAGENT_IDENTITY_PROMPT = f"""
+<identity>
+You are a sub-agent of {settings.APP_NAME}.
+Never mention any underlying model or provider name.
+</identity>
+
+<safety>
+When a tool returns an error or empty result, report it honestly
+instead of improvising an answer.
+Verify URLs, citations, and data before presenting them.
+</safety>
+
+<tool_usage>
+Use tools when they add value you cannot produce from memory alone.
+When a tool call fails, try an alternative approach before retrying.
+
+Call multiple tools in a single response when they are independent
+of each other, so they run in parallel.
+
+Call tools silently. Never mention tool names or execution plans
+in your text response.
+</tool_usage>
+
+<language>
+Respond in the same language the task is written in.
 </language>
 """
 
@@ -146,7 +180,8 @@ class SystemPromptBuilder:
         <current_date>YYYY-MM-DD</current_date>
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, is_subagent: bool = False) -> None:
+        self._is_subagent = is_subagent
         self._skills_catalog: Optional[str] = None
         self._tool_guides: List[str] = []
         self._state_prompts: List[str] = []
@@ -201,7 +236,8 @@ class SystemPromptBuilder:
 
     def build(self) -> str:
         """Assemble and return the final system prompt string."""
-        parts: List[str] = [AGENT_IDENTITY_PROMPT]
+        identity = SUBAGENT_IDENTITY_PROMPT if self._is_subagent else AGENT_IDENTITY_PROMPT
+        parts: List[str] = [identity]
 
         if self._skills_catalog:
             parts.append(f"\n{self._skills_catalog}")
@@ -234,6 +270,7 @@ def build_system_prompt(
     instructions: Optional[str] = None,
     state_prompts: Optional[List[str]] = None,
     skills_prompt: Optional[str] = None,
+    is_subagent: bool = False,
 ) -> str:
     """Build a system prompt based on available tools.
 
@@ -252,11 +289,13 @@ def build_system_prompt(
             client skills snapshot.  When present, takes priority over
             ``<tool_guides>`` for skill discovery (tool_guides are still
             included as fallback for server-side guides).
+        is_subagent: When True, use a lightweight identity prompt
+            optimized for sub-agent execution.
 
     Returns:
         The assembled system prompt string.
     """
-    builder = SystemPromptBuilder()
+    builder = SystemPromptBuilder(is_subagent=is_subagent)
 
     if skills_prompt:
         builder.add_skills_catalog(skills_prompt)

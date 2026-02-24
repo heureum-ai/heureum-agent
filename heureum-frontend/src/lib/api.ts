@@ -346,10 +346,15 @@ export async function fetchAllSessionMessages(sessionId: string): Promise<Messag
         messages.push({ role: msg.role as 'user' | 'assistant', content });
       }
     } else if (msg.type === 'function_call') {
-      const content = msg.content as Record<string, unknown>;
-      const name = content.name as string || 'unknown';
-      const args = content.arguments as string || '';
-      const callId = content.call_id as string || '';
+      // content may be the full item dict (proxy path) or empty string (agent persist path)
+      const content = (msg.content && typeof msg.content === 'object' && !Array.isArray(msg.content))
+        ? msg.content as Record<string, unknown>
+        : {} as Record<string, unknown>;
+      const meta = msg.metadata || {};
+      const name = (content.name as string) || (meta.name as string) || '';
+      const displayName = (content.display_name as string) || '';
+      const args = (content.arguments as string) || (typeof meta.arguments === 'string' ? meta.arguments : '') || '';
+      const callId = (content.call_id as string) || (meta.call_id as string) || '';
       const status = (content.status as string) || 'completed';
 
       // Skip manage_todo — shown via TodoProgress, not as a tool block
@@ -361,7 +366,7 @@ export async function fetchAllSessionMessages(sessionId: string): Promise<Messag
 
       let parsedArgs: Record<string, unknown> = {};
       try { parsedArgs = JSON.parse(args); } catch { /* ignore */ }
-      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : name;
+      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : (name || displayName);
 
       messages.push({
         role: 'assistant',
@@ -370,6 +375,7 @@ export async function fetchAllSessionMessages(sessionId: string): Promise<Messag
           command,
           toolName: name,
           toolArgs: parsedArgs,
+          displayName: displayName || undefined,
           output: outputMap.get(callId),
           status: status === 'failed' ? 'failed' : 'completed',
         },
@@ -436,10 +442,14 @@ export async function fetchSessionMessagesPage(
         messages.push({ role: msg.role as 'user' | 'assistant', content });
       }
     } else if (msg.type === 'function_call') {
-      const content = msg.content as Record<string, unknown>;
-      const name = (content.name as string) || 'unknown';
-      const args = (content.arguments as string) || '';
-      const callId = (content.call_id as string) || '';
+      const content = (msg.content && typeof msg.content === 'object' && !Array.isArray(msg.content))
+        ? msg.content as Record<string, unknown>
+        : {} as Record<string, unknown>;
+      const meta = msg.metadata || {};
+      const name = (content.name as string) || (meta.name as string) || '';
+      const displayName = (content.display_name as string) || '';
+      const args = (content.arguments as string) || (typeof meta.arguments === 'string' ? meta.arguments : '') || '';
+      const callId = (content.call_id as string) || (meta.call_id as string) || '';
       const status = (content.status as string) || 'completed';
 
       // Skip manage_todo — shown via TodoProgress, not as a tool block
@@ -450,7 +460,7 @@ export async function fetchSessionMessagesPage(
 
       let parsedArgs: Record<string, unknown> = {};
       try { parsedArgs = JSON.parse(args); } catch { /* ignore */ }
-      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : name;
+      const command = typeof parsedArgs.command === 'string' ? parsedArgs.command : (name || displayName);
 
       messages.push({
         role: 'assistant',
@@ -459,6 +469,7 @@ export async function fetchSessionMessagesPage(
           command,
           toolName: name,
           toolArgs: parsedArgs,
+          displayName: displayName || undefined,
           output: outputMap.get(callId),
           status: status === 'failed' ? 'failed' : 'completed',
         },
@@ -997,6 +1008,7 @@ export const chatAPI = {
       input: inputItems,
       tools,
       skills_snapshot: streamSkillsSnapshot,
+      previous_response_id: request.previous_response_id,
       stream: true,
       metadata: request.session_id ? { session_id: request.session_id } : undefined,
     };
@@ -1062,6 +1074,7 @@ export const chatAPI = {
     }
     return finalResponse;
   },
+
 };
 
 // --- Session Files API ---

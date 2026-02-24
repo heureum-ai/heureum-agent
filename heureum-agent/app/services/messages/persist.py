@@ -65,6 +65,24 @@ class PersistController:
         return text
 
     # -------------------------------------------------------------------
+    # Startup sweep
+    # -------------------------------------------------------------------
+
+    async def sweep_stale_runs(self, stale_seconds: int = 600) -> int:
+        """Call Platform sweep endpoint. Returns count of swept records."""
+        try:
+            resp = await self._client.post(
+                f"{self._base}/subagents/internal/runs/sweep/",
+                json={"stale_seconds": stale_seconds},
+                timeout=self.TIMEOUT,
+            )
+            data = resp.json()
+            return data.get("swept_count", 0)
+        except Exception as e:
+            logger.warning("Sweep stale runs failed: %s", e)
+            return 0
+
+    # -------------------------------------------------------------------
     # Per-session ordered queue
     # -------------------------------------------------------------------
 
@@ -130,10 +148,11 @@ class PersistController:
         record: Any,
         status: str,
         result_summary: str,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Enqueue run-complete PATCH, then signal worker to exit."""
         q = self._ensure_worker(record.child_session_id)
-        q.put_nowait(self._post_run_complete(record, status, result_summary))
+        q.put_nowait(self._post_run_complete(record, status, result_summary, usage=usage))
         q.put_nowait(None)
 
     # -------------------------------------------------------------------
@@ -187,16 +206,25 @@ class PersistController:
         record: Any,
         status: str,
         result_summary: str,
+        usage: Optional[Dict[str, Any]] = None,
     ) -> None:
         import time
 
+        payload: Dict[str, Any] = {
+            "status": status,
+            "result_summary": self._truncate(result_summary),
+            "completed_at": time.time(),
+        }
+        if usage:
+            payload["input_tokens"] = usage.get("input_tokens", 0)
+            payload["output_tokens"] = usage.get("output_tokens", 0)
+            payload["total_tokens"] = usage.get("total_tokens", 0)
+            details = usage.get("input_tokens_details") or {}
+            payload["cached_tokens"] = details.get("cached_tokens", 0)
+
         await self._client.patch(
             f"{self._base}/subagents/internal/runs/{record.child_session_id}/complete/",
-            json={
-                "status": status,
-                "result_summary": self._truncate(result_summary),
-                "completed_at": time.time(),
-            },
+            json=payload,
             timeout=self.TIMEOUT,
         )
 
@@ -281,3 +309,76 @@ class PersistController:
             )
         except Exception as e:
             logger.debug("Tool history save failed (best-effort): %s", e)
+
+    # -------------------------------------------------------------------
+    # Tool / Skill Schema Registry
+    # -------------------------------------------------------------------
+
+    async def register_tool_schemas(self, tools: list[dict]) -> None:
+        """Fire-and-forget: register tool schemas to Platform DB."""
+        if not tools:
+            return
+        try:
+            await self._client.post(
+                f"{self._base}/messages/internal/tools/register/",
+                json={"tools": tools},
+                timeout=self.TIMEOUT,
+            )
+        except Exception as e:
+            logger.debug("Tool schema register failed: %s", e)
+
+    async def fetch_tool_schemas(self, names: list[str]) -> list[dict]:
+        """Fetch tool schemas by names."""
+        if not names:
+            return []
+        try:
+            resp = await self._client.get(
+                f"{self._base}/messages/internal/tools/lookup/",
+                params={"names": ",".join(names)},
+                timeout=self.TIMEOUT,
+            )
+            return resp.json().get("tools", [])
+        except Exception as e:
+            logger.debug("Tool schema fetch failed: %s", e)
+            return []
+
+    async def register_skill_schemas(self, skills: list[dict]) -> None:
+        """Fire-and-forget: register skill schemas to Platform DB."""
+        if not skills:
+            return
+        try:
+            await self._client.post(
+                f"{self._base}/messages/internal/skills/register/",
+                json={"skills": skills},
+                timeout=self.TIMEOUT,
+            )
+        except Exception as e:
+            logger.debug("Skill schema register failed: %s", e)
+
+    async def fetch_skill_schemas(self, names: list[str] | None = None) -> list[dict]:
+        """Fetch skill metadata (without body)."""
+        try:
+            params: dict[str, str] = {}
+            if names:
+                params["names"] = ",".join(names)
+            resp = await self._client.get(
+                f"{self._base}/messages/internal/skills/lookup/",
+                params=params,
+                timeout=self.TIMEOUT,
+            )
+            return resp.json().get("skills", [])
+        except Exception as e:
+            logger.debug("Skill schema fetch failed: %s", e)
+            return []
+
+    async def fetch_skill_body(self, skill_name: str) -> str:
+        """Fetch skill body (guide prompt) for activated skill."""
+        try:
+            resp = await self._client.get(
+                f"{self._base}/messages/internal/skills/{skill_name}/",
+                timeout=self.TIMEOUT,
+            )
+            return resp.json().get("body", "")
+        except Exception as e:
+            logger.debug("Skill body fetch failed: %s", e)
+            return ""
