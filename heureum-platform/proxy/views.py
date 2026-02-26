@@ -392,14 +392,15 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
     model_name = response_data.get("model", "")
     pricing = ModelPricing.get_for_model(model_name)
 
-    # Check which messages the agent already persisted in real-time (per-message dedup).
-    # Using per-seq check instead of all-or-nothing to handle partial persist
-    # (e.g. agent crashes after persisting 2 of 5 messages).
-    existing_seqs = set(
-        Message.objects.filter(response=response_obj, seq__isnull=False)
-        .values_list("seq", flat=True)
-    )
-    agent_persisted = bool(existing_seqs)
+    # Check which assistant text messages the agent already persisted in real-time.
+    # Dedup/backfill must align to text-message order only (not tool seqs).
+    existing_text_count = Message.objects.filter(
+        response=response_obj,
+        seq__isnull=False,
+        type="message",
+        role="assistant",
+    ).count()
+    agent_persisted = existing_text_count > 0
 
     # Build per-iteration usage lookup from streaming events
     # text_usages[i] = usage dict for the i-th assistant text message
@@ -436,16 +437,16 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
                     )
                 except (json_mod.JSONDecodeError, Exception):
                     pass
-        else:
+        elif item_type == "message":
             # Assistant text message — assign per-iteration usage
             item_usage = text_usages[text_idx] if text_idx < len(text_usages) else {}
-            text_idx += 1
 
             # Skip if agent already persisted this specific message in real-time.
-            # Use text_idx as the seq proxy: agent assigns seq sequentially,
-            # and text messages correspond to text_idx in order.
-            if agent_persisted and (text_idx - 1) in existing_seqs:
+            # Compare by text-message order to avoid seq skew from tool items.
+            if agent_persisted and text_idx < existing_text_count:
+                text_idx += 1
                 continue
+            text_idx += 1
 
             msg_input = item_usage.get("input_tokens", 0)
             msg_output = item_usage.get("output_tokens", 0)
@@ -467,15 +468,19 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
                 output_cost=msg_output_cost,
                 total_cost=msg_input_cost + msg_output_cost,
             )
+        else:
+            # Non-message output items are handled elsewhere (e.g. tool_history).
+            continue
 
     # Backfill per-message token/cost on agent-persisted messages that were
     # skipped above (they have seq set but no token data).
     if agent_persisted and text_usages:
-        skipped = (
-            Message.objects.filter(response=response_obj, seq__isnull=False)
-            .exclude(type="function_call")
-            .order_by("seq")
-        )
+        skipped = Message.objects.filter(
+            response=response_obj,
+            seq__isnull=False,
+            type="message",
+            role="assistant",
+        ).order_by("seq")
         for idx, msg in enumerate(skipped):
             if idx >= len(text_usages):
                 break
@@ -553,6 +558,8 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
     response_obj.input_tokens = usage.get("input_tokens", 0)
     response_obj.output_tokens = usage.get("output_tokens", 0)
     response_obj.total_tokens = usage.get("total_tokens", 0)
+    details = usage.get("input_tokens_details") or {}
+    response_obj.cached_tokens = details.get("cached_tokens", 0)
 
     resp_input_cost, resp_output_cost = _calculate_cost(
         response_obj.input_tokens, response_obj.output_tokens, pricing

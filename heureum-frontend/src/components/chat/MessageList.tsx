@@ -56,7 +56,7 @@ export default function MessageList({
     }
     if (msg.subagentProgress) return null;
     if (msg.toolCall) {
-      if (hasActivePlan && pastTodo) return null;
+      if (hasPlan && pastTodo) return null;
       return (
         <div key={i} className="ac-msg-row ac-msg-tool">
           <ToolBlock toolCall={msg.toolCall} />
@@ -142,7 +142,7 @@ export default function MessageList({
           </div>
         )}
         {messages.map(renderMessage)}
-        {!hasActivePlan && activeToolCalls.map((tc, i) => (
+        {!hasPlan && activeToolCalls.map((tc, i) => (
           <div key={`active-tc-${i}`} className="ac-msg-row ac-msg-tool">
             <ToolBlock toolCall={tc} />
           </div>

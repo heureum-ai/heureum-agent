@@ -837,6 +837,7 @@ export interface SkillsSnapshot {
     description: string
     location: string
     tools: string[]
+    body?: string
   }>
 }
 
@@ -928,6 +929,7 @@ export function getSkillsSnapshot(): SkillsSnapshot {
       description: skill.description,
       location: path.join(SKILLS_CACHE_DIR, skill.name, 'SKILL.md'),
       tools: skill.tools,
+      body: skill.workflowPrompt,
     })),
   }
 }

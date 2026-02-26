@@ -17,6 +17,7 @@ from app.services.middleware.types import (
     MiddlewareEvent,
     PromptBuildEvent,
     SkillExecuteEvent,
+    SubagentSpawnEvent,
     ToolCallEvent,
 )
 
@@ -36,6 +37,7 @@ __all__ = [
     "MiddlewareRunner",
     "PromptBuildEvent",
     "SkillExecuteEvent",
+    "SubagentSpawnEvent",
     "ToolCallEvent",
     "ToolHookBridgeMiddleware",
 ]

@@ -243,6 +243,8 @@ class AgentService:
                     )
                 )
                 if rehydrated is not None:
+                    if settings.CONTEXT_MINIMAL_RETENTION_ENABLED:
+                        rehydrated, _ = self._normalize.strip_tool_messages(rehydrated)
                     self._sessions[session_id] = rehydrated
                     self.message_controller.session_state_controller.last_access[session_id] = (
                         time.time()
@@ -1079,6 +1081,42 @@ class AgentService:
                 n = self._normalize.invalidate_stale_snapshots(lc_history)
                 if n:
                     logger.info("Invalidated %d stale page snapshot(s)", n)
+
+    async def flush_turn_tool_results(self, session_id: str) -> bool:
+        """Remove tool execution history from the in-memory context at turn end.
+
+        Strips AIMessage(tool_calls) + ToolMessage from session history.
+        DB (Audit Plane) already has the data persisted, so no data is lost.
+        No-op when the feature flag is disabled.
+        """
+        if not settings.CONTEXT_MINIMAL_RETENTION_ENABLED:
+            return False
+
+        from app.services.middleware.types import MiddlewareContext, RetentionEvent
+
+        mw = self.middleware_runner
+        event = None
+        if mw:
+            ctx = MiddlewareContext(session_id=session_id)
+            event = RetentionEvent(context=ctx)
+            before = await mw.run_before(event)
+            if before.blocked:
+                logger.info("Retention flush blocked by middleware: %s", before.reason)
+                return False
+
+        async with self._get_session_lock(session_id):
+            history = self._sessions.get(session_id, [])
+            if not history:
+                return False
+            clean, changed = self._normalize.strip_tool_messages(history)
+            if changed:
+                self._sessions[session_id] = clean
+
+        if mw and event and changed:
+            event.stripped_count = len(history) - len(clean)
+            await mw.run_after(event)
+
+        return changed
 
     def replace_tool_result(
         self,

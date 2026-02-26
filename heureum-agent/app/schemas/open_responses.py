@@ -357,12 +357,16 @@ class SkillSnapshotItem(BaseModel):
         location (str): Absolute path to the SKILL.md file the model
             can ``read`` on demand.
         tools (List[str]): Tool names belonging to this skill.
+        body (Optional[str]): SKILL.md content (workflow prompt).
+            When provided, the skill is registered to the Platform DB
+            so the server can fetch the body without reading from disk.
     """
 
     name: str
     description: str
     location: str
     tools: List[str] = Field(default_factory=list)
+    body: Optional[str] = None
 
 
 class SkillsSnapshot(BaseModel):

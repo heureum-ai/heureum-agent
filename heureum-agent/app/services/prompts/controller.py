@@ -6,6 +6,10 @@ from typing import Any, List, Optional, Set, Tuple
 
 from app.services.prompts.base import build_system_prompt
 
+# Tools exposed to the main (orchestrator) agent only.
+# Sub-agents receive the full server tool set instead.
+MAIN_AGENT_TOOLS = frozenset({"activate_skill", "ask_question"})
+
 
 class PromptController:
     """Encapsulates system prompt building and tool schema resolution.
@@ -92,20 +96,29 @@ class PromptController:
             if name and name not in seen_names:
                 seen_names.add(name)
                 tools.append(t)
-        # Server skill tools
-        for t in server_tool_schemas:
-            name = t.get("function", {}).get("name")
-            if name and name not in seen_names:
-                seen_names.add(name)
-                tools.append(t)
-        # MCP-discovered tools — apply active skill filter
-        for t in self.mcp_tool_controller.get_tool_schemas():
-            name = t.get("function", {}).get("name")
-            if name and name not in seen_names:
-                if active_tool_names is not None and name not in active_tool_names:
-                    continue
-                seen_names.add(name)
-                tools.append(t)
+        # Server skill tools — subagents get full set, main agent only gets allowlist
+        if is_subagent:
+            for t in server_tool_schemas:
+                name = t.get("function", {}).get("name")
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    tools.append(t)
+        else:
+            _MAIN_AGENT_TOOLS = MAIN_AGENT_TOOLS
+            for t in server_tool_schemas:
+                name = t.get("function", {}).get("name")
+                if name and name in _MAIN_AGENT_TOOLS and name not in seen_names:
+                    seen_names.add(name)
+                    tools.append(t)
+        # MCP-discovered tools — subagents only (main agent delegates via activate_skill)
+        if is_subagent:
+            for t in self.mcp_tool_controller.get_tool_schemas():
+                name = t.get("function", {}).get("name")
+                if name and name not in seen_names:
+                    if active_tool_names is not None and name not in active_tool_names:
+                        continue
+                    seen_names.add(name)
+                    tools.append(t)
 
         tools = self._normalize_tool_schemas(tools)
         if not is_subagent:

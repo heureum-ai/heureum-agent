@@ -597,6 +597,88 @@ class TestPersistOutput:
         assert msg.input_tokens == 80
         assert msg.output_tokens == 40
 
+    def test_real_time_tool_seq_does_not_skip_text_persist(self, response_obj):
+        Message.objects.create(
+            session_id="persist-test",
+            response=response_obj,
+            type="function_call_output",
+            role="tool",
+            seq=0,
+            content={"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            status="completed",
+        )
+
+        data = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "final answer"}],
+                    "status": "completed",
+                    "id": "msg_final",
+                }
+            ],
+            "model": "gpt-4",
+            "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+        }
+
+        with patch.object(ModelPricing, "get_for_model", return_value=None):
+            _persist_output(data, "persist-test", response_obj)
+
+        assistant_msgs = Message.objects.filter(
+            session_id="persist-test",
+            type="message",
+            role="assistant",
+        )
+        assert assistant_msgs.count() == 1
+
+    def test_backfill_ignores_function_call_output_rows(self, response_obj):
+        Message.objects.create(
+            session_id="persist-test",
+            response=response_obj,
+            type="function_call_output",
+            role="tool",
+            seq=0,
+            content={"type": "function_call_output", "call_id": "c1", "output": "ok"},
+            status="completed",
+        )
+        persisted_text = Message.objects.create(
+            session_id="persist-test",
+            response=response_obj,
+            type="message",
+            role="assistant",
+            seq=1,
+            content=[{"type": "output_text", "text": "persisted"}],
+            status="completed",
+        )
+
+        data = {
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "persisted"}],
+                    "status": "completed",
+                    "id": "msg_existing",
+                }
+            ],
+            "model": "gpt-4",
+            "usage": {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        }
+        item_usages = [
+            {
+                "type": "text",
+                "usage": {"input_tokens": 80, "output_tokens": 40, "total_tokens": 120},
+            }
+        ]
+
+        with patch.object(ModelPricing, "get_for_model", return_value=None):
+            _persist_output(data, "persist-test", response_obj, item_usages=item_usages)
+
+        persisted_text.refresh_from_db()
+        assert persisted_text.input_tokens == 80
+        assert persisted_text.output_tokens == 40
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # proxy_subagent_status

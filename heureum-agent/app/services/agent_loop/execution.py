@@ -43,6 +43,10 @@ class ToolExecutionController:
 
     _tool_schema_cache: Dict[frozenset, tuple[float, list]] = {}
     _TOOL_SCHEMA_CACHE_TTL = 300.0  # 5 minutes
+    _skill_schema_cache: Dict[frozenset, tuple[float, list]] = {}
+    _SKILL_SCHEMA_CACHE_TTL = 300.0  # 5 minutes
+    _skill_body_cache: Dict[str, tuple[float, str]] = {}
+    _SKILL_BODY_CACHE_TTL = 300.0  # 5 minutes
 
     def __init__(
         self,
@@ -87,7 +91,9 @@ class ToolExecutionController:
                 return result
             return await self.skill_controller.execute_tool(name, arguments, session_id)
 
-        if self.mcp_client.is_server_tool(name):
+        # Use safe check: if fast-path fails, retry discovery once before giving up.
+        # This prevents transient failures during MCP cache TTL refresh windows.
+        if await self.mcp_client.is_server_tool_safe(name):
             if self._middleware:
                 ctx = MiddlewareContext(session_id=session_id)
                 event = MCPCallEvent(context=ctx, tool_name=name, arguments=arguments)
@@ -482,6 +488,105 @@ class ToolExecutionController:
 
         return None, [], tool_call_count, total_usage
 
+    # -- skills snapshot / persist helpers ------------------------------------
+
+    @staticmethod
+    def _snapshot_items(skills_snapshot: Any) -> list:
+        if not skills_snapshot:
+            return []
+        if isinstance(skills_snapshot, dict):
+            items = skills_snapshot.get("skills")
+        else:
+            items = getattr(skills_snapshot, "skills", None)
+        return items if isinstance(items, list) else []
+
+    @classmethod
+    def _snapshot_skill_names(cls, skills_snapshot: Any) -> list[str]:
+        names: list[str] = []
+        for item in cls._snapshot_items(skills_snapshot):
+            name = item.get("name") if isinstance(item, dict) else getattr(item, "name", None)
+            if isinstance(name, str) and name.strip():
+                names.append(name.strip())
+        return names
+
+    @staticmethod
+    def _snapshot_has_prompt(skills_snapshot: Any) -> bool:
+        if not skills_snapshot:
+            return False
+        prompt = (
+            skills_snapshot.get("prompt")
+            if isinstance(skills_snapshot, dict)
+            else getattr(skills_snapshot, "prompt", None)
+        )
+        return bool(isinstance(prompt, str) and prompt.strip())
+
+    @staticmethod
+    def _snapshot_item_tools(item: Any) -> list[str]:
+        raw = item.get("tools") if isinstance(item, dict) else getattr(item, "tools", None)
+        if not isinstance(raw, list):
+            return []
+        return [tool for tool in raw if isinstance(tool, str) and tool]
+
+    @staticmethod
+    def _set_snapshot_item_tools(item: Any, tools: list[str]) -> None:
+        if isinstance(item, dict):
+            item["tools"] = tools
+        else:
+            item.tools = tools
+
+    async def _fetch_skill_schemas_cached(
+        self,
+        persist_controller: Any,
+        names: list[str],
+    ) -> list[dict]:
+        if not names or not persist_controller:
+            return []
+        cache_key = frozenset(name.strip().lower() for name in names if isinstance(name, str) and name.strip())
+        if not cache_key:
+            return []
+
+        now = time.monotonic()
+        cached = self._skill_schema_cache.get(cache_key)
+        if cached and (now - cached[0]) < self._SKILL_SCHEMA_CACHE_TTL:
+            return cached[1]
+
+        schemas = await persist_controller.fetch_skill_schemas(list(names))
+        if len(self._skill_schema_cache) > 50:
+            stale_keys = [
+                key
+                for key, value in self._skill_schema_cache.items()
+                if (now - value[0]) >= self._SKILL_SCHEMA_CACHE_TTL
+            ]
+            for key in stale_keys:
+                del self._skill_schema_cache[key]
+        self._skill_schema_cache[cache_key] = (now, schemas)
+        return schemas
+
+    async def _fetch_skill_body_cached(
+        self,
+        persist_controller: Any,
+        skill_name: str,
+    ) -> str:
+        if not persist_controller or not isinstance(skill_name, str) or not skill_name.strip():
+            return ""
+        key = skill_name.strip()
+        now = time.monotonic()
+        cached = self._skill_body_cache.get(key)
+        if cached and (now - cached[0]) < self._SKILL_BODY_CACHE_TTL:
+            return cached[1]
+
+        body = await persist_controller.fetch_skill_body(key)
+        if len(self._skill_body_cache) > 200:
+            stale_keys = [
+                cache_key
+                for cache_key, value in self._skill_body_cache.items()
+                if (now - value[0]) >= self._SKILL_BODY_CACHE_TTL
+            ]
+            for cache_key in stale_keys:
+                del self._skill_body_cache[cache_key]
+        self._skill_body_cache[key] = (now, body or "")
+        return body or ""
+
     async def resolve_tools(
         self,
         request: ResponseRequest,
@@ -506,6 +611,7 @@ class ToolExecutionController:
         client_tool_prompts: List[str] = []
         display_names: Dict[str, str] = {}
         meta_sets = ToolMetaSets()
+        snapshot_skill_names = self._snapshot_skill_names(request.skills_snapshot)
 
         if request.tools:
             for t in request.tools:
@@ -529,6 +635,89 @@ class ToolExecutionController:
                     if t.tool_meta.poll:
                         meta_sets.poll_tools.add(name)
 
+        # Build skill metadata from Platform DB when snapshot skill entries are
+        # present. This lets us recover missing "tools" arrays and resolve
+        # schemas even when the client sends only skill names.
+        db_skill_tools: Set[str] = set()
+        if persist_controller and snapshot_skill_names:
+            db_skills = await self._fetch_skill_schemas_cached(
+                persist_controller,
+                snapshot_skill_names,
+            )
+            db_by_name = {
+                (item.get("skill_name") or "").strip().lower(): item
+                for item in db_skills
+                if isinstance(item, dict) and item.get("skill_name")
+            }
+            for snap_item in self._snapshot_items(request.skills_snapshot):
+                snap_name = (
+                    snap_item.get("name")
+                    if isinstance(snap_item, dict)
+                    else getattr(snap_item, "name", None)
+                )
+                if not isinstance(snap_name, str) or not snap_name.strip():
+                    continue
+                existing_tools = self._snapshot_item_tools(snap_item)
+                if existing_tools:
+                    db_skill_tools.update(existing_tools)
+                    continue
+                db_skill = db_by_name.get(snap_name.strip().lower())
+                if not db_skill:
+                    continue
+                db_tools = [
+                    tool
+                    for tool in db_skill.get("tools", [])
+                    if isinstance(tool, str) and tool
+                ]
+                if not db_tools:
+                    continue
+                self._set_snapshot_item_tools(snap_item, db_tools)
+                db_skill_tools.update(db_tools)
+            for item in db_skills:
+                if not isinstance(item, dict):
+                    continue
+                for tool in item.get("tools", []):
+                    if isinstance(tool, str) and tool:
+                        db_skill_tools.add(tool)
+
+            # When snapshot.prompt is absent, fetch SKILL.md bodies from DB and
+            # expose them as tool guides.
+            if not self._snapshot_has_prompt(request.skills_snapshot):
+                norm_active = set()
+                if session_id:
+                    norm_active = {
+                        (name or "").strip().lower()
+                        for name in self.skill_controller.get_active_skill_names(session_id)
+                    }
+                target_skill_names = (
+                    [
+                        name
+                        for name in snapshot_skill_names
+                        if (name or "").strip().lower() in norm_active
+                    ]
+                    if norm_active
+                    else list(snapshot_skill_names)
+                )
+                seen_guides = set(client_tool_prompts)
+                if target_skill_names:
+                    bodies = await asyncio.gather(*(
+                        self._fetch_skill_body_cached(persist_controller, name)
+                        for name in target_skill_names
+                    ))
+                    for skill_name, body in zip(target_skill_names, bodies):
+                        if not body:
+                            continue
+                        safe_name = skill_name.replace('"', "'").strip() or "skill"
+                        guide = f'<tool_guide name="{safe_name}">\n{body}\n</tool_guide>'
+                        if guide not in seen_guides:
+                            seen_guides.add(guide)
+                            client_tool_prompts.append(guide)
+
+        # 1. Resolve allowed local server skill tools.
+        allowed_skill_tools = self.skill_controller.get_all_tool_names(
+            skills_snapshot=request.skills_snapshot,
+        )
+
         # 1. Collect available tool names (client + MCP)
         available = client_tool_names | set(self.mcp_client.server_tool_names)
 
@@ -537,6 +726,13 @@ class ToolExecutionController:
             available_names=available,
             skills_snapshot=request.skills_snapshot,
         )
+        # Include tools referenced by DB skill metadata (for snapshot skills
+        # unknown to local server skill registry).
+        missing |= {
+            tool_name
+            for tool_name in db_skill_tools
+            if tool_name not in available and tool_name not in allowed_skill_tools
+        }
         if missing and persist_controller:
             cache_key = frozenset(missing)
             now = time.monotonic()
@@ -567,11 +763,6 @@ class ToolExecutionController:
                     client_tool_prompts.append(item["guide"])
                 if item.get("display_name"):
                     display_names[name] = item["display_name"]
-
-        # 3. Resolve allowed skill tools
-        allowed_skill_tools = self.skill_controller.get_all_tool_names(
-            skills_snapshot=request.skills_snapshot,
-        )
 
         if client_tool_names:
             for name in self.mcp_client.server_tool_names:

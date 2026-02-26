@@ -101,14 +101,15 @@ export function useStreamingChat({
             appendStreamDelta(event.delta);
             break;
           case 'response.function_call.done': {
-            const currentText = useChatStore.getState().streamingText;
-            if (currentText && collectedToolCalls.length > 0) {
+            // Flush previously collected tool calls as messages (even without text)
+            if (collectedToolCalls.length > 0) {
               for (const prevTc of collectedToolCalls) {
                 if (prevTc.status === 'running') prevTc.status = 'completed';
                 addMessage({ role: 'assistant', content: '', toolCall: prevTc });
               }
               collectedToolCalls.length = 0;
             }
+            const currentText = useChatStore.getState().streamingText;
             if (currentText) {
               addMessage({ role: 'assistant', content: currentText });
               clearStreamingText();

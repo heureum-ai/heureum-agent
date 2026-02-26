@@ -9,6 +9,8 @@ interface PlanStoreState {
   history: PlanState[];
   /** Currently active (or most recently finalized) plan. */
   plan: PlanState | null;
+  /** Tool calls received before plan/activeTask exists — flushed on next applyTodoUpdate. */
+  _pendingToolCalls: PlanToolCall[];
 
   applyTodoUpdate: (todo: TodoState) => void;
   recordToolCall: (
@@ -27,6 +29,7 @@ interface PlanStoreState {
 export const usePlanStore = create<PlanStoreState>((set) => ({
   history: [],
   plan: null,
+  _pendingToolCalls: [],
 
   applyTodoUpdate: (todo) => {
     set((state) => {
@@ -53,26 +56,39 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
         subagent: existingMap.get(t.id)?.subagent ?? null,
       }));
 
+      const activeTaskId =
+        todo.tasks.find((t) => t.status === 'in_progress')?.id ?? null;
+
+      // Flush buffered tool calls into the active task
+      if (activeTaskId && state._pendingToolCalls.length > 0) {
+        const target = newTasks.find((t) => t.id === activeTaskId);
+        if (target) {
+          const existingIds = new Set(target.toolCalls.map((tc) => tc.callId));
+          const toFlush = state._pendingToolCalls.filter(
+            (tc) => !existingIds.has(tc.callId),
+          );
+          if (toFlush.length > 0) {
+            target.toolCalls = [...target.toolCalls, ...toFlush];
+          }
+        }
+      }
+
       return {
         history: [...state.history, ...historyAddition],
         plan: {
           team: todo.team,
           phase: todo.phase,
           tasks: newTasks,
-          activeTaskId:
-            todo.tasks.find((t) => t.status === 'in_progress')?.id ?? null,
+          activeTaskId,
           finalized: todo.phase === 'finalized',
         },
+        _pendingToolCalls: [],
       };
     });
   },
 
   recordToolCall: (callId, toolName, displayName, args, cost) => {
     set((state) => {
-      if (!state.plan) return state;
-      const taskId = state.plan.activeTaskId;
-      if (!taskId) return state;
-
       const newToolCall: PlanToolCall = {
         callId,
         toolName,
@@ -82,6 +98,13 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
         cost,
       };
 
+      // Buffer if plan or activeTask doesn't exist yet
+      if (!state.plan || !state.plan.activeTaskId) {
+        if (state._pendingToolCalls.some((tc) => tc.callId === callId)) return state;
+        return { _pendingToolCalls: [...state._pendingToolCalls, newToolCall] };
+      }
+
+      const taskId = state.plan.activeTaskId;
       const tasks = state.plan.tasks.map((t) => {
         if (t.id !== taskId) return t;
         if (t.toolCalls.some((tc) => tc.callId === callId)) return t;
@@ -94,7 +117,20 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
 
   completeToolCall: (callId, status, output) => {
     set((state) => {
-      if (!state.plan) return state;
+      // Also update buffered tool calls that haven't been flushed yet
+      const pendingIdx = state._pendingToolCalls.findIndex((tc) => tc.callId === callId);
+      let pendingUpdate: Partial<PlanStoreState> = {};
+      if (pendingIdx >= 0) {
+        const updated = [...state._pendingToolCalls];
+        updated[pendingIdx] = {
+          ...updated[pendingIdx],
+          status,
+          ...(output != null ? { output } : {}),
+        };
+        pendingUpdate = { _pendingToolCalls: updated };
+      }
+
+      if (!state.plan) return pendingUpdate as any;
 
       const tasks = state.plan.tasks.map((t) => {
         const idx = t.toolCalls.findIndex((tc) => tc.callId === callId);
@@ -108,7 +144,7 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
         return { ...t, toolCalls: updated };
       });
 
-      return { plan: { ...state.plan, tasks } };
+      return { plan: { ...state.plan, tasks }, ...pendingUpdate };
     });
   },
 
@@ -143,6 +179,6 @@ export const usePlanStore = create<PlanStoreState>((set) => ({
   },
 
   reset: () => {
-    set({ history: [], plan: null });
+    set({ history: [], plan: null, _pendingToolCalls: [] });
   },
 }));

@@ -211,26 +211,33 @@ class TestActivateSkillService:
 
     @pytest.mark.asyncio
     async def test_activate_skill_execute(self, provider):
-        """Executing activate_skill should activate skills."""
-        await provider.startup()
+        """Executing activate_skill should activate skills and spawn subagent."""
+        # Provide a mock create_subagent_task_fn for the spawn pipeline
+        import asyncio
+        mock_task = asyncio.Future()
+        mock_task.set_result(None)
+        await provider.startup(
+            create_subagent_task_fn=lambda *a, **kw: mock_task,
+        )
         session_id = "test_exec_activate"
         snapshot = _make_snapshot(("coding_task", ["bash"]))
         provider._session_snapshots[session_id] = snapshot
         provider.get_active_tool_names(session_id, snapshot)
 
-        # Execute via skill controller
+        # Execute via skill controller — now requires task param
         result_str = await provider.execute_tool(
             "activate_skill",
-            {"skill_names": ["coding_task"]},
+            {"skill_names": ["coding_task"], "task": "Write a hello world script"},
             session_id,
         )
         result = json.loads(result_str)
-        assert "activated" in result
-        assert "coding_task" in result["activated"]
+        assert result["status"] == "accepted"
+        assert "child_session_id" in result
 
-        # Verify tools are now active
+        # PSA activation on the main session is no longer performed;
+        # subagent tool resolution is handled by _resolve_child_tools.
         tools = provider.get_active_tool_names(session_id, snapshot)
-        assert "bash" in tools
+        assert "bash" not in tools
 
     @pytest.mark.asyncio
     async def test_activate_skill_empty_names_error(self, provider):

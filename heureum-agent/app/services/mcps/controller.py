@@ -116,12 +116,13 @@ class MCPClientController:
         if self._available_tools and (now - self._cache_timestamp) < settings.TOOL_CACHE_TTL:
             return self._available_tools
 
-        self._available_tools.clear()
-        self._server_tool_names.clear()
-        self._tool_to_server.clear()
-        if self._chain_registry:
-            self._chain_registry.clear()
-        self._approval.clear()
+        # Build new collections in temporaries so that the live maps are never
+        # empty during re-discovery. This prevents sub-agents (and pipelined
+        # tool calls) from seeing a cleared _server_tool_names mid-refresh.
+        new_available: List[Dict[str, Any]] = []
+        new_server_names: Set[str] = set()
+        new_tool_to_server: Dict[str, str] = {}
+        new_approval = ApprovalState()
 
         pending_chains: List[Tuple[str, list]] = []
 
@@ -134,16 +135,16 @@ class MCPClientController:
                     tool_name = append_discovered_tool(
                         tool=tool,
                         server_url=server_url,
-                        available_tools=self._available_tools,
-                        server_tool_names=self._server_tool_names,
-                        tool_to_server=self._tool_to_server,
+                        available_tools=new_available,
+                        server_tool_names=new_server_names,
+                        tool_to_server=new_tool_to_server,
                     )
                     collect_discovery_metadata(
                         tool=tool,
                         tool_name=tool_name,
                         pending_chains=pending_chains,
-                        approval_required_tools=self._approval.approval_required_tools,
-                        display_names=self._approval.display_names,
+                        approval_required_tools=new_approval.approval_required_tools,
+                        display_names=new_approval.display_names,
                         has_chain_registry=self._chain_registry is not None,
                     )
 
@@ -159,6 +160,19 @@ class MCPClientController:
                 # can leak from anyio cancel scopes inside streamablehttp_client.
                 logger.warning("MCP server unavailable at %s: %s", server_url, error)
                 await self._disconnect_server(server_url)
+
+        # Atomic swap: replace all live maps at once so concurrent readers
+        # never see a partially-cleared state.
+        self._available_tools = new_available
+        self._server_tool_names = new_server_names
+        self._tool_to_server = new_tool_to_server
+        if self._chain_registry:
+            self._chain_registry.clear()
+        # Preserve per-session approval state (pending_tool_calls) while
+        # refreshing the tool-level metadata.
+        pending_calls = dict(self._approval.pending_tool_calls)
+        self._approval = new_approval
+        self._approval.pending_tool_calls.update(pending_calls)
 
         register_pending_chains(
             chain_registry=self._chain_registry,
@@ -182,17 +196,25 @@ class MCPClientController:
                 "platform_api_url": settings.PLATFORM_API_URL,
             }
 
-        try:
-            session = await self._get_session(server_url)
-            result = await session.call_tool(name, arguments, meta=meta)
-            return self._extract_text(result)
-        except BaseException as error:
-            logger.warning("Tool call failed (%s on %s): %s", name, server_url, error)
-            await self._disconnect_server(server_url)
-            return (
-                f"Error calling {name}: {error}. "
-                "The tool call failed — you may retry with the same or modified arguments."
-            )
+        for attempt in range(2):
+            try:
+                session = await self._get_session(server_url)
+                result = await session.call_tool(name, arguments, meta=meta)
+                return self._extract_text(result)
+            except BaseException as error:
+                if attempt == 0:
+                    logger.warning(
+                        "Tool call failed (%s), retrying after reconnect: %s",
+                        name, error,
+                    )
+                    await self._disconnect_server(server_url)
+                    continue
+                logger.warning("Tool call failed after retry (%s): %s", name, error)
+                await self._disconnect_server(server_url)
+                return (
+                    f"Error calling {name}: {error}. "
+                    "The tool call failed — you may retry with the same or modified arguments."
+                )
 
     @staticmethod
     def _extract_text(result: Any) -> str:
@@ -200,6 +222,26 @@ class MCPClientController:
 
     def is_server_tool(self, tool_name: str) -> bool:
         return tool_name in self._server_tool_names
+
+    async def is_server_tool_safe(self, tool_name: str) -> bool:
+        """Check if *tool_name* is an MCP server tool, retrying discovery once.
+
+        During cache TTL refresh ``_server_tool_names`` is temporarily empty.
+        If the fast-path check fails, trigger ``discover_tools()`` and check
+        again so that transient cache-clear windows don't cause false negatives.
+        """
+        if tool_name in self._server_tool_names:
+            return True
+        # Cache may have been cleared — try one re-discovery
+        await self.discover_tools()
+        return tool_name in self._server_tool_names
+
+    def snapshot_server_state(self) -> tuple[frozenset[str], dict[str, str]]:
+        """Return an immutable snapshot of server tool names and routing map.
+
+        Used by sub-agents to avoid race conditions during parent cache TTL refresh.
+        """
+        return frozenset(self._server_tool_names), dict(self._tool_to_server)
 
     def invalidate_cache(self) -> None:
         self._cache_timestamp = 0

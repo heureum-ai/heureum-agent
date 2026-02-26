@@ -382,7 +382,7 @@ class TestCallTool:
         assert "nonexistent" in result
 
     async def test_failure_returns_retry_hint(self):
-        """On failure, returns error with retry guidance for the LLM."""
+        """On failure, returns error with retry guidance after 1 reconnect retry."""
         client = MCPClientController(server_urls=["http://srv"])
         client._tool_to_server["flaky"] = "http://srv"
 
@@ -397,7 +397,8 @@ class TestCallTool:
         assert "Error calling flaky:" in result
         assert "connection lost" in result
         assert "retry" in result.lower()
-        client._disconnect_server.assert_called_once()
+        # call_tool now retries once after reconnect, so disconnect is called twice
+        assert client._disconnect_server.call_count == 2
 
     async def test_extract_text_multiple_parts(self):
         result = MagicMock()

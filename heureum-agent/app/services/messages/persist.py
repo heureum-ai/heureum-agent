@@ -76,6 +76,7 @@ class PersistController:
                 json={"stale_seconds": stale_seconds},
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
             data = resp.json()
             return data.get("swept_count", 0)
         except Exception as e:
@@ -117,15 +118,52 @@ class PersistController:
     # Sub-agent persist — public (enqueue)
     # -------------------------------------------------------------------
 
+    def enqueue_subagent_run_start(
+        self,
+        record: Any,
+        root_session_id: str,
+        system_prompt: str = "",
+    ) -> None:
+        """Enqueue run-start POST (non-blocking)."""
+        q = self._ensure_worker(record.child_session_id)
+        q.put_nowait(self._post_run_start(record, root_session_id, system_prompt))
+
+    def enqueue_subagent_message(
+        self,
+        record: Any,
+        seq: int,
+        role: str,
+        content: str,
+        tool_call_id: str = "",
+        tool_name: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Enqueue message POST (non-blocking)."""
+        q = self._ensure_worker(record.child_session_id)
+        q.put_nowait(
+            self._post_message(record, seq, role, content, tool_call_id, tool_name, metadata)
+        )
+
+    def enqueue_subagent_run_complete(
+        self,
+        record: Any,
+        status: str,
+        result_summary: str,
+        usage: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Enqueue run-complete PATCH, then signal worker to exit (non-blocking)."""
+        q = self._ensure_worker(record.child_session_id)
+        q.put_nowait(self._post_run_complete(record, status, result_summary, usage=usage))
+        q.put_nowait(None)
+
     async def subagent_run_start(
         self,
         record: Any,
         root_session_id: str,
         system_prompt: str = "",
     ) -> None:
-        """Enqueue run-start POST."""
-        q = self._ensure_worker(record.child_session_id)
-        q.put_nowait(self._post_run_start(record, root_session_id, system_prompt))
+        """Backward-compatible async wrapper for enqueue_subagent_run_start."""
+        self.enqueue_subagent_run_start(record, root_session_id, system_prompt)
 
     async def subagent_message(
         self,
@@ -137,11 +175,8 @@ class PersistController:
         tool_name: str = "",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Enqueue message POST."""
-        q = self._ensure_worker(record.child_session_id)
-        q.put_nowait(
-            self._post_message(record, seq, role, content, tool_call_id, tool_name, metadata)
-        )
+        """Backward-compatible async wrapper for enqueue_subagent_message."""
+        self.enqueue_subagent_message(record, seq, role, content, tool_call_id, tool_name, metadata)
 
     async def subagent_run_complete(
         self,
@@ -150,10 +185,8 @@ class PersistController:
         result_summary: str,
         usage: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Enqueue run-complete PATCH, then signal worker to exit."""
-        q = self._ensure_worker(record.child_session_id)
-        q.put_nowait(self._post_run_complete(record, status, result_summary, usage=usage))
-        q.put_nowait(None)
+        """Backward-compatible async wrapper for enqueue_subagent_run_complete."""
+        self.enqueue_subagent_run_complete(record, status, result_summary, usage=usage)
 
     # -------------------------------------------------------------------
     # Sub-agent persist — private (actual HTTP)
@@ -165,7 +198,7 @@ class PersistController:
         root_session_id: str,
         system_prompt: str,
     ) -> None:
-        await self._client.post(
+        resp = await self._client.post(
             f"{self._base}/subagents/internal/runs/",
             json={
                 "child_session_id": record.child_session_id,
@@ -177,6 +210,7 @@ class PersistController:
             },
             timeout=self.TIMEOUT,
         )
+        resp.raise_for_status()
 
     async def _post_message(
         self,
@@ -188,7 +222,7 @@ class PersistController:
         tool_name: str,
         metadata: Optional[Dict[str, Any]],
     ) -> None:
-        await self._client.post(
+        resp = await self._client.post(
             f"{self._base}/subagents/internal/runs/{record.child_session_id}/messages/",
             json={
                 "seq": seq,
@@ -200,6 +234,7 @@ class PersistController:
             },
             timeout=self.TIMEOUT,
         )
+        resp.raise_for_status()
 
     async def _post_run_complete(
         self,
@@ -222,11 +257,12 @@ class PersistController:
             details = usage.get("input_tokens_details") or {}
             payload["cached_tokens"] = details.get("cached_tokens", 0)
 
-        await self._client.patch(
+        resp = await self._client.patch(
             f"{self._base}/subagents/internal/runs/{record.child_session_id}/complete/",
             json=payload,
             timeout=self.TIMEOUT,
         )
+        resp.raise_for_status()
 
     # -------------------------------------------------------------------
     # Main loop persist (Track C)
@@ -255,11 +291,12 @@ class PersistController:
                 "content": self._truncate(content) if isinstance(content, str) else content,
             }
             payload.update(kwargs)
-            await self._client.post(
+            resp = await self._client.post(
                 f"{self._base}/messages/internal/save/",
                 json=payload,
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
         except Exception as e:
             logger.debug("Message save failed (best-effort): %s", e)
 
@@ -278,13 +315,16 @@ class PersistController:
             if usage:
                 payload["input_tokens"] = usage.get("input_tokens", 0)
                 payload["output_tokens"] = usage.get("output_tokens", 0)
+                details = usage.get("input_tokens_details") or {}
+                payload["cached_tokens"] = details.get("cached_tokens", 0)
             if model:
                 payload["model"] = model
-            await self._client.patch(
+            resp = await self._client.patch(
                 f"{self._base}/messages/internal/response/{response_id}/complete/",
                 json=payload,
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
         except Exception as e:
             logger.debug("Response complete failed (best-effort): %s", e)
 
@@ -298,7 +338,7 @@ class PersistController:
         if not response_id or not items:
             return
         try:
-            await self._client.post(
+            resp = await self._client.post(
                 f"{self._base}/messages/internal/tool-history/",
                 json={
                     "session_id": session_id,
@@ -307,6 +347,7 @@ class PersistController:
                 },
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
         except Exception as e:
             logger.debug("Tool history save failed (best-effort): %s", e)
 
@@ -319,11 +360,12 @@ class PersistController:
         if not tools:
             return
         try:
-            await self._client.post(
+            resp = await self._client.post(
                 f"{self._base}/messages/internal/tools/register/",
                 json={"tools": tools},
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
         except Exception as e:
             logger.debug("Tool schema register failed: %s", e)
 
@@ -337,6 +379,7 @@ class PersistController:
                 params={"names": ",".join(names)},
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
             return resp.json().get("tools", [])
         except Exception as e:
             logger.debug("Tool schema fetch failed: %s", e)
@@ -347,11 +390,12 @@ class PersistController:
         if not skills:
             return
         try:
-            await self._client.post(
+            resp = await self._client.post(
                 f"{self._base}/messages/internal/skills/register/",
                 json={"skills": skills},
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
         except Exception as e:
             logger.debug("Skill schema register failed: %s", e)
 
@@ -366,6 +410,7 @@ class PersistController:
                 params=params,
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
             return resp.json().get("skills", [])
         except Exception as e:
             logger.debug("Skill schema fetch failed: %s", e)
@@ -378,6 +423,7 @@ class PersistController:
                 f"{self._base}/messages/internal/skills/{skill_name}/",
                 timeout=self.TIMEOUT,
             )
+            resp.raise_for_status()
             return resp.json().get("body", "")
         except Exception as e:
             logger.debug("Skill body fetch failed: %s", e)

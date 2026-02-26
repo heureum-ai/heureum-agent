@@ -115,10 +115,13 @@ def complete_response(request, response_id):
 
     input_tokens = data.get("input_tokens")
     output_tokens = data.get("output_tokens")
+    cached_tokens = data.get("cached_tokens")
     if input_tokens is not None:
         response_obj.input_tokens = input_tokens
     if output_tokens is not None:
         response_obj.output_tokens = output_tokens
+    if cached_tokens is not None:
+        response_obj.cached_tokens = cached_tokens
     # Recompute total from both fields (handles partial updates correctly)
     if input_tokens is not None or output_tokens is not None:
         response_obj.total_tokens = (response_obj.input_tokens or 0) + (response_obj.output_tokens or 0)

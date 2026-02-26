@@ -51,6 +51,39 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+async def _register_client_skills(snapshot, pc) -> None:
+    """Register client-provided skills (with body) to Platform DB.
+
+    Uses the same ``register_skill_schemas`` path as server skills so that
+    all skill bodies are available in the DB for ``fetch_skill_body``.
+    """
+    items = snapshot.skills if hasattr(snapshot, "skills") else []
+    to_register = []
+    for item in items:
+        body = getattr(item, "body", None)
+        if not body:
+            continue
+        name = getattr(item, "name", None)
+        if not name:
+            continue
+        to_register.append(
+            {
+                "skill_name": name,
+                "description": getattr(item, "description", "") or "",
+                "tools": getattr(item, "tools", []) or [],
+                "depends_on": [],
+                "subagent_access": "always",
+                "source": "client",
+                "body": body,
+            }
+        )
+    if to_register:
+        try:
+            await pc.register_skill_schemas(to_register)
+        except Exception:
+            logger.debug("Client skill registration failed", exc_info=True)
+
+
 @router.post("/tools/execute")
 async def execute_tool_endpoint(request: dict) -> dict:
     """Execute a single server tool and return the result.
@@ -102,6 +135,11 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
         display_names,
         tool_meta_sets,
     ) = await resolve_tools(request, session_id=session_id, persist_controller=persist_controller)
+
+    # Register client-provided skills (with body) to Platform DB,
+    # using the same path as server skills so all skill bodies are in DB.
+    if request.skills_snapshot and persist_controller:
+        await _register_client_skills(request.skills_snapshot, persist_controller)
 
     # Store tool metadata in ToolController for per-session access
     tool_controller.set_tool_meta(session_id, tool_meta_sets)

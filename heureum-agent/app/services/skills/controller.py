@@ -42,6 +42,32 @@ class SkillController:
 
             self._tools_by_skill[skill_key] = self._resolve_tools(skill, meta)
 
+    def resolve_skill_tools(self, skill_names: list[str], session_id: str = "") -> Set[str]:
+        """Resolve tool names for given skill names from SKILL.md metadata.
+
+        Lookup priority:
+          1. Server skills via _alias_to_key → _tools_by_skill (SKILL.md)
+          2. Client skills via _build_snapshot_skill_map (Platform snapshot)
+        """
+        allowed: Set[str] = set()
+        snapshot = self._session_snapshots.get(session_id) if session_id else None
+        snapshot_map: Optional[Dict[str, List[str]]] = None
+
+        for name in skill_names:
+            norm = self._norm_name(name)
+            # 1. Server-side skill (SKILL.md = DB SkillSchema)
+            key = self._alias_to_key.get(norm)
+            if key:
+                allowed.update(self._tools_by_skill.get(key, set()))
+                continue
+            # 2. Client-side skill (Platform snapshot)
+            if snapshot_map is None and snapshot:
+                snapshot_map = self._build_snapshot_skill_map(snapshot)
+            if snapshot_map:
+                allowed.update(snapshot_map.get(norm, []))
+
+        return allowed
+
     def get_subagent_denied_tools(self, depth: int, max_depth: int) -> Set[str]:
         """Return tool names to deny at the given sub-agent depth."""
         denied: Set[str] = set()
@@ -59,6 +85,19 @@ class SkillController:
             if meta.subagent_access != "never":
                 tools |= self._tools_by_skill.get(skill_key, set())
         return tools
+
+    def get_delegatable_skill_map(self) -> Dict[str, Set[str]]:
+        """Return {skill_key: tool_names} for skills delegatable to sub-agents.
+
+        Excludes skills with subagent_access='never'.
+        """
+        result: Dict[str, Set[str]] = {}
+        for key, tools in self._tools_by_skill.items():
+            meta = self._skill_meta_by_key.get(key)
+            if meta and meta.subagent_access == "never":
+                continue
+            result[key] = set(tools)
+        return result
 
     def filtered(self, allowed_tools: Set[str]) -> "_FilteredSkillController":
         """Return a wrapper that restricts tools to *allowed_tools*."""
@@ -556,6 +595,9 @@ class _FilteredSkillController:
     def __init__(self, base: SkillController, allowed_tools: Set[str]) -> None:
         self._base = base
         self._allowed = allowed_tools
+
+    def get_delegatable_skill_map(self) -> Dict[str, Set[str]]:
+        return {k: v & self._allowed for k, v in self._base.get_delegatable_skill_map().items() if v & self._allowed}
 
     def get_all_tool_schemas(self, **kwargs: Any) -> List[Dict[str, Any]]:
         incoming = kwargs.pop("allowed_tools", None)

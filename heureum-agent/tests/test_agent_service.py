@@ -144,9 +144,9 @@ class TestPreparePromptAndTools:
         prompt, tools = svc._prepare_prompt_and_tools()
         assert "<identity>" in prompt
         assert "<instructions>" not in prompt
-        # Server-only tools are always included
+        # Main agent only sees allowlisted server tools (activate_skill)
         server_names = {t["function"]["name"] for t in tools}
-        assert "manage_todo" in server_names
+        assert "activate_skill" in server_names
 
     def test_prompt_with_instructions(self):
         """Verify custom instructions are wrapped in instructions tags."""
@@ -162,17 +162,27 @@ class TestPreparePromptAndTools:
         prompt, _ = svc._prepare_prompt_and_tools(client_tool_prompts=guides)
         assert '<tool_guide name="bash">' in prompt
 
-    def test_no_client_schemas_returns_all_server_tools(self):
-        """Without client schemas, all server skill tools are still included."""
+    def test_no_client_schemas_main_agent_only_allowlist(self):
+        """Main agent only gets allowlisted tools (activate_skill), not all server tools."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
+        names = {t["function"]["name"] for t in tools}
+        assert "activate_skill" in names
+        # Full server tools (manage_todo, notify_user) are NOT bound to main agent
+        assert "manage_todo" not in names
+        assert "notify_user" not in names
+
+    def test_subagent_gets_all_server_tools(self):
+        """Subagents get full server tool set."""
+        svc = _create_service()
+        _, tools = svc._prepare_prompt_and_tools(is_subagent=True)
         names = {t["function"]["name"] for t in tools}
         assert "manage_todo" in names
         assert "notify_user" in names
         assert "manage_periodic_task" in names
 
-    def test_periodic_task_included_with_web_search(self):
-        """When client provides web_search, periodic_task tools are included."""
+    def test_periodic_task_included_in_subagent_with_web_search(self):
+        """When subagent has web_search, periodic_task tools are included."""
         svc = _create_service()
         web_search_schema = {
             "type": "function",
@@ -184,6 +194,7 @@ class TestPreparePromptAndTools:
         }
         _, tools = svc._prepare_prompt_and_tools(
             client_tool_schemas=[web_search_schema],
+            is_subagent=True,
         )
         names = {t["function"]["name"] for t in tools}
         assert "manage_periodic_task" in names
@@ -199,8 +210,20 @@ class TestPreparePromptAndTools:
         assert "bash" in names
         assert "ask_question" in names
 
-    def test_mcp_tools_appended(self):
-        """Verify MCP tool schemas are appended alongside client schemas."""
+    def test_mcp_tools_appended_in_subagent(self):
+        """Verify MCP tool schemas are appended for subagents."""
+        mcp = [{"type": "function", "function": {"name": "mcp_tool"}}]
+        svc = _create_service(mcp_tools=mcp)
+        _, tools = svc._prepare_prompt_and_tools(
+            client_tool_schemas=[self._BASH_SCHEMA],
+            is_subagent=True,
+        )
+        names = [s["function"]["name"] for s in tools]
+        assert "bash" in names
+        assert "mcp_tool" in names
+
+    def test_mcp_tools_excluded_from_main_agent(self):
+        """Main agent does not get MCP tools (delegates via activate_skill)."""
         mcp = [{"type": "function", "function": {"name": "mcp_tool"}}]
         svc = _create_service(mcp_tools=mcp)
         _, tools = svc._prepare_prompt_and_tools(
@@ -208,10 +231,10 @@ class TestPreparePromptAndTools:
         )
         names = [s["function"]["name"] for s in tools]
         assert "bash" in names
-        assert "mcp_tool" in names
+        assert "mcp_tool" not in names
 
-    def test_mcp_tools_activate_skills(self):
-        """Verify MCP tools count as client tools for skill activation."""
+    def test_mcp_tools_activate_skills_in_subagent(self):
+        """Verify MCP tools count as client tools for skill activation in subagent."""
         mcp = [
             {
                 "type": "function",
@@ -223,18 +246,16 @@ class TestPreparePromptAndTools:
             }
         ]
         svc = _create_service(mcp_tools=mcp)
-        _, tools = svc._prepare_prompt_and_tools()
+        _, tools = svc._prepare_prompt_and_tools(is_subagent=True)
         names = {t["function"]["name"] for t in tools}
         assert "manage_periodic_task" in names
 
-    def test_empty_schemas_no_mcp(self):
-        """Verify an empty client schema list still includes always-active server tools."""
+    def test_main_agent_only_allowlist_tools(self):
+        """Main agent only gets allowlisted server tools, not all."""
         svc = _create_service()
         _, tools = svc._prepare_prompt_and_tools()
         names = {t["function"]["name"] for t in tools}
-        # Always-active server tools present (no client_tools dependency)
-        assert "manage_todo" in names
-        assert "notify_user" in names
+        assert "activate_skill" in names
         assert len(tools) > 0
 
     def test_skills_prompt_disables_server_guides(self):
@@ -247,7 +268,7 @@ class TestPreparePromptAndTools:
         assert "<tool_guides>" not in prompt
 
     def test_skills_snapshot_filters_server_tools(self):
-        """Server tool schemas are filtered by snapshot-declared tool list."""
+        """Server tool schemas are filtered by snapshot-declared tool list (subagent)."""
         svc = _create_service()
         snapshot = {
             "prompt": "<available_skills/>",
@@ -263,6 +284,7 @@ class TestPreparePromptAndTools:
         _, tools = svc._prepare_prompt_and_tools(
             skills_prompt=snapshot["prompt"],
             skills_snapshot=snapshot,
+            is_subagent=True,
         )
         names = {t["function"]["name"] for t in tools}
         assert "manage_todo" in names

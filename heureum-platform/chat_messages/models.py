@@ -31,6 +31,7 @@ class Response(models.Model):
     input_tokens = models.IntegerField(default=0)
     output_tokens = models.IntegerField(default=0)
     total_tokens = models.IntegerField(default=0)
+    cached_tokens = models.IntegerField(default=0)
 
     # Pricing
     input_cost = models.DecimalField(max_digits=12, decimal_places=6, default=0)

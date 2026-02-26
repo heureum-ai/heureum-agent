@@ -67,7 +67,7 @@ _COUNTRY_CODE_MAP = {
 # Gemini Grounding — read from env (not in Settings; shared GCP config)
 _GEMINI_GROUNDING_MODEL = os.getenv("GEMINI_GROUNDING_SEARCH_MODEL", "gemini-2.5-flash-lite")
 _GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-_GOOGLE_CLOUD_LOCATION = os.getenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+_GOOGLE_CLOUD_LOCATION = os.getenv("GEMINI_GROUNDING_LOCATION", os.getenv("GOOGLE_CLOUD_LOCATION", "asia-northeast1"))
 
 # ---------------------------------------------------------------------------
 # Unified search result schema
@@ -273,14 +273,31 @@ async def _dispatch_search(
     country: Optional[str],
 ) -> SearchResponse:
     """Select a search provider and return a normalised SearchResponse."""
+    last_error = None
+
     if settings.TAVILY_API_KEY:
-        return await _search_tavily(http, query, search_depth, max_results, country)
+        try:
+            return await _search_tavily(http, query, search_depth, max_results, country)
+        except Exception as e:
+            logger.warning("Tavily search failed, falling back to next provider: %s", e)
+            last_error = e
 
-    if _GOOGLE_CLOUD_PROJECT:
-        return await _search_gemini_grounding(query, max_results)
+    # if _GOOGLE_CLOUD_PROJECT:
+    #     try:
+    #         return await _search_gemini_grounding(query, max_results)
+    #     except Exception as e:
+    #         logger.warning("Gemini Grounding search failed, falling back to next provider: %s", e)
+    #         last_error = e
 
-    if settings.OPENAI_API_KEY:
-        return await _search_openai(query, max_results, country)
+    # if settings.OPENAI_API_KEY:
+    #     try:
+    #         return await _search_openai(query, max_results, country)
+    #     except Exception as e:
+    #         logger.warning("OpenAI search failed: %s", e)
+    #         last_error = e
+
+    if last_error:
+        raise last_error
 
     raise LookupError(
         "No search API key configured. Set TAVILY_API_KEY, GOOGLE_CLOUD_PROJECT, or OPENAI_API_KEY."

@@ -13,12 +13,21 @@ This guide is written for coding agents and human developers who want to **creat
 ```
 app/skills/
 ├── activate_task/       # Progressive skill activation (subagent_access: never)
-├── evaluate_task/       # LLM-as-judge quality evaluation (hook-only, no tools)
+├── evaluate_task/       # LLM-as-judge quality gatekeeper (internal, no exposed tools)
 ├── notification_task/   # Push notifications via Platform API (subagent_access: never)
-├── periodic_task/       # Scheduled task registration/management
-├── plan_task/           # Hierarchical task plan + sub-agent orchestration
-└── web_search_task/     # Web search workflow guide (no server tools)
+├── periodic_task/       # Scheduled recurring task management (subagent_access: never)
+├── plan_task/           # Hierarchical task plan + sub-agent orchestration (subagent_access: orchestrator)
+└── web_search_task/     # Web search workflow guide (guide-only, no server tools)
 ```
+
+| Skill | Type | Tools | `depends_on` | `subagent_access` |
+|-------|------|-------|-------------|-------------------|
+| `activate_task` | Tool | `activate_skill` | — | `never` |
+| `evaluate_task` | Hook | — (internal) | — | — |
+| `notification_task` | Tool | `notify_user` | — | `never` |
+| `periodic_task` | Tool | `manage_periodic_task` | `web_search_task`, `notification_task` | `never` |
+| `plan_task` | Tool | `manage_todo`, `sessions_spawn`, `sessions_spawn_status`, `ask_question` | — | `orchestrator` |
+| `web_search_task` | Guide | — (uses MCP: `mcp_web__search`, `web_fetch`, `read`) | — | `always` |
 
 ---
 
@@ -26,7 +35,7 @@ app/skills/
 
 | Type | server tools | `service.py` | `execute()` | Example |
 |------|-------------|--------------|-------------|---------|
-| **Tool skill** | Yes | Required | Required | `notification_task`, `periodic_task`, `plan_task` |
+| **Tool skill** | Yes | Required | Required | `notification_task`, `periodic_task`, `plan_task`, `activate_task` |
 | **Guide skill** | No (`tool_schemas=[]`) | Not needed | N/A | `web_search_task` |
 | **Hook skill** | No | Required (hook methods) | N/A | `evaluate_task` |
 
@@ -73,6 +82,7 @@ After discovery, the framework also:
 - Loads and parses `SKILL.md` → `SkillMeta` dataclass
 - Builds a `tool_name → skill` mapping from `tool_schemas[*].function.name`
 - Extracts `display_name` from each schema's top-level `display_name` field
+- Resolves skill name aliases (directory name, `skill.name`, `meta.name`)
 
 **Reference:** `app/services/skills/discovery.py`
 
@@ -111,8 +121,8 @@ The SKILL.md file has two parts: YAML frontmatter and a markdown body.
 | `subagent_access` | No | `always` (default) / `orchestrator` / `never` |
 
 **`subagent_access` values:**
-- `always` — Available in all sub-agents
-- `orchestrator` — Available only at orchestrator depth (depth < max), excluded from leaf sub-agents
+- `always` — Available in all sub-agents (default)
+- `orchestrator` — Available only at orchestrator depth (depth < max_depth), excluded from leaf sub-agents
 - `never` — Root session only, never passed to sub-agents
 
 **Frontmatter parsing rules** (from `app/services/skills/metadata.py`):
@@ -143,9 +153,9 @@ When NOT to use:
 - When the user is actively reading the chat — notifications are for async delivery.
 
 Usage:
-`​`​`
+` ` `
 notify_user(title="Short descriptive title", body="Detailed message with results")
-`​`​`
+` ` `
 
 Guidelines:
 - Keep the `title` short and descriptive (under 50 characters).
@@ -312,6 +322,10 @@ class MySkill:
         """Wait for background tasks to complete."""
         pass
 
+    def finalize_abandoned_steps(self, session_id: str) -> None:
+        """Clean up when the agent abandons in-progress work."""
+        pass
+
     def build_retry_guidance(self, session_id: str, abandoned_text: str) -> str | None:
         """Return retry guidance when the agent abandons a task."""
         return None
@@ -323,12 +337,12 @@ The `on_init(**kwargs)` method receives these keyword arguments from `SkillContr
 
 | Key | Type | Description |
 |-----|------|-------------|
-| `skill_controller` | `SkillController` | Always injected by `startup()` itself. Access other skills, execute tools. |
+| `skill_controller` | `SkillController` | Always injected. Access other skills, execute tools, manage PSA. |
 | `create_subagent_task_fn` | `Callable` | Async function to spawn a sub-agent. Used by `plan_task`. |
 | `get_skills_prompt` | `Callable[[], str]` | Returns the current `<available_skills>` prompt block. |
 | `subagent_config` | `dict` | Sub-agent limits: `{"max_spawn_depth": int, "max_children": int}` |
 
-These are passed from `AgentLoopController._initialize()` → `SkillController.startup()`. See `app/services/agent_loop/controller.py:207`.
+These are passed from `AgentLoopController.ensure_initialized()` → `SkillController.startup()`. See `app/services/agent_loop/controller.py`.
 
 #### `get_state_prompt` injection
 
@@ -361,10 +375,15 @@ The SKILL.md body and lifecycle prompts are injected into the system prompt via 
 <safety>…</safety>
 <response_style>…</response_style>
 <tool_usage>…</tool_usage>
+<task_execution>…</task_execution>
 <conversation>…</conversation>
 <language>…</language>
 
-<tool_guides>                              ← SKILL.md bodies go here
+<available_skills>                           ← Client skills catalog (optional)
+  …skill list from client snapshot…
+</available_skills>
+
+<tool_guides>                                ← SKILL.md bodies go here
   <tool_guide name="notification_task">
     …SKILL.md body…
   </tool_guide>
@@ -373,7 +392,7 @@ The SKILL.md body and lifecycle prompts are injected into the system prompt via 
   </tool_guide>
 </tool_guides>
 
-<session_state>                            ← get_state_prompt() outputs go here
+<session_state>                              ← get_state_prompt() outputs go here
   …runtime state from skills…
 </session_state>
 
@@ -387,6 +406,10 @@ The SKILL.md body and lifecycle prompts are injected into the system prompt via 
 3. `SkillController.get_state_prompts()` calls `get_state_prompt(session_id)` on every skill
 4. `SystemPromptBuilder.add_state_prompts()` collects them inside `<session_state>`
 
+**Identity variants:**
+- **Agent** (`AGENT_IDENTITY_PROMPT`): Full identity with `<task_execution>` block that instructs the agent to use `manage_todo` for multi-step tasks
+- **Sub-agent** (`SUBAGENT_IDENTITY_PROMPT`): Lightweight — no `<task_execution>`, no `<available_skills>` scanning, no `<response_style>`
+
 ---
 
 ## Tool Execution Path
@@ -395,9 +418,9 @@ When the LLM generates a tool call, it flows through these layers:
 
 ```
 Agent Loop (runner.py)
-  → ToolExecutionController.execute_tool()          # app/services/agent_loop/execution.py:59
+  → ToolExecutionController.execute_tool()          # app/services/agent_loop/execution.py
     → skill_controller.get_skill_for_tool(name)      # Check if it's a skill tool
-    → SkillController.execute_tool(name, args, sid)  # app/services/skills/controller.py:452
+    → SkillController.execute_tool(name, args, sid)  # app/services/skills/controller.py
       → skill.execute(name, arguments, session_id)   # Your skill's execute() method
 ```
 
@@ -409,13 +432,64 @@ Agent Loop (runner.py)
 
 The middleware pipeline (`MiddlewareRunner`) wraps each dispatch with `before`/`after` hooks for blocking, argument modification, and logging.
 
+**Execution modes:**
+- `execute_tool_calls()` — parallel execution of tool calls, builds ToolMessages
+- `execute_tool_calls_pipelined()` — `asyncio.wait(FIRST_COMPLETED)` for streaming follow-ups
+- `handle_chained_calls()` — follow-up chain loop up to `MAX_CHAIN_DEPTH`
+
+**Tool schema caching:**
+- LRU cache with `frozenset(missing)` key → `(timestamp, db_tools)`
+- TTL: 300 seconds (5 minutes)
+- Evicts stale entries when cache > 50
+
 **Reference files:**
 
 | Component | File |
 |-----------|------|
 | `ToolExecutionController` | `app/services/agent_loop/execution.py` |
-| `SkillController.execute_tool()` | `app/services/skills/controller.py:452` |
+| `SkillController.execute_tool()` | `app/services/skills/controller.py` |
 | Middleware events | `app/services/middleware/types.py` (`SkillExecuteEvent`) |
+
+---
+
+## Progressive Skill Activation (PSA)
+
+Skills can be loaded progressively at runtime per session.
+
+- **Server skills** (e.g., `plan_task`, `notification_task`) — always active, no activation needed
+- **Client skills** — require explicit activation via `activate_skill(skill_names=[...])`
+
+**How it works:**
+1. `activate_task` skill exposes `activate_skill` tool
+2. Agent calls `activate_skill(skill_names=["coding", "web"])` when needed
+3. `SkillController.activate_skills(session_id, skill_names)` registers them
+4. `get_active_tool_names(session_id)` returns union of server tools + activated client tools
+5. The `<available_skills>` catalog in the prompt lets the agent know which skills can be activated
+
+**State tracking:**
+- `SkillController._active_skills[session_id]` — set of activated skill names per session
+- Cleared on session end via `clear_session(session_id)`
+
+---
+
+## Sub-agent Orchestration
+
+The `plan_task` skill enables hierarchical task execution via sub-agents.
+
+**Key concepts:**
+- **Plan phases:** `awaiting_pre_thinking` → `executing` → `ready_for_final` → `finalized`
+- **Thinking checkpoints:** `pre_plan` (approve before spawning) and `post_plan` (verify before summarizing)
+- **Dependency resolution:** Tasks wait for `depends_on` predecessors; cascading spawn on completion
+- **Limits:** `max_spawn_depth=2`, `max_children=5` per session
+
+**Authorization model (`subagent_access`):**
+- `never` — tool denied at all sub-agent depths (e.g., `activate_skill`, `notify_user`)
+- `orchestrator` — tool available at `depth < max_depth`, denied at leaf depth (e.g., `manage_todo`)
+- `always` — tool available everywhere (default)
+
+**Sub-agent inheritance:**
+- Child agents inherit parent's active PSA skills and `skills_prompt`
+- Depth tracked in module-level dict: `_session_depth[session_id]`
 
 ---
 
@@ -473,13 +547,14 @@ async def _call_platform(self, session_id: str, payload: dict) -> str:
 | Component | File Path | Key Responsibilities |
 |-----------|-----------|---------------------|
 | **Skill auto-discovery** | `app/services/skills/discovery.py` | Scan `app/skills/`, import modules, validate `skill` objects |
-| **Skill controller** | `app/services/skills/controller.py` | Registry, schema aggregation, tool dispatch, lifecycle orchestration |
+| **Skill controller** | `app/services/skills/controller.py` | Registry, PSA, schema aggregation, tool dispatch, lifecycle orchestration |
 | **SKILL.md parser** | `app/services/skills/metadata.py` | `parse_skill_md()`, `load_skill_meta()`, `load_guide_prompt()` |
 | **SkillMeta dataclass** | `app/services/skills/types.py` | `SkillMeta(name, description, body, tools, depends_on, subagent_access)` |
 | **Tool execution pipeline** | `app/services/agent_loop/execution.py` | `ToolExecutionController` — dispatches to skills, MCP, or client tools |
 | **System prompt builder** | `app/services/prompts/base.py` | `SystemPromptBuilder` — assembles `<tool_guides>`, `<session_state>` |
 | **Prompt controller** | `app/services/prompts/controller.py` | `PromptController` — orchestrates prompt + tool schema resolution |
 | **Agent loop controller** | `app/services/agent_loop/controller.py` | Calls `skill_controller.startup()` with kwargs |
+| **Sub-agent orchestration** | `app/services/subagent.py` | `SubagentContext`, `create_subagent_task()`, depth tracking |
 | **App config** | `app/config.py` | `settings.PLATFORM_API_URL` and other configuration |
 
 ---
@@ -491,11 +566,13 @@ App Startup
   → SkillController.__init__()
     → discover_skills()  — scan app/skills/, import __init__.py, load `skill` var
     → load_skill_meta()  — parse each SKILL.md into SkillMeta
-    → build tool_name → skill mapping
-  → SkillController.startup(**kwargs)
-    → call on_init(**kwargs) on each skill (async, parallel via gather)
-    → kwargs includes: skill_controller, create_subagent_task_fn,
-      get_skills_prompt, subagent_config
+    → build tool_name → skill mapping + name aliases
+  → AgentLoopController.ensure_initialized()
+    → mcp_client.discover_tools()
+    → SkillController.startup(**kwargs)
+      → call on_init(**kwargs) on each skill (async, parallel via gather)
+      → kwargs: skill_controller, create_subagent_task_fn,
+        get_skills_prompt, subagent_config
 
 Agent Loop (every turn)
   → Prompt build
@@ -506,9 +583,49 @@ Agent Loop (every turn)
     → ToolExecutionController.execute_tool(name, args, session_id)
       → SkillController.execute_tool() → skill.execute()
 
+Sub-agent Spawn (plan_task)
+  → create_subagent_task(record, request, registry, clear_depth_fn)
+    → _run_subagent() with asyncio timeout
+    → Inherits parent's PSA skills + skills_prompt
+    → On completion: registry.mark_completed() + announce to parent
+
 Session End
   → SkillController.clear_session(session_id)
     → call clear_session() on each skill
+    → clear PSA state for session
+```
+
+---
+
+## Skill Dependency Graph
+
+```
+plan_task (orchestrator)
+├── tools: manage_todo, sessions_spawn, sessions_spawn_status, ask_question
+└── sub-agents inherit active PSA skills from parent
+
+periodic_task (never)
+├── tools: manage_periodic_task
+├── depends_on: web_search_task, notification_task
+│   ├── web_search_task → guide for mcp_web__search, web_fetch, read
+│   └── notification_task → notify_user
+└── dry-run workflow uses plan_task (manage_todo) for TODO tracking
+
+notification_task (never)
+├── tools: notify_user
+└── Platform API: /api/v1/notifications/internal/send/
+
+activate_task (never)
+├── tools: activate_skill
+└── Manages PSA registration per session
+
+evaluate_task (internal)
+├── tools: none exposed
+└── evaluate_response() hook — quality gate before response delivery
+
+web_search_task (always)
+├── tools: none (guide-only)
+└── Teaches search→fetch→read workflow for MCP tools
 ```
 
 ---
@@ -537,7 +654,7 @@ When adding a new skill, verify:
 |---------|----------------|--------------|
 | Minimal tool skill | `notification_task` | Single tool, Platform API call, ~70 lines |
 | Guide-only skill | `web_search_task` | No `service.py`, `tool_schemas=[]`, body teaches LLM workflow |
-| Complex stateful skill | `plan_task` | `get_state_prompt`, `await_pending`, sub-agent spawning |
-| Platform API + scheduling | `periodic_task` | `depends_on` usage, CRUD via Platform API |
-| Progressive activation | `activate_task` | `on_init` with `skill_controller`, cross-skill interaction |
-| Hook skill | `evaluate_task` | `evaluate_response` hook, no tools |
+| Complex stateful skill | `plan_task` | `get_state_prompt`, `await_pending`, sub-agent spawning, thinking checkpoints |
+| Platform API + scheduling | `periodic_task` | `depends_on` usage, CRUD via Platform API, mandatory dry-run workflow |
+| Progressive activation | `activate_task` | `on_init` with `skill_controller`, cross-skill PSA management |
+| Hook skill | `evaluate_task` | `evaluate_response` hook, internal quality gate, no exposed tools |

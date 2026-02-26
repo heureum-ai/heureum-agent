@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     AGENT_THINKING_BUDGET: int = 1024  # Gemini 2.5: thinking token budget (0 = disabled)
 
     # Agent loop
-    MAX_AGENT_ITERATIONS: int = 50
+    MAX_AGENT_ITERATIONS: int = 30  # reduced from 50 to limit token costs
     MAX_CHAIN_DEPTH: int = 10  # max consecutive chain steps without returning to LLM
 
     # Session
@@ -104,7 +104,7 @@ class Settings(BaseSettings):
     LLM_RETRY_BASE_DELAY: float = 1.0  # seconds, doubles each retry
 
     # Plan retry (text-only responses while plan has unfinished steps)
-    MAX_PLAN_RETRIES: int = 3
+    MAX_PLAN_RETRIES: int = 1  # original + 1 retry to prevent sub-agent tree amplification
 
     # Self-evaluation (LLM-as-judge)
     ENABLE_SELF_EVALUATION: bool = False
@@ -132,8 +132,20 @@ class Settings(BaseSettings):
     # Sub-agent
     SUBAGENT_MAX_SPAWN_DEPTH: int = 2
     SUBAGENT_MAX_CHILDREN: int = 5
+    SUBAGENT_MAX_TOTAL: int = 15  # global cap per root session
     SUBAGENT_TIMEOUT_SECONDS: int = 300
     SUBAGENT_MAX_ITERATIONS: int = 30
+    SUBAGENT_MAX_SKILLS: int = 2  # max skills per sub-agent spawn
+
+    # Subagent context compaction
+    SUBAGENT_MAX_HISTORY_SIZE: int = 16
+    SUBAGENT_POLL_THROTTLE_THRESHOLD: int = 5
+    SUBAGENT_POLL_THROTTLE_DELAY: float = 2.0
+    SUBAGENT_STATUS_TASK_MAXLEN: int = 200
+    SUBAGENT_STATUS_RESULT_MAXLEN: int = 500
+
+    # Context retention
+    CONTEXT_MINIMAL_RETENTION_ENABLED: bool = False
 
     def get_cors_origins(self) -> List[str]:
         """Parse CORS origins as list.

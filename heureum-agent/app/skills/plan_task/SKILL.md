@@ -30,6 +30,18 @@ You have `manage_todo`, `sessions_spawn`, `sessions_spawn_status`, and `ask_ques
 
 ## Workflow — follow strictly
 
+### Step 0: Query Analysis (BEFORE creating a plan)
+
+Before creating tasks, analyze the user's request systematically:
+1. **Identify information categories**: What types of information are needed? (e.g. facts, opinions, comparisons, statistics)
+2. **Classify task types**:
+   - `research`: Information gathering — web searches, data collection
+   - `analysis`: Data processing — comparing, evaluating, reasoning
+   - `synthesis`: Combining results — writing summaries, creating reports
+   - `verification`: Fact-checking — cross-referencing, validating claims
+3. **Determine parallelism**: Which tasks are independent? Which depend on others?
+4. **Size tasks correctly**: Each task should be a single search/analysis unit. If a task requires multiple searches, split it.
+
 ### Step 1: Create a plan with tasks and dependencies.
 
 ```
@@ -43,6 +55,9 @@ manage_todo(action="create", goal="Overall goal description", tasks=[
 - Every task must have a unique `id` and `description`.
 - Use `depends_on` to declare dependencies — tasks wait until predecessors complete.
 - `todo_items` is optional — use it for checklists within a task.
+- **Always include a final synthesis task** that depends on all research/analysis tasks.
+- Keep tasks atomic — each should be completable by a single sub-agent with a single tool focus.
+- Limit tasks to 5-7 for most queries. Avoid over-decomposition.
 - After create, the plan is in `awaiting_pre_thinking` phase — sub-agents are NOT spawned yet.
 
 ### Step 2: Review and approve execution (pre-plan checkpoint).

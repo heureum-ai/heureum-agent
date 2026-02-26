@@ -314,7 +314,7 @@ class TestBuildResponse:
 
 class TestConstants:
     def test_max_agent_iterations(self):
-        assert settings.MAX_AGENT_ITERATIONS == 50
+        assert settings.MAX_AGENT_ITERATIONS == 30
 
 
 class TestPipelinedChainDepth:

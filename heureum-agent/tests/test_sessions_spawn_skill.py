@@ -295,6 +295,6 @@ class TestRecordToDict:
 
     def test_summary_truncation(self):
         r = SubagentRunRecord(child_session_id="c1", parent_session_id="s1", task="task1")
-        r.result_summary = "x" * 1000
+        r.result_summary = "x" * 3000
         result = SessionsSpawnSkill._record_to_dict(r)
         assert len(result["result_summary"]) == 500

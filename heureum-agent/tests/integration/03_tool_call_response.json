@@ -1,37 +1,32 @@
 {
-    "id": "resp_cfb1f5386c7545f8a9cf19d64fca7937",
-    "object": "response",
-    "created_at": 1770695112,
-    "completed_at": 1770695113,
-    "model": "gpt-4o-mini",
-    "status": "incomplete",
-    "output": [
+    "detail": [
         {
-            "type": "function_call",
-            "id": "fc_3046501b76d14038b62e3b0cf33743df",
-            "call_id": "call_hjYPyf1RkfFyTbK0oUsIvolS",
-            "name": "ask_question",
-            "arguments": "{\"question\": \"점심으로 무엇을 드셨나요?\", \"choices\": [\"밥\", \"면\", \"샐러드\", \"샌드위치\", \"기타\"], \"allow_user_input\": true}",
-            "status": "completed",
-            "usage": null,
-            "display_name": "Ask Question"
+            "type": "missing",
+            "loc": [
+                "body",
+                "tools",
+                0,
+                "display_name"
+            ],
+            "msg": "Field required",
+            "input": {
+                "type": "function",
+                "function": {
+                    "name": "ask_question",
+                    "description": "Ask a question to the user",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "question": {
+                                "type": "string"
+                            }
+                        },
+                        "required": [
+                            "question"
+                        ]
+                    }
+                }
+            }
         }
-    ],
-    "usage": {
-        "input_tokens": 1380,
-        "output_tokens": 50,
-        "total_tokens": 1430,
-        "input_tokens_details": {
-            "cached_tokens": 0
-        },
-        "output_tokens_details": {
-            "reasoning_tokens": 0
-        }
-    },
-    "error": null,
-    "metadata": {
-        "session_id": "session_372dc60ad9214c84",
-        "iterations": 1,
-        "tool_call_count": 0
-    }
+    ]
 }

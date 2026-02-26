@@ -217,11 +217,19 @@ class AgentLoopRunner:
                     self.ctx.session_id,
                     text,
                 )
+                # Prevent re-activation: instruct LLM to synthesize, not re-spawn
+                no_reactivate = (
+                    "IMPORTANT: Do NOT call activate_skill again. "
+                    "Sub-agents have already been spawned. "
+                    "Synthesize the available results into a response for the user."
+                )
                 fallback = self._messages.get_default("loop.plan_retry_fallback")
+                raw_guidance = guidance or fallback
+                merged_guidance = f"{no_reactivate}\n\n{raw_guidance}"
                 content, blocked = await self._messages.resolve(
                     "loop.plan_retry",
                     session_id=self.ctx.session_id,
-                    guidance=guidance or fallback,
+                    guidance=merged_guidance,
                 )
                 if not blocked:
                     self.ctx.messages = [HumanMessage(content=content)]
@@ -375,6 +383,7 @@ class AgentLoopRunner:
                     response = approval_response
                 else:
                     response = await self._run_tool_iterations()
+        await self._service.flush_turn_tool_results(self.ctx.session_id)
         await self._flush_persists()
         return response
 
@@ -496,11 +505,27 @@ class AgentLoopRunner:
         if mw:
             await mw.run_after(event)
 
+    # -- poll-only detection ------------------------------------------------
+
+    def _is_poll_only_iteration(self, tool_calls: list) -> bool:
+        """Check if ALL tool calls in this iteration are known poll/wait tools."""
+        if not tool_calls:
+            return False
+        from app.services.tools.loop_detection import _KNOWN_POLL_TOOLS
+
+        meta = self._tool_execution.tool_controller.get_tool_meta(self.ctx.session_id)
+        poll_set = _KNOWN_POLL_TOOLS | frozenset(meta.poll_tools)
+        return all(tc.name in poll_set for tc in tool_calls)
+
     # -- non-streaming tool loop -------------------------------------------
 
     async def _run_tool_iterations(self) -> ResponseObject:
         self._skill_controller.clear_completed_plans(self.ctx.session_id)
-        for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
+        _poll_bonus = 0
+        _MAX_POLL_BONUS = 10  # hard cap to prevent token cost explosion
+        iteration = 0
+        while iteration < settings.MAX_AGENT_ITERATIONS + _poll_bonus:
+            iteration += 1
             instructions = self._get_instructions()
             state_prompts = self._get_state_prompts(iteration=iteration)
             skills_prompt = self.ctx.skills_prompt
@@ -601,6 +626,11 @@ class AgentLoopRunner:
             response = await self._handle_tool_call_iteration(result, iteration)
             if response:
                 return response
+
+            # Poll-only iteration: extend budget so polling doesn't consume
+            # the real progress iteration count.
+            if self._is_poll_only_iteration(result.tool_calls or []):
+                _poll_bonus = min(_poll_bonus + 1, _MAX_POLL_BONUS)
 
             # Tool calls executed successfully — reset plan retry counter
             # Only reset if no unfinished skill work remains (defense-in-depth
@@ -783,6 +813,52 @@ class AgentLoopRunner:
             if chain_resp:
                 return chain_resp
 
+        # Guard: block ask_question while sub-agents are running
+        if client_calls and self._skill_controller.has_unfinished_work(self.ctx.session_id):
+            from app.services.prompts.controller import MAIN_AGENT_TOOLS
+            blocked_calls = [tc for tc in client_calls if tc.name in MAIN_AGENT_TOOLS]
+            if blocked_calls:
+                client_calls = [tc for tc in client_calls if tc.name not in MAIN_AGENT_TOOLS]
+                error_results: list[BaseMessage] = []
+                for tc in blocked_calls:
+                    error_msg, _ = await self._messages.resolve(
+                        "tool.error_subagent_busy",
+                        session_id=self.ctx.session_id,
+                        name=tc.name,
+                    )
+                    error_result = self._service.responses.make_tool_result_message(
+                        tool_name=tc.name,
+                        tool_call_id=tc.id,
+                        result=error_msg,
+                    )
+                    error_results.append(error_result)
+                    self.ctx.messages.append(error_result)
+                    self._service.responses.append_tool_output_items(
+                        tool_name=tc.name,
+                        display_name=self.ctx.display_names.get(tc.name, tc.name),
+                        arguments=tc.args,
+                        tool_call_id=tc.id,
+                        result=error_msg,
+                        output_items=self.ctx.output_items,
+                    )
+                    self._persist_message(
+                        "function_call_output",
+                        "tool",
+                        error_msg,
+                        metadata={"tool_call_id": tc.id, "tool_name": tc.name},
+                    )
+                if not client_calls and not server_calls:
+                    await self._service.append_tool_interaction(
+                        self.ctx.session_id,
+                        self.ctx.messages,
+                        [tc.model_dump() for tc in all_tool_calls],
+                        error_results,
+                        usage=result.usage.model_dump() if result.usage else {},
+                        assistant_lc_message=result.assistant_lc_message,
+                    )
+                    self.ctx.messages = []
+                    return None  # continue loop
+
         if client_calls:
             client_output = [
                 self._service.responses.tool_call_output(
@@ -899,6 +975,7 @@ class AgentLoopRunner:
                 }
             )
 
+        await self._service.flush_turn_tool_results(self.ctx.session_id)
         await self._flush_persists()
         yield self._service.responses.sse_done()
 
@@ -1044,7 +1121,11 @@ class AgentLoopRunner:
     async def _stream_tool_iterations(self):
         """Stream the tool iteration loop, yielding SSE events."""
         self._skill_controller.clear_completed_plans(self.ctx.session_id)
-        for iteration in range(1, settings.MAX_AGENT_ITERATIONS + 1):
+        _poll_bonus = 0
+        _MAX_POLL_BONUS = 10  # hard cap to prevent token cost explosion
+        iteration = 0
+        while iteration < settings.MAX_AGENT_ITERATIONS + _poll_bonus:
+            iteration += 1
             # Inject current TODO state into instructions for this iteration
             self.ctx.request.instructions = self._get_instructions()
 
@@ -1278,6 +1359,11 @@ class AgentLoopRunner:
                     }
                 )
                 return
+
+            # Poll-only iteration: extend budget so polling doesn't consume
+            # the real progress iteration count.
+            if self._is_poll_only_iteration(tool_calls_info):
+                _poll_bonus = min(_poll_bonus + 1, _MAX_POLL_BONUS)
 
             # Tool calls executed successfully — reset plan retry counter
             # Only reset if no unfinished skill work remains (defense-in-depth

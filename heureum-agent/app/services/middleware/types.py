@@ -26,6 +26,7 @@ class Domain(str, enum.Enum):
     SKILL = "skill"
     MCP = "mcp"
     COMPACTION = "compaction"
+    RETENTION = "retention"
     MESSAGE = "message"
     SUBAGENT = "subagent"
 
@@ -163,6 +164,23 @@ class CompactionEvent(MiddlewareEvent):
 
 
 @dataclass
+class RetentionEvent(MiddlewareEvent):
+    """Event for tool flush (domain=RETENTION, method="flush_turn_tool_results").
+
+    ``before``: return ``blocked=True`` to skip flush for this session.
+    ``after``: observe ``stripped_count`` for logging/metrics.
+    """
+
+    stripped_count: int = 0
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("domain", Domain.RETENTION)
+        kwargs.setdefault("method", "flush_turn_tool_results")
+        self.stripped_count = kwargs.pop("stripped_count", 0)
+        super().__init__(**kwargs)
+
+
+@dataclass
 class MessageInjectEvent(MiddlewareEvent):
     """Event fired when a message is resolved from the registry."""
 
@@ -178,6 +196,23 @@ class MessageInjectEvent(MiddlewareEvent):
         self.content = kwargs.pop("content", "")
         self.params = kwargs.pop("params", {})
         self.final_content = kwargs.pop("final_content", None)
+        super().__init__(**kwargs)
+
+
+@dataclass
+class SubagentSpawnEvent(MiddlewareEvent):
+    """Event for sub-agent spawn (domain=SUBAGENT, method="spawn")."""
+
+    parent_session_id: str = ""
+    child_skills: List[str] = field(default_factory=list)
+    result_status: str = ""  # after: "accepted" | "blocked"
+
+    def __init__(self, **kwargs: Any) -> None:
+        kwargs.setdefault("domain", Domain.SUBAGENT)
+        kwargs.setdefault("method", "spawn")
+        self.parent_session_id = kwargs.pop("parent_session_id", "")
+        self.child_skills = kwargs.pop("child_skills", [])
+        self.result_status = kwargs.pop("result_status", "")
         super().__init__(**kwargs)
 
 

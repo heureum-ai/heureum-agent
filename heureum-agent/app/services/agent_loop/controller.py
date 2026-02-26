@@ -21,6 +21,7 @@ from app.services.middleware import (
     MiddlewareRunner,
     ToolHookBridgeMiddleware,
 )
+from app.services.middleware.subagent import SubagentSpawnMiddleware
 from app.services.skills import SkillController
 from app.services.tools import ToolController, clear_session_loop_state
 from app.services.subagent import (
@@ -83,6 +84,14 @@ class AgentLoopController:
             messages=self.messages,
         )
 
+        # Subagent spawn middleware (activate_skill dedup + skill count limit)
+        self._subagent_middleware = SubagentSpawnMiddleware(
+            max_skills=settings.SUBAGENT_MAX_SKILLS
+        )
+        self.middleware.register(
+            self._subagent_middleware, domains=[Domain.SUBAGENT]
+        )
+
         # Loop intelligence (loop-awareness for LLM)
         self.intelligence = LoopIntelligenceController()
         self.middleware.register(
@@ -143,6 +152,7 @@ class AgentLoopController:
         ]
         for sid in stale:
             self._session_loop_locks.pop(sid, None)
+            self._subagent_middleware.clear_session(sid)
             self.mcp_client.clear_session_state(sid)
             self.tool_controller.clear_session(sid)
             self.skill_controller.clear_session(sid)
@@ -210,7 +220,10 @@ class AgentLoopController:
                     subagent_config={
                         "max_spawn_depth": settings.SUBAGENT_MAX_SPAWN_DEPTH,
                         "max_children": settings.SUBAGENT_MAX_CHILDREN,
+                        "max_total_subagents": settings.SUBAGENT_MAX_TOTAL,
+                        "max_skills": settings.SUBAGENT_MAX_SKILLS,
                     },
+                    middleware=self.middleware,
                 )
             except BaseException:
                 # CancelledError (BaseException in 3.9+) can leak from the

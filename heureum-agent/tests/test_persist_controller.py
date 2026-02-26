@@ -134,6 +134,38 @@ class TestSaveMessage:
             content="Hello",
         )
 
+    async def test_save_message_checks_http_status(self, pc):
+        resp = MagicMock()
+        pc._client.post.return_value = resp
+
+        await pc.save_message(
+            session_id="sess_1",
+            response_id=1,
+            seq=0,
+            msg_type="message",
+            role="assistant",
+            content="Hello",
+        )
+
+        resp.raise_for_status.assert_called_once()
+
+    async def test_save_message_swallows_http_status_error(self, pc):
+        req = httpx.Request("POST", "http://platform:8000/api/v1/messages/internal/save/")
+        resp = httpx.Response(500, request=req)
+        http_err = httpx.HTTPStatusError("500 error", request=req, response=resp)
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.side_effect = http_err
+        pc._client.post.return_value = mock_resp
+
+        await pc.save_message(
+            session_id="sess_1",
+            response_id=1,
+            seq=0,
+            msg_type="message",
+            role="assistant",
+            content="Hello",
+        )
+
 
 # ---------------------------------------------------------------------------
 # complete_response

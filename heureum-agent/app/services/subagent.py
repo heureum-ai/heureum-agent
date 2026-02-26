@@ -194,9 +194,13 @@ async def _run_subagent(
             pc = _get_context().persist_controller
             if pc:
                 usage_dict = final_usage.model_dump() if final_usage else None
-                await pc.subagent_run_complete(
-                    record, final_status, final_summary, usage=usage_dict
-                )
+                enqueue = getattr(pc, "enqueue_subagent_run_complete", None)
+                if callable(enqueue):
+                    enqueue(record, final_status, final_summary, usage=usage_dict)
+                else:
+                    await pc.subagent_run_complete(
+                        record, final_status, final_summary, usage=usage_dict
+                    )
         except Exception:
             pass
 
@@ -208,6 +212,60 @@ async def _run_subagent(
 
 def _build_subagent_instructions(task: str, tool_names: List[str], can_spawn: bool = False) -> str:
     """Build a dynamic system prompt instruction block for the sub-agent."""
+    if can_spawn:
+        return _build_orchestrator_hybrid_instructions(task, tool_names)
+    return _build_leaf_instructions(task, tool_names)
+
+
+def _build_orchestrator_hybrid_instructions(task: str, tool_names: List[str]) -> str:
+    """2-phase orchestrator prompt: planning → execution management."""
+    # Build dynamic skill catalogue via public API
+    skill_lines = ""
+    try:
+        ctx = _get_context()
+        if ctx.skill_controller and hasattr(ctx.skill_controller, "get_delegatable_skill_map"):
+            skill_map = ctx.skill_controller.get_delegatable_skill_map()
+            parts = [f"- {key}: {', '.join(sorted(tools))}" for key, tools in skill_map.items()]
+            if parts:
+                skill_lines = (
+                    "## Available Skills for Sub-agents\n"
+                    "When spawning sub-agents, assign appropriate skills via the `skills` parameter:\n"
+                    + "\n".join(parts) + "\n"
+                    "Each sub-agent receives ONLY the tools defined in its assigned skills.\n\n"
+                )
+    except Exception:
+        pass
+
+    return (
+        "You are an orchestrator agent. Complete the task in two phases.\n\n"
+        f"## Task\n{task}\n\n"
+        f"## Available Tools\n{', '.join(tool_names)}\n\n"
+        + skill_lines
+        + "## Phase 1: Planning\n"
+        "Analyze the request systematically:\n"
+        "1. **Query Analysis**: What information categories are needed?\n"
+        "2. **Task Decomposition**: Break into atomic, delegatable tasks\n"
+        "3. **Categorize each task**: research | analysis | synthesis | verification\n"
+        "4. **Dependencies**: Which tasks can run in parallel? Which must be sequential?\n"
+        "5. **Verification**: Always include a final synthesis/verification task\n\n"
+        "Use manage_todo(action='create') to define your plan.\n"
+        "Use manage_todo(action='thinking_checkpoint', phase='pre_plan') to begin execution.\n\n"
+        "## Phase 2: Execution\n"
+        "- Spawn sub-agents for ready tasks via sessions_spawn\n"
+        "- Monitor with sessions_spawn_status\n"
+        "- When dependencies resolve, spawn dependent tasks\n"
+        "- After ALL complete, synthesize into a comprehensive summary\n"
+        "- Use manage_todo(action='thinking_checkpoint', phase='post_plan') to finalize\n\n"
+        "## Rules\n"
+        "- Do NOT do the research yourself — always delegate via sub-agents\n"
+        "- Each sub-agent task must be self-contained and specific\n"
+        "- Final summary must directly answer the user's original request\n"
+        "- Avoid creating too many tasks (max 5-7 for most queries)"
+    )
+
+
+def _build_leaf_instructions(task: str, tool_names: List[str]) -> str:
+    """Leaf sub-agent prompt — direct execution without spawning."""
     lines = [
         "You are a sub-agent spawned to complete a specific task.",
         "Focus exclusively on the task below. Do not ask the user questions.",
@@ -217,23 +275,12 @@ def _build_subagent_instructions(task: str, tool_names: List[str], can_spawn: bo
     ]
     if tool_names:
         lines.append(f"\n## Available Tools\n{', '.join(tool_names)}")
-    if can_spawn:
-        lines.append(
-            "\n## Workflow\n"
-            '1. First, call manage_todo(action="create") to break your task into steps.\n'
-            '2. Call manage_todo(action="thinking_checkpoint", phase="pre_plan", note="...") to review and begin execution.\n'
-            "3. Execute each step, updating status via manage_todo as you go.\n"
-            '4. After all steps complete, call manage_todo(action="thinking_checkpoint", phase="post_plan", note="...") to verify.\n'
-            "5. Provide a concise result summary."
-        )
-    constraint_lines = [
-        "\n## Constraints",
-        "- Complete the task autonomously without user interaction.",
-        "- If a tool call fails, try an alternative approach.",
-    ]
-    if not can_spawn:
-        constraint_lines.append("- Do NOT spawn sub-agents — execute steps directly.")
-    lines.append("\n".join(constraint_lines))
+    lines.append(
+        "\n## Constraints\n"
+        "- Complete the task autonomously without user interaction.\n"
+        "- If a tool call fails, try an alternative approach.\n"
+        "- Do NOT spawn sub-agents — execute steps directly."
+    )
     return "\n".join(lines)
 
 
@@ -268,24 +315,10 @@ def _resolve_child_tools(
     if request.tools:
         allowed = set(request.tools) - denied
     elif getattr(request, "skills", None):
-        # Resolve skill names → tool names from cached snapshot
-        snapshot = ctx.skill_controller._session_snapshots.get(request.parent_session_id)
-        skill_map = ctx.skill_controller._build_snapshot_skill_map(snapshot)
-        allowed: set[str] = set()
-        for skill_name in request.skills:
-            norm = ctx.skill_controller._norm_name(skill_name)
-            allowed.update(skill_map.get(norm, []))
-        # Only include server tools needed at this depth
-        # Orchestrator (depth < max): manage_todo + spawn tools
-        # Leaf (depth >= max): no server tools — client skill tools only
-        if depth < max_depth:
-            allowed.update(ctx.skill_controller.get_subagent_orchestrator_tools())
-        # MCP tools are server-side resources → always include all parent MCP tools
-        for t in parent_mcp_tools:
-            name = t.get("function", {}).get("name")
-            if name:
-                allowed.add(name)
-        allowed -= denied
+        # Skill-schema based resolution: SKILL.md tools only — no auto-injection
+        allowed = ctx.skill_controller.resolve_skill_tools(
+            request.skills, session_id=request.parent_session_id
+        )
     else:
         # Fallback: all tools minus deny-list
         if denied:
@@ -386,6 +419,35 @@ async def _execute_subagent_task(
     # Inherit tools from parent
     child_mcp_tools, child_skill_controller, tool_names = _resolve_child_tools(request)
 
+    # MCP tool availability pre-validation — remove unavailable tools early
+    mcp_tool_names = {t.get("function", {}).get("name") for t in child_mcp_tools}
+    available_names = set(ctx.mcp_client.server_tool_names or set())
+    missing = mcp_tool_names - available_names
+    if missing:
+        # One re-discovery attempt
+        try:
+            await ctx.mcp_client.discover_tools()
+            available_names = set(ctx.mcp_client.server_tool_names or set())
+            missing = mcp_tool_names - available_names
+        except Exception:
+            pass
+        if missing:
+            logger.warning(
+                "Sub-agent %s: unavailable MCP tools removed: %s",
+                session_id, missing,
+            )
+            child_mcp_tools = [
+                t for t in child_mcp_tools
+                if t.get("function", {}).get("name") not in missing
+            ]
+            # Rebuild tool_names list
+            tool_names = [t.get("function", {}).get("name", "?") for t in child_mcp_tools]
+            if child_skill_controller:
+                for schema in child_skill_controller.get_all_tool_schemas():
+                    n = schema.get("function", {}).get("name")
+                    if n:
+                        tool_names.append(n)
+
     # Create isolated agent service with inherited tools
     child_service = AgentService(
         mcp_tools=child_mcp_tools,
@@ -417,23 +479,28 @@ async def _execute_subagent_task(
     except Exception:
         prompt = ""
     if pc:
-        asyncio.create_task(
-            pc.subagent_run_start(record, root_session_id=root_sid, system_prompt=prompt)
-        )
+        enqueue = getattr(pc, "enqueue_subagent_run_start", None)
+        if callable(enqueue):
+            enqueue(record, root_session_id=root_sid, system_prompt=prompt)
+        else:
+            await pc.subagent_run_start(record, root_session_id=root_sid, system_prompt=prompt)
 
     # Message sequence counter for persist
     msg_seq = 0
 
     # Persist initial user message (seq=0)
     if pc:
-        asyncio.create_task(
-            pc.subagent_message(record, seq=msg_seq, role="user", content=request.task)
-        )
+        enqueue = getattr(pc, "enqueue_subagent_message", None)
+        if callable(enqueue):
+            enqueue(record, seq=msg_seq, role="user", content=request.task)
+        else:
+            await pc.subagent_message(record, seq=msg_seq, role="user", content=request.task)
     msg_seq += 1
 
     max_iterations = settings.SUBAGENT_MAX_ITERATIONS
 
     plan_retry_count = 0
+    _consecutive_polls = 0
 
     try:
         for iteration in range(1, max_iterations + 1):
@@ -495,9 +562,11 @@ async def _execute_subagent_task(
 
                 # Normal completion — persist and return
                 if pc:
-                    asyncio.create_task(
-                        pc.subagent_message(record, seq=msg_seq, role="assistant", content=text)
-                    )
+                    enqueue = getattr(pc, "enqueue_subagent_message", None)
+                    if callable(enqueue):
+                        enqueue(record, seq=msg_seq, role="assistant", content=text)
+                    else:
+                        await pc.subagent_message(record, seq=msg_seq, role="assistant", content=text)
                 return text, total_usage
 
             # Tool calls — execute them in parallel
@@ -507,15 +576,23 @@ async def _execute_subagent_task(
                     {"name": tc.name, "args": tc.args, "id": tc.id} for tc in result.tool_calls
                 ]
                 if pc:
-                    asyncio.create_task(
-                        pc.subagent_message(
+                    enqueue = getattr(pc, "enqueue_subagent_message", None)
+                    if callable(enqueue):
+                        enqueue(
                             record,
                             seq=msg_seq,
                             role="assistant",
                             content="",
                             metadata={"tool_calls": tc_meta},
                         )
-                    )
+                    else:
+                        await pc.subagent_message(
+                            record,
+                            seq=msg_seq,
+                            role="assistant",
+                            content="",
+                            metadata={"tool_calls": tc_meta},
+                        )
                 msg_seq += 1
 
                 # Pre-record start times for progress tracking
@@ -569,9 +646,10 @@ async def _execute_subagent_task(
 
                 # Persist each tool result
                 if pc:
+                    enqueue = getattr(pc, "enqueue_subagent_message", None)
                     for tr in tool_results:
-                        asyncio.create_task(
-                            pc.subagent_message(
+                        if callable(enqueue):
+                            enqueue(
                                 record,
                                 seq=msg_seq,
                                 role="tool",
@@ -579,7 +657,15 @@ async def _execute_subagent_task(
                                 tool_call_id=tr.tool_call_id or "",
                                 tool_name=tr.name or "",
                             )
-                        )
+                        else:
+                            await pc.subagent_message(
+                                record,
+                                seq=msg_seq,
+                                role="tool",
+                                content=tr.content,
+                                tool_call_id=tr.tool_call_id or "",
+                                tool_name=tr.name or "",
+                            )
                         msg_seq += 1
                 else:
                     msg_seq += len(tool_results)
@@ -593,6 +679,24 @@ async def _execute_subagent_task(
                     assistant_lc_message=result.assistant_lc_message,
                 )
                 messages = []  # Continue without new user messages
+
+                # Fix 8-2: Sliding window — cap session history to reduce token usage
+                _hist = child_service._sessions.get(session_id)
+                if _hist and len(_hist) > settings.SUBAGENT_MAX_HISTORY_SIZE:
+                    child_service._sessions[session_id] = (
+                        _hist[:1] + _hist[-(settings.SUBAGENT_MAX_HISTORY_SIZE - 1):]
+                    )
+
+                # Fix 8-3: Polling throttle — slow down if only polling status
+                is_poll_only = all(
+                    tc.name == "sessions_spawn_status" for tc in result.tool_calls
+                )
+                if is_poll_only:
+                    _consecutive_polls += 1
+                    if _consecutive_polls > settings.SUBAGENT_POLL_THROTTLE_THRESHOLD:
+                        await asyncio.sleep(settings.SUBAGENT_POLL_THROTTLE_DELAY)
+                else:
+                    _consecutive_polls = 0
 
         if ctx.messages:
             max_iterations_message, _ = await ctx.messages.resolve(
@@ -624,10 +728,10 @@ async def _announce_completion(
         summary_text, _ = await ctx.messages.resolve(
             "subagent.completion",
             task=record.task[:200],
-            summary=summary[:500],
+            summary=summary[:2000],
         )
     else:
-        summary_text = f"[Sub-agent completed] Task: {record.task[:200]}\nResult: {summary[:500]}"
+        summary_text = f"[Sub-agent completed] Task: {record.task[:200]}\nResult: {summary[:2000]}"
     msg = LCSystemMessage(content=summary_text)
 
     for attempt in range(max_retries):
@@ -641,6 +745,15 @@ async def _announce_completion(
                     record.child_session_id,
                     record.parent_session_id,
                 )
+                # Trigger lightweight compaction check on the parent session.
+                # Multiple sub-agents completing simultaneously can cause
+                # context to spike unpredictably; this keeps it bounded.
+                try:
+                    await ctx.agent_service._maybe_proactive_compact(
+                        record.parent_session_id, []
+                    )
+                except Exception:
+                    pass  # best-effort — don't block announcement
                 return
             else:
                 logger.warning(

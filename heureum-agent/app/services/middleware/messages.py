@@ -173,6 +173,13 @@ class MessageRegistry:
             "tool.error_denied",
             "Permission denied by user for tool: {name}",
         )
+        self._register_template(
+            MESSAGE,
+            "tool.error_subagent_busy",
+            "Error: Cannot use '{name}' while sub-agents are running. "
+            "Use sessions_spawn_status to monitor progress, "
+            "then synthesize results when all sub-agents complete.",
+        )
 
         # -- subagent messages --
         self._register_template(
