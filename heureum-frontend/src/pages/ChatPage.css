@@ -852,6 +852,26 @@
   white-space: pre;
 }
 
+/* ── Places map (Leaflet) ── */
+
+.ac-tool-has-map {
+  width: 100%;
+  max-width: 100%;
+}
+
+.ac-tool-map {
+  width: 100%;
+  height: 280px;
+  border-radius: 8px;
+  margin-top: 6px;
+  overflow: hidden;
+}
+
+.ac-tool-map .leaflet-container {
+  width: 100%;
+  height: 100%;
+}
+
 /* ── Periodic task card (inline tool result) ── */
 
 .ac-tool-task-card {

@@ -78,6 +78,9 @@ class Settings(BaseSettings):
     GOOGLE_CLOUD_LOCATION: str = ""
     GOOGLE_APPLICATION_CREDENTIALS: str = ""
 
+    # Google Maps (for travel_task place search & directions)
+    GOOGLE_MAPS_API_KEY: str = ""
+
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:5173,http://localhost:8001"
     LANGCHAIN_TRACING_V2: bool = False
     LANGCHAIN_API_KEY: str = ""
