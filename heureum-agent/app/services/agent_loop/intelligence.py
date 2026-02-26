@@ -188,7 +188,7 @@ class LoopIntelligenceMiddleware(Middleware):
     # -- MESSAGE handler: adaptive retry escalation -------------------------
 
     def _handle_message(self, event: MessageInjectEvent) -> BeforeResult:
-        if event.key not in ("loop.judge_retry", "loop.plan_retry"):
+        if event.key != "loop.plan_retry":
             return BeforeResult()
 
         session = self._controller.get_session(event.context.session_id)

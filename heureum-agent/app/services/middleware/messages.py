@@ -117,19 +117,6 @@ class MessageRegistry:
         )
         self._register_template(
             MESSAGE,
-            "loop.judge_retry",
-            "The user's original request: {user_query}\n\n"
-            "Your previous response was rejected: {text}\n\n"
-            "Feedback: {guidance}\n\n"
-            "Please try again with alternative approaches.",
-        )
-        self._register_template(
-            MESSAGE,
-            "loop.judge_default_guidance",
-            "The previous response was inadequate.",
-        )
-        self._register_template(
-            MESSAGE,
             "loop.max_iterations",
             "Reached maximum iterations ({max_iterations}).",
         )

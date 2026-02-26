@@ -1447,6 +1447,18 @@ class PlanSkill:
     # Finalize abandoned
     # ------------------------------------------------------------------
 
+    async def force_finalize_steps(self, session_id: str) -> None:
+        """Force-finalize plan regardless of checkpoint phase (hard cap escape)."""
+        plan = self._session_plans.get(session_id)
+        if not plan:
+            return
+        for task in plan.tasks.values():
+            if task.status in ("in_progress", "pending", "blocked"):
+                task.status = "failed"
+                task.result = "Force-finalized by hard cap"
+        plan.phase = "finalized"
+        plan.updated_at = time.time()
+
     async def finalize_abandoned_steps(self, session_id: str) -> None:
         plan = self._session_plans.get(session_id)
         if not plan:
@@ -1468,6 +1480,7 @@ class PlanSkill:
                 task.result = "Skipped — previous task abandoned"
                 changed = True
         if changed:
+            plan.phase = "finalized"
             plan.updated_at = time.time()
 
         # Cancel sub-agent asyncio tasks and update registry

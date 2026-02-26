@@ -7,7 +7,7 @@ import logging
 from typing import Any, Dict, List, Optional, Set
 
 from app.services.skills.discovery import discover_skills
-from app.services.skills.metadata import load_guide_prompt, load_skill_meta
+from app.services.skills.metadata import load_skill_meta
 from app.services.skills.types import SkillMeta
 
 logger = logging.getLogger(__name__)
@@ -435,33 +435,6 @@ class SkillController:
                 tools.update(snapshot_skill_map[skill_name])
         return tools
 
-    def get_all_guide_prompts(
-        self,
-        *,
-        allowed_tools: Optional[Set[str]] = None,
-        skills_snapshot: Any = None,
-    ) -> List[str]:
-        active_skills: Set[str]
-        if skills_snapshot is not None:
-            active_skills = self.resolve_active_skill_names(
-                skills_snapshot=skills_snapshot,
-            )
-        else:
-            active_skills = set(self._skills.keys())
-
-        prompts: List[str] = []
-        for skill_key, skill in self._skills.items():
-            if skill_key not in active_skills:
-                continue
-            if allowed_tools is not None:
-                skill_tools = self._tools_by_skill.get(skill_key, set())
-                if not skill_tools or not (skill_tools & allowed_tools):
-                    continue
-            body = load_guide_prompt(skill)
-            if body:
-                prompts.append(f'<tool_guide name="{skill.name}">\n{body}\n</tool_guide>')
-        return prompts
-
     # -- Tool dispatch --------------------------------------------------------
 
     def get_skill_for_tool(self, tool_name: str) -> Optional[Any]:
@@ -542,6 +515,13 @@ class SkillController:
             if fn is not None:
                 await fn(session_id)
 
+    async def force_finalize(self, session_id: str) -> None:
+        """Force-finalize all plans regardless of checkpoint phase."""
+        for skill in self._skills.values():
+            fn = getattr(skill, "force_finalize_steps", None)
+            if fn is not None:
+                await fn(session_id)
+
     def get_live_state(self, session_id: str) -> Optional[Dict[str, Any]]:
         for skill in self._skills.values():
             fn = getattr(skill, "get_state", None)
@@ -569,19 +549,6 @@ class SkillController:
                 }
         return None
 
-    async def evaluate_response(
-        self,
-        user_query: str,
-        response_text: str,
-        output_items: list,
-        llm: Any,
-    ) -> Optional[Any]:
-        """Delegate to evaluate_task skill if present."""
-        for skill in self._skills.values():
-            fn = getattr(skill, "evaluate_response", None)
-            if fn is not None:
-                return await fn(user_query, response_text, output_items, llm)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -637,11 +604,6 @@ class _FilteredSkillController:
     def get_active_skill_names(self, session_id: str) -> Set[str]:
         return self._base.get_active_skill_names(session_id)
 
-    def get_all_guide_prompts(self, **kwargs: Any) -> List[str]:
-        incoming = kwargs.pop("allowed_tools", None)
-        merged_allowed = self._allowed if incoming is None else (self._allowed & set(incoming))
-        return self._base.get_all_guide_prompts(allowed_tools=merged_allowed, **kwargs)
-
     def get_state_prompts(self, session_id: str) -> List[str]:
         return self._base.get_state_prompts(session_id)
 
@@ -666,14 +628,9 @@ class _FilteredSkillController:
     async def finalize_abandoned(self, session_id: str) -> None:
         await self._base.finalize_abandoned(session_id)
 
+    async def force_finalize(self, session_id: str) -> None:
+        await self._base.force_finalize(session_id)
+
     def get_live_state(self, session_id: str) -> Optional[Dict[str, Any]]:
         return self._base.get_live_state(session_id)
 
-    async def evaluate_response(
-        self,
-        user_query: str,
-        response_text: str,
-        output_items: list,
-        llm: Any,
-    ) -> Optional[Any]:
-        return await self._base.evaluate_response(user_query, response_text, output_items, llm)

@@ -784,19 +784,3 @@ class ToolExecutionController:
             meta_sets,
         )
 
-    async def judge_current_response(
-        self,
-        session_id: str,
-        response_text: str,
-        output_items: list,
-    ) -> Any:
-        """Run LLM-as-judge on the current response via SkillController."""
-        user_query = self.agent_service.history.extract_last_user_query(
-            self.agent_service.get_history(session_id)
-        )
-        return await self.skill_controller.evaluate_response(
-            user_query=user_query,
-            response_text=response_text,
-            output_items=output_items,
-            llm=self.agent_service.llm,
-        )

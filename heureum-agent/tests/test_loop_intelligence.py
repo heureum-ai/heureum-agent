@@ -61,7 +61,7 @@ def _make_prompt_event(
 
 def _make_message_event(
     session_id: str = "s1",
-    key: str = "loop.judge_retry",
+    key: str = "loop.plan_retry",
     content: str = "Please retry.",
 ) -> MessageInjectEvent:
     return MessageInjectEvent(

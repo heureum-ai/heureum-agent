@@ -198,8 +198,16 @@ class AgentLoopRunner:
 
             if self.ctx.plan_retry_count > settings.MAX_PLAN_RETRIES:
                 await self._skill_controller.finalize_abandoned(self.ctx.session_id)
-                # If skill rejected abandon (checkpoint wait), keep retrying
                 if self._skill_controller.has_unfinished_work(self.ctx.session_id):
+                    # Hard cap: force-finalize after 2x retries to prevent infinite loop
+                    if self.ctx.plan_retry_count > settings.MAX_PLAN_RETRIES * 3:
+                        logger.warning(
+                            "Force-finalizing plan after %d retries (session=%s)",
+                            self.ctx.plan_retry_count,
+                            self.ctx.session_id,
+                        )
+                        await self._skill_controller.force_finalize(self.ctx.session_id)
+                        return _IterAction.NONE
                     guidance = self._skill_controller.build_retry_guidance(
                         self.ctx.session_id, text,
                     )
@@ -255,61 +263,6 @@ class AgentLoopRunner:
         self.ctx.messages = [HumanMessage(content=synthesis_content)]
         return _IterAction.CONTINUE
 
-    async def _handle_judge_gate(
-        self,
-        text: str,
-        usage: Usage | None,
-        raw_message: Any = None,
-    ) -> _IterAction:
-        """Shared logic for LLM-as-judge quality gate.
-
-        Returns CONTINUE if the judge rejects and a retry should happen,
-        NONE if the judge passes or is not applicable.
-        """
-        if not (
-            settings.ENABLE_SELF_EVALUATION
-            and self.ctx.tool_call_count > 0
-            and self.ctx.eval_retry_count < settings.MAX_EVAL_RETRIES
-        ):
-            return _IterAction.NONE
-
-        judge_result = await self._tool_execution.judge_current_response(
-            session_id=self.ctx.session_id,
-            response_text=text,
-            output_items=self.ctx.output_items,
-        )
-        if judge_result.passed:
-            return _IterAction.NONE
-
-        self.ctx.eval_retry_count += 1
-        self._service.append_to_history(
-            self.ctx.session_id,
-            self.ctx.messages,
-            text,
-            usage=usage.model_dump() if usage else {},
-            **({"assistant_lc_message": raw_message} if raw_message else {}),
-        )
-        self._persist_message("message", "assistant", text)
-
-        user_query = self._service.history.extract_last_user_query(
-            self._service.get_history(self.ctx.session_id)
-        )
-        guidance = judge_result.guidance or self._messages.get_default(
-            "loop.judge_default_guidance"
-        )
-        retry_content, blocked = await self._messages.resolve(
-            "loop.judge_retry",
-            session_id=self.ctx.session_id,
-            user_query=user_query,
-            text=text[:500],
-            guidance=guidance,
-        )
-        if not blocked:
-            self.ctx.messages = [HumanMessage(content=retry_content)]
-        self._pending_events.append(
-            {"type": "response.output_text.abandoned", "reason": "judge_failed"}
-        )
-        return _IterAction.CONTINUE
 
     def _handle_force_text_only(
         self,
@@ -581,12 +534,6 @@ class AgentLoopRunner:
                 # Priority 1: Skill unfinished work
                 action = await self._handle_skill_unfinished(result.text or "", result.usage)
                 self._drain_events()  # discard SSE events in non-streaming
-                if action == _IterAction.CONTINUE:
-                    continue
-
-                # Priority 2: LLM-as-judge quality gate
-                action = await self._handle_judge_gate(result.text or "", result.usage)
-                self._drain_events()
                 if action == _IterAction.CONTINUE:
                     continue
 
@@ -1169,16 +1116,7 @@ class AgentLoopRunner:
                 if action == _IterAction.CONTINUE:
                     continue
 
-                # Priority 2: LLM-as-judge quality gate
                 full_text = normalized.text
-                action = await self._handle_judge_gate(
-                    full_text, usage, raw_message=normalized.raw_message
-                )
-                for evt in self._drain_events():
-                    yield self._service.responses.sse_event(evt)
-                if action == _IterAction.CONTINUE:
-                    continue
-
                 self._service.append_to_history(
                     self.ctx.session_id,
                     self.ctx.messages,

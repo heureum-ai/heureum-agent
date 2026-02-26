@@ -499,7 +499,7 @@ class TestToolCallNarrationFiltering:
             "append_tool_interaction",
             _async_noop,
         )
-        monkeypatch.setattr(settings, "ENABLE_SELF_EVALUATION", False)
+
 
     # ------------------------------------------------------------------ #
     # Case 1 (Normal): text-only → deltas + done, no abandoned            #

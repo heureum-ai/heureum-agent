@@ -63,6 +63,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=True,
+        extra="ignore",
     )
 
     APP_NAME: str = "Heureum Agent"
@@ -105,10 +106,6 @@ class Settings(BaseSettings):
 
     # Plan retry (text-only responses while plan has unfinished steps)
     MAX_PLAN_RETRIES: int = 1  # original + 1 retry to prevent sub-agent tree amplification
-
-    # Self-evaluation (LLM-as-judge)
-    ENABLE_SELF_EVALUATION: bool = False
-    MAX_EVAL_RETRIES: int = 2  # max judge retry attempts per response
 
     # MCP
     TOOL_CACHE_TTL: int = 300  # 5 minutes

@@ -101,13 +101,9 @@ class TestResolveNoMiddleware:
     async def test_resolve_with_params(self):
         reg = MessageRegistry()
         content, blocked = await reg.resolve(
-            "loop.judge_retry",
-            user_query="hello",
-            text="bad response",
+            "loop.plan_retry",
             guidance="try harder",
         )
-        assert "hello" in content
-        assert "bad response" in content
         assert "try harder" in content
         assert blocked is False
 
@@ -304,8 +300,6 @@ class TestDefaultKeys:
         "loop.plan_retry",
         "loop.plan_retry_fallback",
         "loop.subagent_synthesis",
-        "loop.judge_retry",
-        "loop.judge_default_guidance",
         "loop.max_iterations",
         "tool.error_unavailable",
         "tool.error_empty",

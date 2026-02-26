@@ -31,7 +31,6 @@ class LoopContext:
     total_usage: Usage = field(default_factory=Usage.zero)
     tool_call_count: int = 0
     output_items: list = field(default_factory=list)
-    eval_retry_count: int = 0
     plan_retry_count: int = 0
     # Real-time persist tracking
     response_id: Optional[str] = None  # Platform Response PK
