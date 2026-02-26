@@ -20,6 +20,7 @@ def parse_skill_md(path: str) -> SkillMeta:
     tools: list[str] = []
     depends_on: list[str] = []
     subagent_access: str = "always"
+    catalog: bool = True
 
     parts = text.split("---", 2)
     if len(parts) >= 3:
@@ -42,6 +43,8 @@ def parse_skill_md(path: str) -> SkillMeta:
                 depends_on = [tool.strip() for tool in value.split(",") if tool.strip()]
             elif key == "subagent_access":
                 subagent_access = value.lower()
+            elif key == "catalog":
+                catalog = value.lower() not in ("false", "no", "0")
 
     return SkillMeta(
         name=name,
@@ -50,6 +53,7 @@ def parse_skill_md(path: str) -> SkillMeta:
         tools=tools,
         depends_on=depends_on,
         subagent_access=subagent_access,
+        catalog=catalog,
     )
 
 

@@ -111,3 +111,6 @@ release/
 
 # Skills assets (external repo)
 heureum-client-tools/assets/skills/
+
+# Runtime session data
+heureum-platform/media/sessions/

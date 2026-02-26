@@ -1,6 +1,6 @@
 ---
 name: web_search_task
-description: Web search and content retrieval workflow
+description: Search the web, fetch pages, and read content. Use for any question requiring up-to-date information, fact-checking, or research.
 tools: mcp_web__search, web_fetch, read
 depends_on:
 ---

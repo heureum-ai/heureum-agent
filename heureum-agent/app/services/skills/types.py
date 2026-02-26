@@ -16,3 +16,4 @@ class SkillMeta:
     tools: List[str]
     depends_on: List[str]
     subagent_access: str = "always"  # "always" | "orchestrator" | "never"
+    catalog: bool = True  # Whether to show in <available_skills> catalog

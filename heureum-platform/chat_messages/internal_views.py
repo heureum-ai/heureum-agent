@@ -297,6 +297,7 @@ def register_skill_schemas(request):
                 "tools": item.get("tools", []),
                 "depends_on": item.get("depends_on", []),
                 "subagent_access": item.get("subagent_access", "always"),
+                "catalog": item.get("catalog", True),
                 "source": item.get("source", "server"),
                 "body": item.get("body", ""),
             },
@@ -326,6 +327,7 @@ def lookup_skill_schemas(request):
                 "tools": s.tools,
                 "depends_on": s.depends_on,
                 "subagent_access": s.subagent_access,
+                "catalog": s.catalog,
                 "source": s.source,
             }
             for s in qs

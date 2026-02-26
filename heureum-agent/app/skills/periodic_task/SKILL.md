@@ -1,6 +1,6 @@
 ---
 name: periodic_task
-description: Scheduled recurring task management
+description: Create and manage scheduled recurring tasks. Use when user mentions time-based recurrence (every day, every morning, 매일, 매주, etc.).
 tools: manage_periodic_task
 depends_on: web_search_task, notification_task
 subagent_access: never

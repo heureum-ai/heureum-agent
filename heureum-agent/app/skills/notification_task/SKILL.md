@@ -1,6 +1,6 @@
 ---
 name: notification_task
-description: Push notifications to user devices
+description: Send push notifications to the user's devices for async result delivery, alerts, and reminders.
 tools: notify_user
 depends_on:
 subagent_access: never

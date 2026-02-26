@@ -1,6 +1,6 @@
 ---
 name: plan_task
-description: Hierarchical task planning and parallel execution via sub-agents
+description: Break complex requests into a task plan with dependencies and execute via parallel sub-agents. Use for requests needing 2+ distinct steps.
 tools: manage_todo, sessions_spawn, sessions_spawn_status, ask_question
 depends_on:
 subagent_access: orchestrator

@@ -293,6 +293,7 @@ class AgentLoopController:
                 "tools": meta.tools,
                 "depends_on": meta.depends_on,
                 "subagent_access": meta.subagent_access,
+                "catalog": meta.catalog,
                 "source": "server",
                 "body": meta.body,
             })

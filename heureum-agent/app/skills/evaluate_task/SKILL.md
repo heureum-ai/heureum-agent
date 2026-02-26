@@ -1,7 +1,8 @@
 ---
 name: evaluate_task
-description: Quality evaluation gatekeeper based on LLM-as-a-judge
+description: Internal quality gatekeeper — auto-evaluates responses before delivery. No direct invocation needed.
 tools:
+catalog: false
 ---
 
 # Evaluate Skill

@@ -82,13 +82,6 @@ class TestSkillDiscovery:
         assert "manage_periodic_task" in schema_names
         assert "notify_user" in schema_names
 
-    def test_guide_prompts_wrapped_in_xml(self, provider):
-        prompts = provider.get_all_guide_prompts()
-        assert len(prompts) >= 3
-        for p in prompts:
-            assert p.startswith("<tool_guide")
-            assert p.endswith("</tool_guide>")
-
     def test_get_skill_by_name(self, provider):
         plan = provider.get_skill("plan_task")
         assert plan is not None

@@ -265,30 +265,22 @@ class SystemPromptBuilder:
 
 
 def build_system_prompt(
-    server_tool_prompts: Optional[List[str]] = None,
     client_tool_prompts: Optional[List[str]] = None,
     instructions: Optional[str] = None,
     state_prompts: Optional[List[str]] = None,
     skills_prompt: Optional[str] = None,
     is_subagent: bool = False,
 ) -> str:
-    """Build a system prompt based on available tools.
-
-    Thin wrapper around :class:`SystemPromptBuilder` to keep existing
-    call-sites working without modification.
+    """Build a system prompt.
 
     Args:
-        server_tool_prompts: Guide texts from the skill registry
-            (XML-wrapped SKILL.md bodies).
         client_tool_prompts: Guide texts provided by clients.
         instructions: Extra instructions to append inside an
             ``<instructions>`` XML block.
         state_prompts: Per-turn runtime state prompts from skills
             (wrapped inside ``<session_state>``).
-        skills_prompt: Pre-built ``<available_skills>`` block from a
-            client skills snapshot.  When present, takes priority over
-            ``<tool_guides>`` for skill discovery (tool_guides are still
-            included as fallback for server-side guides).
+        skills_prompt: Pre-built ``<available_skills>`` block from
+            the platform (includes both client and server skills).
         is_subagent: When True, use a lightweight identity prompt
             optimized for sub-agent execution.
 
@@ -299,8 +291,6 @@ def build_system_prompt(
 
     if skills_prompt:
         builder.add_skills_catalog(skills_prompt)
-    if server_tool_prompts:
-        builder.add_tool_guides(server_tool_prompts)
     if client_tool_prompts:
         for guide in client_tool_prompts:
             if guide.strip().startswith("<tool_guide"):

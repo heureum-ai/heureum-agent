@@ -1,8 +1,9 @@
 ---
 name: activate_task
-description: Skill activation for progressive tool loading
+description: Activate client-side skills to unlock their tools. Call before using any non-server skill.
 tools: activate_skill
 subagent_access: never
+catalog: false
 ---
 
 Activate skills to make their tools available. Review the <available_skills> section

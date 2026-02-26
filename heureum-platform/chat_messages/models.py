@@ -363,6 +363,7 @@ class SkillSchema(models.Model):
     tools = models.JSONField(default=list)
     depends_on = models.JSONField(default=list)
     subagent_access = models.CharField(max_length=20, default="always")
+    catalog = models.BooleanField(default=True)
     source = models.CharField(max_length=20, default="server")  # "server" or "client"
     body = models.TextField(blank=True, default="")
 

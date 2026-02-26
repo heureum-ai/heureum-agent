@@ -54,37 +54,19 @@ class PromptController:
         Returns:
             (system_prompt, tool_schemas_for_bind_tools).
         """
-        effective_skills_prompt = skills_prompt
-
-        # OpenClaw-style snapshot mode: avoid injecting full SKILL.md bodies
-        # when <available_skills> is already present.
-        use_server_guides = not bool(effective_skills_prompt)
-
-        server_tool_prompts = (
-            (
-                self.skill_provider.get_all_guide_prompts(
-                    skills_snapshot=skills_snapshot,
-                )
-                if self.skill_provider and use_server_guides
-                else []
-            )
-        )
         server_tool_schemas = (
-            (
-                self.skill_provider.get_all_tool_schemas(
-                    skills_snapshot=skills_snapshot,
-                )
-                if self.skill_provider
-                else []
+            self.skill_provider.get_all_tool_schemas(
+                skills_snapshot=skills_snapshot,
             )
+            if self.skill_provider
+            else []
         )
 
         prompt = build_system_prompt(
-            server_tool_prompts=server_tool_prompts,
             client_tool_prompts=client_tool_prompts,
             instructions=instructions,
             state_prompts=state_prompts,
-            skills_prompt=effective_skills_prompt,
+            skills_prompt=skills_prompt,
             is_subagent=is_subagent,
         )
 

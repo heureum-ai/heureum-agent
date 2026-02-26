@@ -11,7 +11,7 @@ from datetime import timezone as dt_timezone
 from decimal import Decimal
 
 import httpx
-from chat_messages.models import Message, ModelPricing, Question, ToolSchema
+from chat_messages.models import Message, ModelPricing, Question, SkillSchema, ToolSchema
 from chat_messages.models import Response as ResponseModel
 from chat_messages.models import Session
 from chat_messages.serializers import ResponseRequestSerializer
@@ -27,6 +27,24 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 
 logger = logging.getLogger(__name__)
+
+
+def _build_skills_prompt() -> str:
+    """Build <available_skills> XML from DB (catalog=True skills only)."""
+    skills = SkillSchema.objects.filter(catalog=True).order_by("skill_name")
+    if not skills:
+        return ""
+    lines = ["<available_skills>"]
+    for s in skills:
+        tools_csv = ", ".join(s.tools) if s.tools else ""
+        desc_attr = f' description="{s.description}"' if s.description else ""
+        lines.append(f'<skill name="{s.skill_name}"{desc_attr}>')
+        if tools_csv:
+            lines.append(f"  tools: {tools_csv}")
+        lines.append("</skill>")
+    lines.append("</available_skills>")
+    return "\n".join(lines)
+
 
 # Module-level persistent client — reuses TCP connections across requests
 # instead of opening/closing a connection per request.
@@ -119,10 +137,9 @@ def proxy_to_agent(request: Request) -> Response:
             session_obj.user = request.user
             session_obj.save(update_fields=["user"])
 
-        # Persist client-provided skills snapshot once per session and
-        # automatically reuse it for later turns.
-        # Strip the bulky `prompt` key (~14KB) before saving — it's only
-        # needed on the first request and the agent caches it internally.
+        # Persist client-provided skills snapshot (without prompt) once per
+        # session and reuse for later turns.  The `prompt` key is always
+        # rebuilt from DB so the agent sees the complete, up-to-date catalog.
         incoming_snapshot = data.get("skills_snapshot")
         if incoming_snapshot:
             lightweight = {k: v for k, v in incoming_snapshot.items() if k != "prompt"}
@@ -130,9 +147,12 @@ def proxy_to_agent(request: Request) -> Response:
                 session_obj.skills_snapshot = lightweight
                 session_obj.save(update_fields=["skills_snapshot", "updated_at"])
         elif session_obj.skills_snapshot:
-            reinjected = dict(session_obj.skills_snapshot)
-            reinjected.setdefault("prompt", "")
-            data["skills_snapshot"] = reinjected
+            data["skills_snapshot"] = dict(session_obj.skills_snapshot)
+
+        # Always inject platform-built skills_prompt from DB
+        snapshot = data.get("skills_snapshot")
+        if snapshot is not None:
+            snapshot["prompt"] = _build_skills_prompt()
 
         # Ensure the agent receives the same session_id the platform uses.
         # Without this, a new conversation (no session_id in metadata) causes

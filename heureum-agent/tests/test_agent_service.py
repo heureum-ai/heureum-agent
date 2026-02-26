@@ -258,14 +258,14 @@ class TestPreparePromptAndTools:
         assert "activate_skill" in names
         assert len(tools) > 0
 
-    def test_skills_prompt_disables_server_guides(self):
-        """When skills catalog is provided, SKILL.md bodies are not inlined."""
+    def test_skills_prompt_passed_through(self):
+        """Platform skills_prompt is passed through to system prompt."""
         svc = _create_service()
         prompt, _ = svc._prepare_prompt_and_tools(
-            skills_prompt="<available_skills>\n</available_skills>"
+            skills_prompt='<available_skills>\n<skill name="test">Test</skill>\n</available_skills>'
         )
         assert "<available_skills>" in prompt
-        assert "<tool_guides>" not in prompt
+        assert "test" in prompt
 
     def test_skills_snapshot_filters_server_tools(self):
         """Server tool schemas are filtered by snapshot-declared tool list (subagent)."""

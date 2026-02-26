@@ -38,13 +38,13 @@ class TestBuildSystemPrompt:
         ]:
             assert tag in result, f"Missing section: {tag}"
 
-    def test_no_client_tools_no_client_guides(self):
-        """Without client_tool_prompts, no client-provided guides appear.
-        Server-side guides (todo, periodic_task) are always present."""
-        provider = SkillController()
-        result = build_system_prompt(server_tool_prompts=provider.get_all_guide_prompts())
-        # Server-side guides are always present
-        assert "manage_todo" in result
+    def test_skills_prompt_included(self):
+        """skills_prompt is included as <available_skills> catalog."""
+        result = build_system_prompt(
+            skills_prompt='<available_skills>\n<skill name="plan_task">Planning</skill>\n</available_skills>'
+        )
+        assert "<available_skills>" in result
+        assert "plan_task" in result
 
     def test_client_tools_included(self):
         guides = ['<tool_guide name="bash">\nUse bash to run commands.\n</tool_guide>']
@@ -86,10 +86,9 @@ class TestBuildSystemPrompt:
     def test_tool_guides_wrapper(self):
         """Tool guides are grouped inside <tool_guides> container."""
         guides = ['<tool_guide name="bash">\nRun commands.\n</tool_guide>']
-        result = build_system_prompt(server_tool_prompts=guides)
+        result = build_system_prompt(client_tool_prompts=guides)
         assert "<tool_guides>" in result
         assert "</tool_guides>" in result
-        # The individual guide is nested inside the wrapper
         wrapper_pos = result.index("<tool_guides>")
         guide_pos = result.index('<tool_guide name="bash">')
         wrapper_end = result.index("</tool_guides>")
@@ -134,18 +133,20 @@ class TestBuildSystemPrompt:
         assert not (instr_start < state_start < instr_end)
 
     def test_section_ordering(self):
-        """Verify the overall section order: identity < tool_guides < session_state < instructions < current_date."""
+        """Verify the overall section order: identity < skills < tool_guides < session_state < instructions < current_date."""
         result = build_system_prompt(
-            server_tool_prompts=['<tool_guide name="test">\nTest.\n</tool_guide>'],
+            skills_prompt='<available_skills>\n<skill name="test">Test</skill>\n</available_skills>',
+            client_tool_prompts=['<tool_guide name="test">\nTest.\n</tool_guide>'],
             state_prompts=["<current_todo>todo</current_todo>"],
             instructions="Be concise.",
         )
         identity_pos = result.index("<identity>")
+        skills_pos = result.index("<available_skills>")
         guides_pos = result.index("<tool_guides>")
         state_pos = result.index("<session_state>")
         instr_pos = result.index("<instructions>")
         date_pos = result.index("<current_date>")
-        assert identity_pos < guides_pos < state_pos < instr_pos < date_pos
+        assert identity_pos < skills_pos < guides_pos < state_pos < instr_pos < date_pos
 
 
 # ---------------------------------------------------------------------------
