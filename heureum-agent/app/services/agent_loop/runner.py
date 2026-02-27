@@ -61,15 +61,21 @@ class AgentLoopRunner:
         # If there's a pending approval, this is a continuation
         if self._mcp_client.has_pending_approval(self.ctx.session_id):
             return True
-        # If the client references a previous response, this is a continuation
-        # (tool results may have been merged into history by
-        # prepare_messages_for_session, leaving self.ctx.messages empty)
-        if getattr(self.ctx.request, "previous_response_id", None):
-            return True
-        # If there are tool results in the input, this is a continuation
+        # If there are tool results in the current message context, this is a continuation
         for m in self.ctx.messages:
             if isinstance(m, ToolMessage):
                 return True
+        # If the raw request input contains FunctionToolResult items, this is a
+        # continuation. After prepare_messages_for_session, tool results are merged
+        # into history and ctx.messages becomes empty — check the raw input instead.
+        # NOTE: do NOT use previous_response_id here: it is set for ALL messages in
+        # a session (not just tool continuations), so checking it would suppress
+        # re-classification for new user intents (e.g. "저장해줘" after web search).
+        request_input = self.ctx.request.input
+        if isinstance(request_input, list):
+            for item in request_input:
+                if isinstance(item, FunctionToolResult):
+                    return True
         return False
 
     async def _maybe_classify(self) -> None:
