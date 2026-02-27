@@ -9,6 +9,7 @@ import atexit
 import logging
 from typing import Dict
 
+from app.agents.registry import AgentRegistry
 from app.config import settings
 from app.services.agent_service import AgentService
 from app.services.mcps import MCPClientController
@@ -46,6 +47,9 @@ class AgentLoopController:
     """Composition root — owns all sub-controllers and session lifecycle."""
 
     def __init__(self) -> None:
+        # Agent registry (auto-discovers AGENT.md definitions)
+        self.agent_registry = AgentRegistry()
+
         # Middleware runner
         self.middleware = MiddlewareRunner()
 
@@ -101,6 +105,7 @@ class AgentLoopController:
 
         # Session state
         self._session_loop_locks: Dict[str, asyncio.Lock] = {}
+        self._session_agent_config: Dict[str, "AgentDefinition"] = {}
         self._initialized = False
         self._init_lock = asyncio.Lock()
 
@@ -138,6 +143,15 @@ class AgentLoopController:
         """
         return self._session_loop_locks.setdefault(session_id, asyncio.Lock())
 
+    def get_session_agent_config(self, session_id: str):
+        """Return the agent config stored for this session, or None."""
+        return self._session_agent_config.get(session_id)
+
+    def set_session_agent_config(self, session_id: str, config) -> None:
+        """Store agent config for a session (persists across turns)."""
+        if config is not None:
+            self._session_agent_config[session_id] = config
+
     def cleanup_stale_locks(self) -> None:
         """Remove per-session locks for evicted sessions and sweep stale subagent records."""
         sessions = getattr(self.agent_service, "sessions", None)
@@ -152,6 +166,7 @@ class AgentLoopController:
         ]
         for sid in stale:
             self._session_loop_locks.pop(sid, None)
+            self._session_agent_config.pop(sid, None)
             self._subagent_middleware.clear_session(sid)
             self.mcp_client.clear_session_state(sid)
             self.tool_controller.clear_session(sid)
@@ -170,6 +185,7 @@ class AgentLoopController:
     def remove_session_lock(self, session_id: str) -> None:
         """Remove the per-session loop lock (used by delete_session endpoint)."""
         self._session_loop_locks.pop(session_id, None)
+        self._session_agent_config.pop(session_id, None)
 
     # -- middleware registration -------------------------------------------
 

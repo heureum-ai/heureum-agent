@@ -77,6 +77,22 @@ def _patch_module(monkeypatch):
     monkeypatch.setattr(ctrl.tool_exec, "mcp_client", mock_mcp)
     monkeypatch.setattr(exp_module, "mcp_client", mock_mcp)
 
+    # Disable router classification in tests — patch classify_request
+    # to always return None (no agent config applied, preserving legacy behavior)
+    from app.agents.registry import AgentRegistry
+    mock_registry = MagicMock(spec=AgentRegistry)
+    mock_registry.get_router_catalog.return_value = ""
+    mock_registry.get_agent.return_value = None
+    mock_registry.list_agents.return_value = []
+    monkeypatch.setattr(ctrl, "agent_registry", mock_registry)
+
+    import app.services.agent_loop.runner as runner_mod
+
+    async def _noop_classify(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(runner_mod, "classify_request", _noop_classify)
+
 
 @pytest.fixture
 def mock_svc():

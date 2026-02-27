@@ -2,9 +2,15 @@
 
 """Prompt-domain controller — system prompt build + tool schema resolution."""
 
-from typing import Any, List, Optional, Set, Tuple
+import logging
+from typing import Any, List, Optional, Set, Tuple, TYPE_CHECKING
 
-from app.services.prompts.base import build_system_prompt
+from app.services.prompts.base import SystemPromptBuilder, build_system_prompt
+
+logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from app.agents.types import AgentDefinition
 
 # Tools exposed to the main (orchestrator) agent only.
 # Sub-agents receive the full server tool set instead.
@@ -39,6 +45,7 @@ class PromptController:
         skills_snapshot: Any = None,
         active_tool_names: Optional[Set[str]] = None,
         is_subagent: bool = False,
+        agent_config: Optional["AgentDefinition"] = None,
     ) -> Tuple[str, list]:
         """Build system prompt and resolve tool schemas together.
 
@@ -50,6 +57,10 @@ class PromptController:
             state_prompts: Per-turn runtime state prompts from skills.
             skills_prompt: Pre-built ``<available_skills>`` block.
             skills_snapshot: Full skills snapshot payload.
+            active_tool_names: Progressive skill activation filter set.
+            is_subagent: Whether this is a sub-agent call.
+            agent_config: AgentDefinition from the router. When provided,
+                overrides identity prompt and tool filtering logic.
 
         Returns:
             (system_prompt, tool_schemas_for_bind_tools).
@@ -62,51 +73,209 @@ class PromptController:
             else []
         )
 
-        prompt = build_system_prompt(
-            client_tool_prompts=client_tool_prompts,
-            instructions=instructions,
-            state_prompts=state_prompts,
-            skills_prompt=skills_prompt,
-            is_subagent=is_subagent,
-        )
-
-        tools: list = []
-        seen_names: set = set()
-        # Client tools take priority (they carry client-specific metadata).
-        for t in client_tool_schemas or []:
-            name = t.get("function", {}).get("name")
-            if name and name not in seen_names:
-                seen_names.add(name)
-                tools.append(t)
-        # Server skill tools — subagents get full set, main agent only gets allowlist
-        if is_subagent:
-            for t in server_tool_schemas:
-                name = t.get("function", {}).get("name")
-                if name and name not in seen_names:
-                    seen_names.add(name)
-                    tools.append(t)
+        if agent_config:
+            # Ensure SKILL.md guides for the agent's skills are always
+            # present, even on continuation turns where the client may
+            # not resend skills_snapshot (which would otherwise skip
+            # the DB guide fetch in resolve_tools).
+            merged_prompts = list(client_tool_prompts or [])
+            if agent_config.skills and self.skill_provider:
+                existing = set(merged_prompts)
+                server_guides = self.skill_provider.get_guide_prompts_for_skills(
+                    set(agent_config.skills)
+                )
+                for guide in server_guides:
+                    if guide not in existing:
+                        merged_prompts.append(guide)
+                logger.info(
+                    "GUIDE_INJECT agent=%s skills=%s server_guides=%d merged=%d",
+                    agent_config.name,
+                    agent_config.skills,
+                    len(server_guides),
+                    len(merged_prompts),
+                )
+            prompt = self._build_agent_config_prompt(
+                agent_config=agent_config,
+                client_tool_prompts=merged_prompts or None,
+                instructions=instructions,
+                state_prompts=state_prompts,
+                skills_prompt=skills_prompt if agent_config.skills else None,
+            )
         else:
-            _MAIN_AGENT_TOOLS = MAIN_AGENT_TOOLS
-            for t in server_tool_schemas:
-                name = t.get("function", {}).get("name")
-                if name and name in _MAIN_AGENT_TOOLS and name not in seen_names:
-                    seen_names.add(name)
-                    tools.append(t)
-        # MCP-discovered tools — subagents only (main agent delegates via activate_skill)
-        if is_subagent:
-            for t in self.mcp_tool_controller.get_tool_schemas():
-                name = t.get("function", {}).get("name")
-                if name and name not in seen_names:
-                    if active_tool_names is not None and name not in active_tool_names:
-                        continue
-                    seen_names.add(name)
-                    tools.append(t)
+            prompt = build_system_prompt(
+                client_tool_prompts=client_tool_prompts,
+                instructions=instructions,
+                state_prompts=state_prompts,
+                skills_prompt=skills_prompt,
+                is_subagent=is_subagent,
+            )
+
+        if agent_config:
+            tools = self._resolve_agent_config_tools(
+                agent_config=agent_config,
+                client_tool_schemas=client_tool_schemas,
+                server_tool_schemas=server_tool_schemas,
+                active_tool_names=active_tool_names,
+            )
+        elif is_subagent:
+            tools = self._resolve_subagent_tools(
+                client_tool_schemas=client_tool_schemas,
+                server_tool_schemas=server_tool_schemas,
+                active_tool_names=active_tool_names,
+            )
+        else:
+            tools = self._resolve_main_agent_tools(
+                client_tool_schemas=client_tool_schemas,
+                server_tool_schemas=server_tool_schemas,
+            )
 
         tools = self._normalize_tool_schemas(tools)
         if not is_subagent:
             tools = self._inject_display_name_param(tools)
 
         return prompt, tools
+
+    # ------------------------------------------------------------------
+    # Prompt builders
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _build_agent_config_prompt(
+        agent_config: "AgentDefinition",
+        client_tool_prompts: Optional[List[str]] = None,
+        instructions: Optional[str] = None,
+        state_prompts: Optional[List[str]] = None,
+        skills_prompt: Optional[str] = None,
+    ) -> str:
+        """Build system prompt using agent-specific identity from AGENT.md."""
+        builder = SystemPromptBuilder(agent_identity=agent_config.identity_prompt)
+        if skills_prompt:
+            builder.add_skills_catalog(skills_prompt)
+        if client_tool_prompts:
+            for guide in client_tool_prompts:
+                if guide.strip().startswith("<tool_guide"):
+                    builder.add_tool_guides([guide])
+                else:
+                    builder.add_tool_guide("client", guide)
+        if state_prompts:
+            builder.add_state_prompts(state_prompts)
+        if instructions:
+            builder.set_instructions(instructions)
+        return builder.build()
+
+    # ------------------------------------------------------------------
+    # Tool resolution strategies
+    # ------------------------------------------------------------------
+
+    def _resolve_agent_config_tools(
+        self,
+        agent_config: "AgentDefinition",
+        client_tool_schemas: Optional[List[dict]],
+        server_tool_schemas: list,
+        active_tool_names: Optional[Set[str]],
+    ) -> list:
+        """Resolve tools based on AgentDefinition (routed agent).
+
+        - Client and server skill tools are filtered to only those whose
+          owning skill is in ``agent_config.skills``.
+        - MCP tools are included only if ``agent_config.mcp_tools`` is True.
+        """
+        tools: list = []
+        seen_names: set = set()
+
+        # Build the allowed tool-name set from the agent's skills.
+        # This filters both client and server tool schemas so the agent
+        # only sees tools belonging to its declared skills.
+        allowed_skills = set(agent_config.skills) if agent_config.skills else set()
+        skill_tool_names: Set[str] = set()
+        if allowed_skills and self.skill_provider:
+            skill_tool_names = self.skill_provider.get_skill_tool_names(allowed_skills)
+
+        # Client tools — filtered by allowed skill tools
+        for t in client_tool_schemas or []:
+            name = t.get("function", {}).get("name")
+            if name and name not in seen_names:
+                if skill_tool_names and name not in skill_tool_names:
+                    continue
+                seen_names.add(name)
+                tools.append(t)
+
+        # Server skill tools — only from allowed skills
+        if skill_tool_names:
+            for t in server_tool_schemas:
+                name = t.get("function", {}).get("name")
+                if name and name in skill_tool_names and name not in seen_names:
+                    seen_names.add(name)
+                    tools.append(t)
+
+        # MCP tools — only if agent allows them
+        # Note: active_tool_names filter is NOT applied here because it only
+        # tracks client-skill tool names. MCP tool access is governed solely
+        # by agent_config.mcp_tools. Applying the filter would drop all MCP
+        # tools on continuation turns (where skills_snapshot is absent).
+        if agent_config.mcp_tools:
+            for t in self.mcp_tool_controller.get_tool_schemas():
+                name = t.get("function", {}).get("name")
+                if name and name not in seen_names:
+                    seen_names.add(name)
+                    tools.append(t)
+
+        return tools
+
+    def _resolve_subagent_tools(
+        self,
+        client_tool_schemas: Optional[List[dict]],
+        server_tool_schemas: list,
+        active_tool_names: Optional[Set[str]],
+    ) -> list:
+        """Resolve tools for sub-agent calls (full server + MCP tool set)."""
+        tools: list = []
+        seen_names: set = set()
+
+        for t in client_tool_schemas or []:
+            name = t.get("function", {}).get("name")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                tools.append(t)
+
+        for t in server_tool_schemas:
+            name = t.get("function", {}).get("name")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                tools.append(t)
+
+        for t in self.mcp_tool_controller.get_tool_schemas():
+            name = t.get("function", {}).get("name")
+            if name and name not in seen_names:
+                if active_tool_names is not None and name not in active_tool_names:
+                    continue
+                seen_names.add(name)
+                tools.append(t)
+
+        return tools
+
+    @staticmethod
+    def _resolve_main_agent_tools(
+        client_tool_schemas: Optional[List[dict]],
+        server_tool_schemas: list,
+    ) -> list:
+        """Resolve tools for the main orchestrator agent (activate_skill + ask_question only)."""
+        tools: list = []
+        seen_names: set = set()
+
+        for t in client_tool_schemas or []:
+            name = t.get("function", {}).get("name")
+            if name and name not in seen_names:
+                seen_names.add(name)
+                tools.append(t)
+
+        for t in server_tool_schemas:
+            name = t.get("function", {}).get("name")
+            if name and name in MAIN_AGENT_TOOLS and name not in seen_names:
+                seen_names.add(name)
+                tools.append(t)
+
+        return tools
 
     # ------------------------------------------------------------------
     # Schema normalisation

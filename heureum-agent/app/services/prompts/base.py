@@ -180,8 +180,9 @@ class SystemPromptBuilder:
         <current_date>YYYY-MM-DD</current_date>
     """
 
-    def __init__(self, *, is_subagent: bool = False) -> None:
+    def __init__(self, *, is_subagent: bool = False, agent_identity: Optional[str] = None) -> None:
         self._is_subagent = is_subagent
+        self._agent_identity = agent_identity
         self._skills_catalog: Optional[str] = None
         self._tool_guides: List[str] = []
         self._state_prompts: List[str] = []
@@ -236,7 +237,12 @@ class SystemPromptBuilder:
 
     def build(self) -> str:
         """Assemble and return the final system prompt string."""
-        identity = SUBAGENT_IDENTITY_PROMPT if self._is_subagent else AGENT_IDENTITY_PROMPT
+        if self._agent_identity:
+            identity = self._agent_identity
+        elif self._is_subagent:
+            identity = SUBAGENT_IDENTITY_PROMPT
+        else:
+            identity = AGENT_IDENTITY_PROMPT
         parts: List[str] = [identity]
 
         if self._skills_catalog:

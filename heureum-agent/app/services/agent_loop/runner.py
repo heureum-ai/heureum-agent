@@ -23,6 +23,7 @@ from app.schemas.open_responses import (
 )
 from langchain_core.messages import BaseMessage, HumanMessage, ToolMessage
 
+from app.agents.router import classify_request
 from app.services.agent_loop.context import LoopContext, _LoopStateBuilder, is_tool_error
 from app.services.middleware import MiddlewareBlocked, MiddlewareContext, PromptBuildEvent
 
@@ -52,6 +53,139 @@ class AgentLoopRunner:
         self._original_instructions = ctx.request.instructions
         self._persist_tasks: list[asyncio.Task] = []
         self._pending_events: list[dict] = []
+
+    # -- router classification -------------------------------------------------
+
+    def _is_continuation(self) -> bool:
+        """Check if this request is a continuation (approval answer, tool result, etc.)."""
+        # If there's a pending approval, this is a continuation
+        if self._mcp_client.has_pending_approval(self.ctx.session_id):
+            return True
+        # If the client references a previous response, this is a continuation
+        # (tool results may have been merged into history by
+        # prepare_messages_for_session, leaving self.ctx.messages empty)
+        if getattr(self.ctx.request, "previous_response_id", None):
+            return True
+        # If there are tool results in the input, this is a continuation
+        for m in self.ctx.messages:
+            if isinstance(m, ToolMessage):
+                return True
+        return False
+
+    async def _maybe_classify(self) -> None:
+        """Run router classification if needed, then apply agent config.
+
+        Skips classification when:
+        - agent_config is already set (e.g. from a previous turn)
+        - This is a continuation request (approval answer, tool result)
+          → restores the previous agent_config from the session store
+        """
+        if self.ctx.agent_config is not None:
+            logger.info(
+                "CLASSIFY session=%s path=already_set agent=%s",
+                self.ctx.session_id,
+                getattr(self.ctx.agent_config, "name", "?"),
+            )
+            self._apply_agent_config(self.ctx.agent_config)
+            self._controller.set_session_agent_config(
+                self.ctx.session_id, self.ctx.agent_config
+            )
+            return
+
+        # Continuations (approval answer, tool result) reuse the previous
+        # agent config so the same tools/prompt stay active.
+        is_cont = self._is_continuation()
+        logger.info(
+            "CLASSIFY session=%s is_continuation=%s has_pending=%s tool_msgs=%s msg_types=%s",
+            self.ctx.session_id,
+            is_cont,
+            self._mcp_client.has_pending_approval(self.ctx.session_id),
+            sum(1 for m in self.ctx.messages if isinstance(m, ToolMessage)),
+            [type(m).__name__ for m in self.ctx.messages],
+        )
+        if is_cont:
+            stored = self._controller.get_session_agent_config(self.ctx.session_id)
+            logger.info(
+                "CLASSIFY session=%s continuation stored_config=%s",
+                self.ctx.session_id,
+                getattr(stored, "name", None) if stored else None,
+            )
+            if stored is not None:
+                self.ctx.agent_config = stored
+                self._apply_agent_config(stored)
+            return
+
+        agent_name = await classify_request(
+            self.ctx.messages,
+            self._controller.agent_registry,
+            self._service,
+        )
+        agent_def = self._controller.agent_registry.get_agent(agent_name)
+        if agent_def:
+            self.ctx.agent_config = agent_def
+            self._apply_agent_config(agent_def)
+            self._controller.set_session_agent_config(
+                self.ctx.session_id, agent_def
+            )
+
+    @property
+    def _should_use_tools(self) -> bool:
+        """Whether the agent loop should use tool iterations.
+
+        Checks both the resolved tool_names (from resolve_tools in the
+        HTTP layer) and the agent_config (which may independently specify
+        MCP or skill tools that PromptController resolves at call time).
+        """
+        if self.ctx.tool_names:
+            logger.info(
+                "SHOULD_USE_TOOLS session=%s → True (tool_names=%d)",
+                self.ctx.session_id,
+                len(self.ctx.tool_names),
+            )
+            return True
+        config = self.ctx.agent_config
+        if config:
+            from app.agents.types import AgentDefinition
+
+            if isinstance(config, AgentDefinition):
+                result = bool(config.skills or config.mcp_tools)
+                logger.info(
+                    "SHOULD_USE_TOOLS session=%s → %s (agent=%s skills=%s mcp=%s)",
+                    self.ctx.session_id,
+                    result,
+                    config.name,
+                    config.skills,
+                    config.mcp_tools,
+                )
+                return result
+        logger.info(
+            "SHOULD_USE_TOOLS session=%s → False (no tool_names, no agent_config) config_type=%s",
+            self.ctx.session_id,
+            type(config).__name__ if config else None,
+        )
+        return False
+
+    def _apply_agent_config(self, config) -> None:
+        """Apply agent configuration to the loop context.
+
+        Adjusts tool_names filtering and skills_prompt based on the
+        agent's definition. The actual prompt/tool schema changes happen
+        in PromptController via the agent_config parameter.
+        """
+        from app.agents.types import AgentDefinition
+
+        if not isinstance(config, AgentDefinition):
+            return
+
+        # For simple agents with no tools, clear tool_names so _run_text_only is used
+        if not config.skills and not config.mcp_tools:
+            self.ctx.tool_names = []
+            self.ctx.skills_prompt = None
+            return
+
+        # For agents without skills catalog, suppress it
+        if not config.skills:
+            self.ctx.skills_prompt = None
 
     # -- logging helpers -------------------------------------------------------
 
@@ -301,11 +435,12 @@ class AgentLoopRunner:
 
     async def _build_max_iterations_response(self) -> ResponseObject:
         """Build the response when max iterations are reached."""
+        max_iter = self._max_iterations
         self._persist_complete("incomplete")
         text, _ = await self._messages.resolve(
             "loop.max_iterations",
             session_id=self.ctx.session_id,
-            max_iterations=settings.MAX_AGENT_ITERATIONS,
+            max_iterations=max_iter,
         )
         return self._service.responses.build_response(
             [
@@ -319,7 +454,7 @@ class AgentLoopRunner:
             self.ctx.created_at,
             self.ctx.model,
             usage=self.ctx.total_usage,
-            iterations=settings.MAX_AGENT_ITERATIONS,
+            iterations=max_iter,
             tool_call_count=self.ctx.tool_call_count,
             tool_history=self.ctx.output_items or None,
         )
@@ -327,7 +462,10 @@ class AgentLoopRunner:
     # -- public API --------------------------------------------------------
 
     async def run(self) -> ResponseObject:
-        if not self.ctx.tool_names:
+        # Router classification: select specialized agent on first turn
+        await self._maybe_classify()
+
+        if not self._should_use_tools:
             response = await self._run_text_only()
         else:
             async with self._controller.get_loop_lock(self.ctx.session_id):
@@ -345,6 +483,7 @@ class AgentLoopRunner:
             messages=self.ctx.messages,
             session_id=self.ctx.session_id,
             instructions=self.ctx.request.instructions,
+            agent_config=self.ctx.agent_config,
         )
         if resp.usage:
             self.ctx.total_usage = self.ctx.total_usage.add(resp.usage)
@@ -394,6 +533,13 @@ class AgentLoopRunner:
         """Return user-provided instructions (without runtime state)."""
         return self._original_instructions or None
 
+    @property
+    def _max_iterations(self) -> int:
+        """Return effective max iterations (agent config or global setting)."""
+        if self.ctx.agent_config and self.ctx.agent_config.max_iterations:
+            return self.ctx.agent_config.max_iterations
+        return settings.MAX_AGENT_ITERATIONS
+
     def _get_state_prompts(self, iteration: int = 1) -> list[str] | None:
         """Return per-turn runtime state prompts from active skills + loop state."""
         prompts = self._skill_controller.get_state_prompts(self.ctx.session_id)
@@ -402,7 +548,7 @@ class AgentLoopRunner:
         prompts.append(
             _LoopStateBuilder.build(
                 iteration=iteration,
-                max_iterations=settings.MAX_AGENT_ITERATIONS,
+                max_iterations=self._max_iterations,
                 tool_call_count=self.ctx.tool_call_count,
                 output_items=self.ctx.output_items,
                 total_usage=self.ctx.total_usage,
@@ -476,8 +622,9 @@ class AgentLoopRunner:
         self._skill_controller.clear_completed_plans(self.ctx.session_id)
         _poll_bonus = 0
         _MAX_POLL_BONUS = 10  # hard cap to prevent token cost explosion
+        max_iter = self._max_iterations
         iteration = 0
-        while iteration < settings.MAX_AGENT_ITERATIONS + _poll_bonus:
+        while iteration < max_iter + _poll_bonus:
             iteration += 1
             instructions = self._get_instructions()
             state_prompts = self._get_state_prompts(iteration=iteration)
@@ -516,6 +663,7 @@ class AgentLoopRunner:
                 skills_prompt=skills_prompt,
                 skills_snapshot=self.ctx.request.skills_snapshot,
                 active_tool_names=active_tool_names,
+                agent_config=self.ctx.agent_config,
             )
 
             await self._run_prompt_after_middleware(prompt_event)
@@ -831,6 +979,9 @@ class AgentLoopRunner:
 
     async def stream(self):
         """Async generator yielding SSE-formatted event strings."""
+        # Router classification: select specialized agent on first turn
+        await self._maybe_classify()
+
         response_id = f"resp_{uuid.uuid4().hex}"
 
         yield self._service.responses.sse_event(
@@ -847,7 +998,7 @@ class AgentLoopRunner:
         )
 
         try:
-            if not self.ctx.tool_names:
+            if not self._should_use_tools:
                 async for event in self._stream_text_only():
                     yield event
             else:
@@ -975,6 +1126,7 @@ class AgentLoopRunner:
             skills_prompt=skills_prompt,
             skills_snapshot=self.ctx.request.skills_snapshot,
             active_tool_names=active_tool_names,
+            agent_config=self.ctx.agent_config,
         ):
             reasoning_delta = (
                 self._service._normalize._extract_reasoning(chunk.content) if chunk.content else ""
@@ -1070,8 +1222,9 @@ class AgentLoopRunner:
         self._skill_controller.clear_completed_plans(self.ctx.session_id)
         _poll_bonus = 0
         _MAX_POLL_BONUS = 10  # hard cap to prevent token cost explosion
+        max_iter = self._max_iterations
         iteration = 0
-        while iteration < settings.MAX_AGENT_ITERATIONS + _poll_bonus:
+        while iteration < max_iter + _poll_bonus:
             iteration += 1
             # Inject current TODO state into instructions for this iteration
             self.ctx.request.instructions = self._get_instructions()

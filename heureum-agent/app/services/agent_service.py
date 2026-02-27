@@ -512,6 +512,7 @@ class AgentService:
         skills_snapshot: Any = None,
         active_tool_names: Optional[Set[str]] = None,
         is_subagent: bool = False,
+        agent_config: Any = None,
     ) -> tuple:
         """Build system prompt and resolve tool schemas together.
 
@@ -532,6 +533,7 @@ class AgentService:
                 block from a client skills snapshot.
             skills_snapshot: Full snapshot payload for tool filtering.
             active_tool_names: Progressive skill activation filter set.
+            agent_config: AgentDefinition from router (overrides tool filtering).
 
         Returns:
             tuple[str, list]: (system_prompt, tool_schemas_for_bind_tools).
@@ -546,6 +548,7 @@ class AgentService:
             skills_snapshot=skills_snapshot,
             active_tool_names=active_tool_names,
             is_subagent=is_subagent,
+            agent_config=agent_config,
         )
 
     def _build_lc_messages(
@@ -784,6 +787,7 @@ class AgentService:
         skills_snapshot: Any = None,
         active_tool_names: Optional[Set[str]] = None,
         is_subagent: bool = False,
+        agent_config: Any = None,
     ):
         """Single LLM call with overflow recovery and transient error retry.
 
@@ -806,6 +810,7 @@ class AgentService:
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
             skills_snapshot: Full snapshot payload for skill filtering.
+            agent_config: AgentDefinition from router.
 
         Returns:
             AIMessage: The successful LLM response.
@@ -832,6 +837,7 @@ class AgentService:
             skills_snapshot=skills_snapshot,
             active_tool_names=active_tool_names,
             is_subagent=is_subagent,
+            agent_config=agent_config,
         )
         lc_new_messages = list(new_messages)
         overflow_retries = 0
@@ -1143,6 +1149,7 @@ class AgentService:
         messages: List[BaseMessage],
         session_id: Optional[str] = None,
         instructions: Optional[str] = None,
+        agent_config: Any = None,
     ) -> AgentResponse:
         """Process messages without tool calling.
 
@@ -1152,6 +1159,7 @@ class AgentService:
                 A new session is created if None or unknown.
             instructions (Optional[str]): Extra instructions appended to
                 the system prompt.
+            agent_config: AgentDefinition from router.
 
         Returns:
             AgentResponse: The assistant's text response and session ID.
@@ -1168,6 +1176,7 @@ class AgentService:
                 messages,
                 session_id,
                 instructions=instructions,
+                agent_config=agent_config,
             )
             normalized = self._normalize.normalize_llm_response(response)
             self.append_to_history(
@@ -1198,6 +1207,7 @@ class AgentService:
         skills_snapshot: Any = None,
         active_tool_names: Optional[Set[str]] = None,
         is_subagent: bool = False,
+        agent_config: Any = None,
     ) -> LLMResult:
         """Process messages with tool calling (single LLM call).
 
@@ -1217,6 +1227,7 @@ class AgentService:
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
             skills_snapshot: Full snapshot payload for skill filtering.
+            agent_config: AgentDefinition from router.
 
         Returns:
             LLMResult: A text result or tool call result with usage.
@@ -1236,6 +1247,7 @@ class AgentService:
                 skills_snapshot=skills_snapshot,
                 active_tool_names=active_tool_names,
                 is_subagent=is_subagent,
+                agent_config=agent_config,
             )
 
             normalized = self._normalize.normalize_llm_response(response)
@@ -1280,6 +1292,7 @@ class AgentService:
         skills_prompt: Optional[str] = None,
         skills_snapshot: Any = None,
         active_tool_names: Optional[Set[str]] = None,
+        agent_config: Any = None,
     ):
         """Stream LLM response with overflow recovery. Yields AIMessageChunk.
 
@@ -1300,6 +1313,7 @@ class AgentService:
             state_prompts (Optional[List[str]]): Per-turn runtime state
                 prompts from skills.
             skills_snapshot: Full snapshot payload for skill filtering.
+            agent_config: AgentDefinition from router.
 
         Yields:
             AIMessageChunk: Incremental response chunks.
@@ -1314,6 +1328,7 @@ class AgentService:
             skills_prompt=skills_prompt,
             skills_snapshot=skills_snapshot,
             active_tool_names=active_tool_names,
+            agent_config=agent_config,
         )
         lc_new = list(messages)
         overflow_retries = 0

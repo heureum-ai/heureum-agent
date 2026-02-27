@@ -86,6 +86,41 @@ class SkillController:
                 tools |= self._tools_by_skill.get(skill_key, set())
         return tools
 
+    def get_skill_tool_names(self, skill_names: set[str]) -> Set[str]:
+        """Return the union of tool names owned by the given skill names.
+
+        Uses alias resolution so skill names from AGENT.md frontmatter
+        (e.g. "plan_task", "web_search_task") are matched correctly.
+        """
+        result: Set[str] = set()
+        for name in skill_names:
+            norm = self._norm_name(name)
+            key = self._alias_to_key.get(norm)
+            if key:
+                result |= self._tools_by_skill.get(key, set())
+        return result
+
+    def get_guide_prompts_for_skills(self, skill_names: set[str]) -> List[str]:
+        """Return ``<tool_guide>``-wrapped SKILL.md bodies for the given skills.
+
+        Used by routed agents to ensure skill guides are always available
+        in the system prompt, even on continuation turns where the client
+        may not resend ``skills_snapshot``.
+        """
+        from app.services.skills.metadata import load_guide_prompt
+
+        guides: List[str] = []
+        for name in skill_names:
+            norm = self._norm_name(name)
+            key = self._alias_to_key.get(norm)
+            if key and key in self._skills:
+                body = load_guide_prompt(self._skills[key])
+                if body and body.strip():
+                    guides.append(
+                        f'<tool_guide name="{name}">\n{body}\n</tool_guide>'
+                    )
+        return guides
+
     def get_delegatable_skill_map(self) -> Dict[str, Set[str]]:
         """Return {skill_key: tool_names} for skills delegatable to sub-agents.
 
