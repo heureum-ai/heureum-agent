@@ -99,7 +99,13 @@ class PromptController:
                 client_tool_prompts=merged_prompts or None,
                 instructions=instructions,
                 state_prompts=state_prompts,
-                skills_prompt=skills_prompt if agent_config.skills else None,
+                # Include the skills catalog when the agent uses tools:
+                #   - Agents with explicit skills (web_search, complex): catalog helps
+                #     the LLM understand the full skill landscape alongside its guides.
+                #   - Dynamic agents (dynamic_tools, skills=[]): catalog is REQUIRED so
+                #     the agent can discover and choose from all available client skills.
+                #   - Simple agents (skills=[], mcp_tools=False): no tools, skip catalog.
+                skills_prompt=skills_prompt if (agent_config.skills or agent_config.mcp_tools) else None,
             )
         else:
             prompt = build_system_prompt(

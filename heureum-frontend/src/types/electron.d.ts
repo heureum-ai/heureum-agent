@@ -49,6 +49,7 @@ interface ElectronAPI {
   getClientId: () => Promise<string>
   canExecuteTools: boolean
   getCodingTools: () => Promise<CodingToolSchema[]>
+  getWebToolNames: () => Promise<string[]>
   getBrowserTools: () => Promise<BrowserToolSchema[]>
   getSkillsSnapshot: () => Promise<SkillsSnapshotResult>
   codingTool: (toolName: string, args: Record<string, unknown>, cwd?: string) => Promise<CodingToolResult>
