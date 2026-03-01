@@ -1046,7 +1046,8 @@ class AgentService:
                 )
             )
 
-            lc_history.extend(messages)
+            user_messages = [m for m in messages if not isinstance(m, ToolMessage)]
+            lc_history.extend(user_messages)
             if assistant_lc_message is not None:
                 lc_history.append(assistant_lc_message)
                 lc_history.extend(tool_results)

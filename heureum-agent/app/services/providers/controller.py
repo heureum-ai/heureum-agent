@@ -7,6 +7,90 @@ from typing import Any
 
 from app.config import Settings, settings as app_settings
 
+# Google AI Studio OpenAI-compatible endpoint
+_GOOGLE_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+def _infer_provider(model: str, settings: Settings) -> str:
+    """Infer provider from model name and settings.
+
+    Gemini models use Vertex AI when ``GOOGLE_CLOUD_PROJECT`` is set without
+    ``GOOGLE_API_KEY``; otherwise they use Google AI Studio.
+    """
+    if model.startswith("gemini"):
+        if settings.GOOGLE_CLOUD_PROJECT and not settings.GOOGLE_API_KEY:
+            return "vertex_ai"
+        return "gemini"
+    if model.startswith("claude"):
+        return "anthropic"
+    return "openai"
+
+
+def _get_vertex_access_token(settings: Settings) -> str:
+    """Obtain a short-lived OAuth2 Bearer token for Vertex AI.
+
+    Uses ``GOOGLE_APPLICATION_CREDENTIALS`` (service account JSON) when set,
+    otherwise falls back to Application Default Credentials.
+    """
+    if settings.GOOGLE_APPLICATION_CREDENTIALS:
+        os.environ.setdefault(
+            "GOOGLE_APPLICATION_CREDENTIALS",
+            settings.GOOGLE_APPLICATION_CREDENTIALS,
+        )
+    import google.auth
+    import google.auth.transport.requests
+
+    creds, _ = google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )
+    creds.refresh(google.auth.transport.requests.Request())
+    return creds.token  # type: ignore[return-value]
+
+
+def _resolve_api_config(
+    model: str, provider: str | None, settings: Settings
+) -> tuple[str, str | None]:
+    """Return ``(api_key, base_url)`` for the resolved provider.
+
+    - ``openai``    → OpenAI default endpoint (``base_url=None``)
+    - ``gemini``    → Google AI Studio OpenAI-compatible endpoint
+    - ``vertex_ai`` → Vertex AI OpenAI-compatible endpoint (OAuth2 token)
+    - ``anthropic`` → Anthropic OpenAI-compatible endpoint
+    """
+    p = provider or _infer_provider(model, settings)
+
+    if p == "gemini":
+        return settings.GOOGLE_API_KEY, _GOOGLE_OPENAI_BASE_URL
+
+    if p == "vertex_ai":
+        location = settings.GOOGLE_CLOUD_LOCATION or "us-central1"
+        project = settings.GOOGLE_CLOUD_PROJECT
+        base_url = (
+            f"https://{location}-aiplatform.googleapis.com/v1beta1"
+            f"/projects/{project}/locations/{location}/endpoints/openapi"
+        )
+        return _get_vertex_access_token(settings), base_url
+
+    if p == "anthropic":
+        return settings.ANTHROPIC_API_KEY, "https://api.anthropic.com/v1/"
+
+    # openai — use SDK default base URL
+    return settings.OPENAI_API_KEY, None
+
+
+def _build_extra_body(
+    model: str, provider: str | None, settings: Settings
+) -> dict[str, Any] | None:
+    """Build provider-specific extra request body (e.g. Gemini thinking budget)."""
+    p = provider or _infer_provider(model, settings)
+    if p in ("gemini", "vertex_ai") and settings.AGENT_THINKING_BUDGET:
+        return {
+            "thinking": {
+                "type": "enabled",
+                "budget_tokens": settings.AGENT_THINKING_BUDGET,
+            }
+        }
+    return None
+
 
 def create_llm(
     *,
@@ -14,97 +98,42 @@ def create_llm(
     provider: str | None = None,
     settings: Settings,
 ) -> Any:
-    """Create a LangChain LLM instance for the given model/provider.
+    """Create a LangChain LLM instance using ``ChatOpenAI`` with provider-specific base URLs.
 
-    When ``provider`` is None, the provider is inferred from the model name
-    (models starting with ``"gemini"`` → Google, everything else → OpenAI).
+    Provider routing (auto-inferred from model name when ``provider`` is ``None``):
+
+    - **OpenAI** — default SDK endpoint
+    - **Gemini** — Google AI Studio: ``https://generativelanguage.googleapis.com/v1beta/openai/``
+    - **Vertex AI** — ``https://{location}-aiplatform.googleapis.com/v1beta1/…/endpoints/openapi``
+      (triggered when ``GOOGLE_CLOUD_PROJECT`` is set and ``GOOGLE_API_KEY`` is absent)
+    - **Anthropic** — ``https://api.anthropic.com/v1/``
 
     Args:
-        model: Model identifier (e.g. ``"gemini-2.0-flash"``).
-        provider: Explicit provider name (``"google"``, ``"openai"``,
-            ``"anthropic"``).  Inferred from *model* when omitted.
+        model: Model identifier (e.g. ``"gemini-2.0-flash"``, ``"gpt-4o"``).
+        provider: Explicit provider override; inferred from *model* when omitted.
         settings: Application settings providing API keys and parameters.
 
     Returns:
-        A LangChain chat model instance.
-
-    Raises:
-        ValueError: If the provider is unsupported.
-        ImportError: If the required LangChain integration package is missing.
+        A ``ChatOpenAI`` instance configured for the target provider.
     """
-    resolved_provider = provider or _infer_provider(model)
-
-    if resolved_provider == "google":
-        return _create_google_llm(model=model, settings=settings)
-    if resolved_provider == "openai":
-        return _create_openai_llm(model=model, settings=settings)
-    if resolved_provider == "anthropic":
-        return _create_anthropic_llm(model=model, settings=settings)
-
-    raise ValueError(f"Unsupported provider: {resolved_provider}")
-
-
-def _infer_provider(model: str) -> str:
-    if model.startswith("gemini"):
-        return "google"
-    return "openai"
-
-
-def _create_google_llm(*, model: str, settings: Settings) -> Any:
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    thinking_budget = settings.AGENT_THINKING_BUDGET or None
-    include_thoughts = True if thinking_budget else None
-    if settings.GOOGLE_API_KEY:
-        return ChatGoogleGenerativeAI(
-            model=model,
-            google_api_key=settings.GOOGLE_API_KEY,
-            temperature=settings.AGENT_TEMPERATURE,
-            max_output_tokens=settings.AGENT_MAX_TOKENS,
-            thinking_budget=thinking_budget,
-            include_thoughts=include_thoughts,
-        )
-    if settings.GOOGLE_APPLICATION_CREDENTIALS:
-        os.environ.setdefault(
-            "GOOGLE_APPLICATION_CREDENTIALS",
-            settings.GOOGLE_APPLICATION_CREDENTIALS,
-        )
-    return ChatGoogleGenerativeAI(
-        model=model,
-        vertexai=True,
-        project=settings.GOOGLE_CLOUD_PROJECT,
-        location=settings.GOOGLE_CLOUD_LOCATION,
-        temperature=settings.AGENT_TEMPERATURE,
-        max_output_tokens=settings.AGENT_MAX_TOKENS,
-        thinking_budget=thinking_budget,
-        include_thoughts=include_thoughts,
-    )
-
-
-def _create_openai_llm(*, model: str, settings: Settings) -> Any:
     from langchain_openai import ChatOpenAI
-    from pydantic import SecretStr
 
-    return ChatOpenAI(
-        api_key=SecretStr(settings.OPENAI_API_KEY),
-        model=model,
-        temperature=settings.AGENT_TEMPERATURE,
-        max_completion_tokens=settings.AGENT_MAX_TOKENS,
-    )
+    api_key, base_url = _resolve_api_config(model, provider, settings)
+    extra_body = _build_extra_body(model, provider, settings)
 
-
-def _create_anthropic_llm(*, model: str, settings: Settings) -> Any:
-    try:
-        from langchain_anthropic import ChatAnthropic
-    except ImportError:
-        raise ImportError("langchain-anthropic is required for Anthropic provider")
-
-    return ChatAnthropic(
-        api_key=settings.ANTHROPIC_API_KEY,
+    kwargs: dict[str, Any] = dict(
         model=model,
         temperature=settings.AGENT_TEMPERATURE,
         max_tokens=settings.AGENT_MAX_TOKENS,
     )
+    if api_key:
+        kwargs["api_key"] = api_key
+    if base_url:
+        kwargs["base_url"] = base_url
+    if extra_body:
+        kwargs["extra_body"] = extra_body
+
+    return ChatOpenAI(**kwargs)
 
 
 class LLMController:
