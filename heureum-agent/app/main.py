@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
 """
-Heureum Agent - FastAPI + LangChain AI Agent Service
+Heureum Agent - FastAPI + DeepAgents AI Agent Service
 """
 
 import asyncio
@@ -17,12 +17,9 @@ from app.routers.agent import (
     create_response,
     generate_title,
     subagent_status,
+    _mcp_client,
 )
-from app.services.agent_loop import (
-    agent_service,
-    mcp_client,
-    persist_controller,
-)
+from app.services.agent_service import agent_service
 from fastapi import APIRouter, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -108,9 +105,7 @@ async def _on_shutdown() -> None:
     """Cleanup on application shutdown."""
     try:
         await agent_service.aclose()
-        await mcp_client.close()
-        if persist_controller:
-            await persist_controller.close()
+        await _mcp_client.close()
     except Exception:
         logger.warning("Error during shutdown cleanup", exc_info=True)
 
@@ -120,11 +115,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan manager."""
     logger.info("Starting Heureum Agent Service...")
     shutdown.register()
-    # Sweep stale subagent runs from previous instance
-    if persist_controller:
-        swept = await persist_controller.sweep_stale_runs()
-        if swept:
-            logger.info("Swept %d stale subagent run(s) from DB", swept)
     yield
     logger.info("Shutting down Heureum Agent Service...")
     await _on_shutdown()
@@ -136,7 +126,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
 app = FastAPI(
     title="Heureum Agent",
-    description="AI Agent Service with FastAPI and LangChain",
+    description="AI Agent Service with FastAPI and DeepAgents",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -175,12 +165,7 @@ app.include_router(open_responses_router, prefix="/v1")
 
 
 class HealthResponse(BaseModel):
-    """Health check response model.
-
-    Attributes:
-        status (str): Current service health status.
-        version (str): Application version string.
-    """
+    """Health check response model."""
 
     status: str
     version: str
@@ -188,22 +173,13 @@ class HealthResponse(BaseModel):
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    """Health check endpoint.
-
-    Returns:
-        HealthResponse: Current service status and version.
-    """
+    """Health check endpoint."""
     return HealthResponse(status="healthy", version="0.1.0")
 
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    """Root endpoint.
-
-    Returns:
-        dict[str, str]: A mapping containing a welcome message and links
-            to documentation and health endpoints.
-    """
+    """Root endpoint."""
     return {
         "message": "Heureum Agent Service",
         "docs": "/docs",

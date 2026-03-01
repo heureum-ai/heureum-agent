@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     SESSION_TTL_SECONDS: int = 3600  # 1 hour
     MAX_SESSIONS: int = 1000
 
-    # Context overflow
+    # Context overflow (v1 legacy, kept for compatibility)
     MAX_OVERFLOW_RETRIES: int = 3
     CONTEXT_WINDOW_HARD_MIN_TOKENS: int = 16_000
 

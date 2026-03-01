@@ -183,6 +183,15 @@ export function useStreamingChat({
         }
       });
 
+      // Persist any streaming text that arrived after the last tool call (e.g., final synthesis).
+      // Without this, clearStreamingText() below would discard it and flushedStreamingText=true
+      // would prevent line 275 from saving it from finalResponse.output.
+      const remainingStreamingText = useChatStore.getState().streamingText;
+      if (remainingStreamingText) {
+        addMessage({ role: 'assistant', content: remainingStreamingText });
+        flushedStreamingText = true;
+      }
+
       clearStreamingText();
       previousResponseIdRef.current = finalResponse.id;
       const newSessionId = finalResponse.metadata?.session_id || currentSessionId || '';

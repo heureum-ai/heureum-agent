@@ -10,8 +10,6 @@ from app.services.prompts.base import (
     SystemPromptBuilder,
     build_system_prompt,
 )
-from app.services.prompts.compaction import COMPACTION_PREFIX
-from app.services.prompts.controller import PromptController
 from app.services.skills import SkillController
 
 # ---------------------------------------------------------------------------
@@ -256,9 +254,6 @@ class TestPromptConstants:
         """Identity prompt must NOT reveal the underlying model name."""
         assert settings.AGENT_MODEL not in AGENT_IDENTITY_PROMPT
 
-    def test_compaction_prefix_value(self):
-        assert COMPACTION_PREFIX == "[compaction] Previous conversation summary:"
-
     def test_hard_clear_placeholder_value(self):
         assert HARD_CLEAR_PLACEHOLDER == "[Previous tool results have been cleared]"
 
@@ -301,35 +296,3 @@ class TestSubagentPrompt:
         assert "<task_execution>" not in result
 
 
-# ---------------------------------------------------------------------------
-# TestPromptControllerSubagent
-# ---------------------------------------------------------------------------
-
-
-class TestPromptControllerSubagent:
-    """Tests for PromptController is_subagent=True behavior."""
-
-    def test_display_name_injected_by_default(self):
-        ctrl = PromptController(skill_provider=None)
-        _, tools = ctrl.prepare_prompt_and_tools(
-            client_tool_schemas=[
-                {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}, "required": []}}}
-            ],
-        )
-        assert any(
-            "display_name" in t.get("function", {}).get("parameters", {}).get("properties", {})
-            for t in tools
-        )
-
-    def test_display_name_skipped_for_subagent(self):
-        ctrl = PromptController(skill_provider=None)
-        _, tools = ctrl.prepare_prompt_and_tools(
-            client_tool_schemas=[
-                {"type": "function", "function": {"name": "bash", "parameters": {"type": "object", "properties": {}, "required": []}}}
-            ],
-            is_subagent=True,
-        )
-        assert not any(
-            "display_name" in t.get("function", {}).get("parameters", {}).get("properties", {})
-            for t in tools
-        )
