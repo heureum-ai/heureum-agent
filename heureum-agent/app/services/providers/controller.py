@@ -10,21 +10,6 @@ from app.config import Settings, settings as app_settings
 # Google AI Studio OpenAI-compatible endpoint
 _GOOGLE_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
-_cache_configured: bool = False
-
-
-def _configure_llm_cache(settings: Settings) -> None:
-    """Enable LangChain in-memory response cache when LLM_CACHE_ENABLED is set."""
-    global _cache_configured
-    if _cache_configured or not settings.LLM_CACHE_ENABLED:
-        return
-    from langchain_community.cache import InMemoryCache
-    from langchain_core.globals import set_llm_cache
-
-    set_llm_cache(InMemoryCache())
-    _cache_configured = True
-
-
 def _infer_provider(model: str, settings: Settings) -> str:
     """Infer provider from model name and settings.
 
@@ -133,7 +118,6 @@ def create_llm(
     """
     from langchain_openai import ChatOpenAI
 
-    _configure_llm_cache(settings)
     api_key, base_url = _resolve_api_config(model, provider, settings)
     extra_body = _build_extra_body(model, provider, settings)
 
