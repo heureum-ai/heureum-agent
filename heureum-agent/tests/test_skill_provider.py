@@ -70,25 +70,27 @@ class TestParseSkillMd:
 class TestSkillDiscovery:
     def test_all_skills_discovered(self, provider):
         names = provider.get_all_tool_names()
+        assert "manage_todo" in names
         assert "manage_periodic_task" in names
         assert "notify_user" in names
 
     def test_tool_schemas_count(self, provider):
         schemas = provider.get_all_tool_schemas()
-        assert len(schemas) >= 2
+        assert len(schemas) >= 3
         schema_names = {s["function"]["name"] for s in schemas}
+        assert "manage_todo" in schema_names
         assert "manage_periodic_task" in schema_names
         assert "notify_user" in schema_names
 
     def test_get_skill_by_name(self, provider):
-        skill = provider.get_skill("periodic_task")
-        assert skill is not None
-        assert skill.name == "periodic_task"
+        plan = provider.get_skill("plan_task")
+        assert plan is not None
+        assert plan.name == "plan_task"
 
     def test_get_skill_for_tool_name(self, provider):
-        skill = provider.get_skill_for_tool("manage_periodic_task")
+        skill = provider.get_skill_for_tool("manage_todo")
         assert skill is not None
-        assert skill.name == "periodic_task"
+        assert skill.name == "plan_task"
 
     def test_get_skill_for_unknown_tool(self, provider):
         assert provider.get_skill_for_tool("nonexistent_tool") is None
@@ -98,31 +100,31 @@ class TestSkillDiscovery:
             "prompt": "<available_skills/>",
             "skills": [
                 {
-                    "name": "periodic_task",
-                    "description": "Manage periodic tasks",
+                    "name": "plan_task",
+                    "description": "Plan tasks",
                     "location": "/tmp/SKILL.md",
-                    "tools": ["manage_periodic_task"],
+                    "tools": ["manage_todo"],
                 }
             ],
         }
         allowed = provider.resolve_allowed_server_tools(skills_snapshot=snapshot)
-        assert allowed == {"manage_periodic_task"}
+        assert allowed == {"manage_todo"}
 
     def test_get_all_tool_schemas_filtered_by_snapshot(self, provider):
         snapshot = {
             "prompt": "<available_skills/>",
             "skills": [
                 {
-                    "name": "periodic_task",
-                    "description": "Manage periodic tasks",
+                    "name": "plan_task",
+                    "description": "Plan tasks",
                     "location": "/tmp/SKILL.md",
-                    "tools": ["manage_periodic_task"],
+                    "tools": ["manage_todo"],
                 }
             ],
         }
         schemas = provider.get_all_tool_schemas(skills_snapshot=snapshot)
         names = {s["function"]["name"] for s in schemas}
-        assert names == {"manage_periodic_task"}
+        assert names == {"manage_todo"}
 
 
 # ---------------------------------------------------------------------------
@@ -161,5 +163,73 @@ class TestDependsOn:
         assert meta.depends_on == []
 
 
-# plan_task and activate_task integration tests removed in Phase 9 cutover
-# (service.py deleted; v2 DeepAgents handles tasks and activation natively)
+# ---------------------------------------------------------------------------
+# PlanSkill integration
+# ---------------------------------------------------------------------------
+
+
+class TestPlanSkillIntegration:
+    @pytest.mark.asyncio
+    async def test_create_todo(self, provider):
+        plan = provider.get_skill("plan_task")
+        result = await plan.execute(
+            "manage_todo",
+            {
+                "action": "create",
+                "goal": "Test goal",
+                "tasks": [
+                    {"id": "t1", "description": "Step 1"},
+                    {"id": "t2", "description": "Step 2"},
+                ],
+            },
+            "test_session",
+        )
+        assert "Test goal" in result
+        assert "Step 1" in result
+
+    @pytest.mark.asyncio
+    async def test_update_task(self, provider):
+        plan = provider.get_skill("plan_task")
+        await plan.execute(
+            "manage_todo",
+            {
+                "action": "create",
+                "goal": "Update test",
+                "tasks": [{"id": "a", "description": "Task A"}],
+            },
+            "test_update_session",
+        )
+        result = await plan.execute(
+            "manage_todo",
+            {
+                "action": "update_task",
+                "task_id": "a",
+                "status": "completed",
+                "result": "Done",
+            },
+            "test_update_session",
+        )
+        assert "Done" in result
+
+    @pytest.mark.asyncio
+    async def test_state_prompt_after_create(self, provider):
+        plan = provider.get_skill("plan_task")
+        await plan.execute(
+            "manage_todo",
+            {
+                "action": "create",
+                "goal": "State test",
+                "tasks": [{"id": "s1", "description": "S1"}],
+            },
+            "test_state_session",
+        )
+        prompt = plan.get_state_prompt("test_state_session")
+        assert prompt is not None
+        assert "State test" in prompt
+
+    def test_clear_session_removes_state(self, provider):
+        plan = provider.get_skill("plan_task")
+        plan.clear_session("test_session")
+        plan.clear_session("test_update_session")
+        plan.clear_session("test_state_session")
+        assert plan.get_state("test_session") is None

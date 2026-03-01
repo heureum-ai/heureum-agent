@@ -1,7 +1,7 @@
 ---
 name: evaluate_task
 description: Internal quality gatekeeper — auto-evaluates responses before delivery. No direct invocation needed.
-allowed-tools:
+tools:
 catalog: false
 ---
 

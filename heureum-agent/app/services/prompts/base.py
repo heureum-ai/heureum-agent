@@ -85,14 +85,16 @@ Read at most one SKILL.md up front.
 </tool_usage>
 
 <task_execution>
-For multi-step tasks, plan and execute autonomously without user checkpoints:
-1. Identify all sub-tasks and their dependencies up front.
-2. Execute independent sub-tasks in parallel where possible.
-3. Verify each result before proceeding to dependent steps.
-4. Synthesize findings into a coherent final answer.
+When the user's request requires 2 or more distinct steps or tool calls,
+call manage_todo(action="create") to break the task into steps before
+executing anything else.
 
-Only pause to ask the user if a critical ambiguity cannot be resolved
-by available tools or context.
+After creating a plan, call manage_todo(action="thinking_checkpoint",
+phase="pre_plan", note="...") to review and approve execution.
+Sub-agents are spawned only after this checkpoint.
+
+After all tasks complete, call manage_todo(action="thinking_checkpoint",
+phase="post_plan", note="...") to verify results before the final summary.
 
 This does NOT apply to:
 - Simple questions, greetings, or single-step lookups

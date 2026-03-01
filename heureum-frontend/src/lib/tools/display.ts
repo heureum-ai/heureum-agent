@@ -54,20 +54,6 @@ export function getToolDisplay(tc: ToolCallInfo): { action: string; detail?: str
     case 'browser_click':
     case 'browser_type':
       return { action, detail: args.selector ? String(args.selector) : undefined };
-    case 'write_todos': {
-      const todos = args.todos ?? args.steps ?? args.tasks;
-      const detail = Array.isArray(todos)
-        ? `${todos.length} tasks`
-        : args.task
-        ? String(args.task).substring(0, 60)
-        : undefined;
-      return { action, detail };
-    }
-    case 'task': {
-      const prompt = args.prompt ?? args.description ?? args.task;
-      const detail = prompt ? String(prompt).substring(0, 80) : undefined;
-      return { action, detail };
-    }
     case 'manage_periodic_task': {
       const ptAction = args.action ? String(args.action) : '';
       const ptTitle = args.title ? String(args.title) : '';

@@ -93,6 +93,7 @@ _KNOWN_POLL_TOOLS = frozenset(
         "process_wait",
         "wait",
         "sleep",
+        "sessions_spawn_status",
     }
 )
 

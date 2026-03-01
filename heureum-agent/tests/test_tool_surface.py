@@ -110,8 +110,8 @@ class TestGetActiveToolNames:
         )
         tools = provider.get_active_tool_names(session_id, snapshot)
         assert tools is not None
-        # Server tools (manage_periodic_task, notify_user, etc.) should be present
-        assert "manage_periodic_task" in tools or "notify_user" in tools
+        # Server tools (manage_todo, activate_skill, etc.) should be present
+        assert "manage_todo" in tools or "activate_skill" in tools
         # Client tools should NOT be present initially
         assert "bash" not in tools
         assert "web_search" not in tools
@@ -197,8 +197,85 @@ class TestClearSessionCleanup:
         assert session_id not in provider._session_snapshots
 
 
-# activate_task and plan_task tests removed in Phase 9 cutover
-# (service.py files deleted; v2 DeepAgents handles tasks and activation natively)
+# ---------------------------------------------------------------------------
+# activate_skill server skill (ActivateSkill service)
+# ---------------------------------------------------------------------------
+
+
+class TestActivateSkillService:
+    @pytest.mark.asyncio
+    async def test_activate_skill_discovered(self, provider):
+        """activate_skill tool should be discovered."""
+        names = provider.get_all_tool_names()
+        assert "activate_skill" in names
+
+    @pytest.mark.asyncio
+    async def test_activate_skill_execute(self, provider):
+        """Executing activate_skill should activate skills and spawn subagent."""
+        # Provide a mock create_subagent_task_fn for the spawn pipeline
+        import asyncio
+        mock_task = asyncio.Future()
+        mock_task.set_result(None)
+        await provider.startup(
+            create_subagent_task_fn=lambda *a, **kw: mock_task,
+        )
+        session_id = "test_exec_activate"
+        snapshot = _make_snapshot(("coding_task", ["bash"]))
+        provider._session_snapshots[session_id] = snapshot
+        provider.get_active_tool_names(session_id, snapshot)
+
+        # Execute via skill controller — now requires task param
+        result_str = await provider.execute_tool(
+            "activate_skill",
+            {"skill_names": ["coding_task"], "task": "Write a hello world script"},
+            session_id,
+        )
+        result = json.loads(result_str)
+        assert result["status"] == "accepted"
+        assert "child_session_id" in result
+
+        # PSA activation on the main session is no longer performed;
+        # subagent tool resolution is handled by _resolve_child_tools.
+        tools = provider.get_active_tool_names(session_id, snapshot)
+        assert "bash" not in tools
+
+    @pytest.mark.asyncio
+    async def test_activate_skill_empty_names_error(self, provider):
+        result_str = await provider.execute_tool(
+            "activate_skill",
+            {"skill_names": []},
+            "test_empty",
+        )
+        result = json.loads(result_str)
+        assert "error" in result
+
+
+# ---------------------------------------------------------------------------
+# startup() self-injection
+# ---------------------------------------------------------------------------
+
+
+class TestStartupSelfInjection:
+    @pytest.mark.asyncio
+    async def test_startup_injects_self(self, provider):
+        """startup() should inject skill_controller=self into kwargs."""
+        await provider.startup()
+        # ActivateSkill should have received the controller
+        activate_skill = provider.get_skill("activate_task")
+        assert activate_skill is not None
+        assert activate_skill._skill_controller is provider
+
+
+# ---------------------------------------------------------------------------
+# display_names preserved
+# ---------------------------------------------------------------------------
+
+
+class TestDisplayNames:
+    def test_display_names_include_activate_skill(self, provider):
+        names = provider.display_names
+        assert "activate_skill" in names
+        assert names["activate_skill"] == "ActivateSkill"
 
 
 # ---------------------------------------------------------------------------

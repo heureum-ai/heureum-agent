@@ -327,11 +327,9 @@ def register_search(mcp: FastMCP) -> None:
         max_results: int = 3,
         country: Optional[str] = None,
     ) -> str:
-        """Search the web for current information. Returns snippets and URLs.
-
-        Snippets are brief summaries — do NOT answer from snippets alone.
-        If a web_fetch tool is available, call it on the most relevant URLs
-        for full page content. Otherwise, synthesize from the snippets provided.
+        """Search the web for current information. Returns brief snippets \
+and URLs. To get full page content, call 'fetch' on the most relevant \
+URLs from the results — choose selectively based on title and snippet.
 
         When researching a topic, call this tool multiple times in parallel \
 with diverse query keywords to cover different angles. Up to 3 parallel \
@@ -346,6 +344,7 @@ calls are recommended for thorough results.
 
         Returns:
             str: JSON with search result snippets, URLs, and titles.
+                Call 'fetch' on relevant URLs to retrieve full content.
         """
         start = time.monotonic()
 
@@ -394,8 +393,8 @@ calls are recommended for thorough results.
         took_ms = int((time.monotonic() - start) * 1000)
 
         result: dict = {
-            "instruction": "Snippets above are brief summaries — do NOT answer from snippets alone. "
-            "If a web_fetch tool is available, call it on the most relevant URLs to retrieve full content.",
+            "instruction": "Call fetch on the most relevant URLs to retrieve full content. "
+            "Then use read or grep on the returned session_file paths.",
             "query": query,
             "provider": sr.provider,
             "search_depth": search_depth,

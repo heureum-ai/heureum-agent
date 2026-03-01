@@ -67,46 +67,13 @@ function PeriodicTaskResult({ output }: { output: string }) {
   );
 }
 
-/* ── write_todos result renderer ── */
-
-function WriteTodosResult({ output, args }: { output: string; args?: Record<string, unknown> }) {
-  // Try to show the todos list from args first, then fall back to raw output.
-  const todos = args?.todos ?? args?.steps ?? args?.tasks;
-  if (Array.isArray(todos) && todos.length > 0) {
-    return (
-      <div className="ac-tool-task-card">
-        {todos.map((t: unknown, i: number) => {
-          const obj = t as Record<string, unknown>;
-          const label = typeof t === 'string' ? t : obj?.task ?? obj?.content ?? obj?.title ?? JSON.stringify(t);
-          return (
-            <div key={i} className="ac-tool-task-list-item">
-              <span className="ac-tool-task-list-title">{String(label)}</span>
-            </div>
-          );
-        })}
-      </div>
-    );
-  }
-  return <pre className="ac-tool-output">{output}</pre>;
-}
-
 /* ── ToolBlock component ── */
 
 export default function ToolBlock({ toolCall }: { toolCall: ToolCallInfo }) {
   const [expanded, setExpanded] = useState(false);
   const hasOutput = !!toolCall.output;
   const isPeriodicTask = toolCall.toolName === 'manage_periodic_task';
-  const isWriteTodos = toolCall.toolName === 'write_todos';
   const { action, detail } = getToolDisplay(toolCall);
-
-  // write_todos renders its todo list from toolArgs even without a server output string
-  const writeTodosArgs = isWriteTodos
-    ? (toolCall.toolArgs?.todos ?? toolCall.toolArgs?.steps ?? toolCall.toolArgs?.tasks)
-    : null;
-  const writeTodosHasContent = Array.isArray(writeTodosArgs) && writeTodosArgs.length > 0;
-
-  // "has something to show" — output text OR write_todos args
-  const hasContent = hasOutput || writeTodosHasContent;
 
   const showExpanded = isPeriodicTask && toolCall.status === 'completed' && hasOutput;
 
@@ -114,17 +81,13 @@ export default function ToolBlock({ toolCall }: { toolCall: ToolCallInfo }) {
     <div className={`ac-tool ac-tool-${toolCall.status}`}>
       <div className="ac-tool-dot" />
       <div className="ac-tool-content">
-        <div className="ac-tool-header" onClick={() => hasContent && setExpanded(!expanded)}>
+        <div className="ac-tool-header" onClick={() => hasOutput && setExpanded(!expanded)}>
           <span className="ac-tool-action">{action}</span>
           {detail && <span className="ac-tool-detail">{detail}</span>}
-          {hasContent && !showExpanded && <span className={`ac-tool-chevron ${expanded ? 'expanded' : ''}`}>&#x25B6;</span>}
+          {hasOutput && !showExpanded && <span className={`ac-tool-chevron ${expanded ? 'expanded' : ''}`}>&#x25B6;</span>}
         </div>
-        {(showExpanded || expanded) && (hasOutput || writeTodosHasContent) && (
-          isPeriodicTask
-            ? <PeriodicTaskResult output={toolCall.output!} />
-            : isWriteTodos
-            ? <WriteTodosResult output={toolCall.output ?? ''} args={toolCall.toolArgs} />
-            : <pre className="ac-tool-output">{toolCall.output}</pre>
+        {(showExpanded || expanded) && toolCall.output && (
+          isPeriodicTask ? <PeriodicTaskResult output={toolCall.output} /> : <pre className="ac-tool-output">{toolCall.output}</pre>
         )}
       </div>
     </div>

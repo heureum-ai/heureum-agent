@@ -1,7 +1,7 @@
 ---
 name: web_search_task
 description: Search the web, fetch pages, and read content. Use for any question requiring up-to-date information, fact-checking, or research.
-allowed-tools: mcp_web__search, web_fetch, read
+tools: mcp_web__search, web_fetch, read
 depends_on:
 ---
 You have `mcp_web__search`, `web_fetch` and `read` tools for web research.
