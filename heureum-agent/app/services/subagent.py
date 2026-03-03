@@ -21,8 +21,8 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Set
 
 from app.config import settings
 from app.models import LLMResultType
@@ -35,6 +35,12 @@ from langchain_core.messages import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Default client tools provided to sub-agents when no explicit tools/skills are
+# specified.  Keeps the tool count well below OpenAI's 128-tool limit.
+_DEFAULT_SUBAGENT_CLIENT_TOOLS: frozenset[str] = frozenset({
+    "read", "write", "edit", "grep", "find", "ls",
+})
 
 
 # ---------------------------------------------------------------------------
@@ -57,9 +63,16 @@ class SubagentContext:
     persist_controller: Any = None  # Optional[PersistController]
     skills_prompt: Optional[str] = None  # Current session's skills_prompt
     messages: Any = None  # Optional[MessageRegistry]
+    client_tool_schemas: List[dict] = field(default_factory=list)   # Client tool schemas for relay
+    client_tool_names: Set[str] = field(default_factory=set)        # Client tool names for relay
 
 
 _context: SubagentContext | None = None
+
+# Registry of active sub-agent services keyed by session_id.
+# This allows _announce_completion to find depth-1 orchestrators whose history
+# lives in their own isolated child_service, not in ctx.agent_service._sessions.
+_subagent_services: Dict[str, Any] = {}
 
 
 def set_context(ctx: SubagentContext) -> None:
@@ -125,6 +138,8 @@ def cleanup_session_state(session_id: str) -> None:
         ctx.tool_controller.clear_session(session_id)
         ctx.skill_controller.clear_session(session_id)
         clear_session_loop_state(session_id)
+        from app.services.client_relay import relay
+        relay.clear_session(session_id)
     except Exception:
         pass
 
@@ -251,14 +266,16 @@ def _build_orchestrator_hybrid_instructions(task: str, tool_names: List[str]) ->
         "Use manage_todo(action='create') to define your plan.\n"
         "Use manage_todo(action='thinking_checkpoint', phase='pre_plan') to begin execution.\n\n"
         "## Phase 2: Execution\n"
-        "- Spawn sub-agents for ready tasks via sessions_spawn\n"
-        "- Monitor with sessions_spawn_status\n"
-        "- When dependencies resolve, spawn dependent tasks\n"
+        "- Spawn sub-agents ONLY for tasks whose depends_on are ALL completed\n"
+        "- Monitor completion via sessions_spawn_status before spawning dependent tasks\n"
+        "- CRITICAL: NEVER spawn a task before its dependencies finish — "
+        "always use depends_on=[predecessor_child_session_id] to chain results\n"
         "- After ALL complete, synthesize into a comprehensive summary\n"
         "- Use manage_todo(action='thinking_checkpoint', phase='post_plan') to finalize\n\n"
         "## Rules\n"
         "- Do NOT do the research yourself — always delegate via sub-agents\n"
         "- Each sub-agent task must be self-contained and specific\n"
+        "- Sequential tasks (A → B) MUST use depends_on so B receives A's result\n"
         "- Final summary must directly answer the user's original request\n"
         "- Avoid creating too many tasks (max 5-7 for most queries)"
     )
@@ -276,6 +293,13 @@ def _build_leaf_instructions(task: str, tool_names: List[str]) -> str:
     if tool_names:
         lines.append(f"\n## Available Tools\n{', '.join(tool_names)}")
     lines.append(
+        "\n## Tool Usage Rules\n"
+        "- 'ls': list directory contents — use this to see files in a directory\n"
+        "- 'read': read a SINGLE FILE's content — do NOT use 'read' on a directory path\n"
+        "- 'write': create or overwrite a file with given content\n"
+        "- 'edit': replace specific text in an existing file\n"
+        "- 'grep': search for patterns inside files\n"
+        "- 'find': search for files by name or pattern\n"
         "\n## Constraints\n"
         "- Complete the task autonomously without user interaction.\n"
         "- If a tool call fails, try an alternative approach.\n"
@@ -416,8 +440,48 @@ async def _execute_subagent_task(
     """
     ctx = _get_context()
 
-    # Inherit tools from parent
+    # Inherit tools from parent (resolves allowed set via skills/whitelist)
     child_mcp_tools, child_skill_controller, tool_names = _resolve_child_tools(request)
+
+    # Capture client tool info at task creation time, filtered by the same
+    # allow-set that _resolve_child_tools computed for MCP/skill tools.
+    # This prevents passing 100+ client tools to the LLM when only a handful
+    # are relevant for the sub-agent's skill scope.
+    _resolved_allowed: Optional[Set[str]] = None
+    if getattr(request, "tools", None):
+        _resolved_allowed = set(request.tools)
+    elif getattr(request, "skills", None):
+        try:
+            _resolved_allowed = ctx.skill_controller.resolve_skill_tools(
+                request.skills, session_id=request.parent_session_id
+            )
+        except Exception:
+            pass
+
+    if _resolved_allowed is not None:
+        child_client_schemas: List[dict] = [
+            s for s in ctx.client_tool_schemas
+            if s.get("function", {}).get("name") in _resolved_allowed
+        ]
+        child_client_names: Set[str] = ctx.client_tool_names & _resolved_allowed
+        # Always supplement with default file tools so sub-agents can do file I/O
+        # regardless of skill filtering. A skill may allow only "write" but the
+        # sub-agent also needs read/edit/grep/find/ls to operate effectively.
+        _existing_names = {s.get("function", {}).get("name") for s in child_client_schemas}
+        for _s in ctx.client_tool_schemas:
+            _name = _s.get("function", {}).get("name")
+            if _name and _name in _DEFAULT_SUBAGENT_CLIENT_TOOLS and _name not in _existing_names:
+                child_client_schemas.append(_s)
+                child_client_names.add(_name)
+                _existing_names.add(_name)
+    else:
+        # No explicit allow-set: fall back to a small default set to avoid
+        # exceeding OpenAI's 128-tool limit when the full client tool list is large.
+        child_client_schemas = [
+            s for s in ctx.client_tool_schemas
+            if s.get("function", {}).get("name") in _DEFAULT_SUBAGENT_CLIENT_TOOLS
+        ]
+        child_client_names = ctx.client_tool_names & _DEFAULT_SUBAGENT_CLIENT_TOOLS
 
     # MCP tool availability pre-validation — remove unavailable tools early
     mcp_tool_names = {t.get("function", {}).get("name") for t in child_mcp_tools}
@@ -458,6 +522,9 @@ async def _execute_subagent_task(
     from app.skills.plan_task.service import get_subagent_depth, _config
 
     session_id = record.child_session_id
+    # Register child service so depth-2 sub-agents can announce to this orchestrator.
+    # Must be registered AFTER session_id is assigned.
+    _subagent_services[session_id] = child_service
     depth = get_subagent_depth(session_id)
     can_spawn = depth < _config["max_spawn_depth"]
     instructions = _build_subagent_instructions(request.task, tool_names, can_spawn=can_spawn)
@@ -511,6 +578,8 @@ async def _execute_subagent_task(
                 session_id=session_id,
                 instructions=instructions,
                 skills_prompt=request.skills_prompt,
+                client_tool_schemas=child_client_schemas,
+                client_tool_names=child_client_names,
                 is_subagent=True,
             )
 
@@ -601,8 +670,12 @@ async def _execute_subagent_task(
                 }
 
                 # Session ID routing wrapper:
-                # MCP tools → root_sid (file sharing), Skill tools → session_id (plan state isolation)
+                # Client tools → relay (Electron executes), MCP tools → root_sid,
+                # Skill tools → session_id (plan state isolation)
                 async def _routed_execute(name: str, args: Dict[str, Any], sid: str = "") -> str:
+                    if name in child_client_names:
+                        from app.services.client_relay import relay
+                        return await relay.request_tool(root_sid, name, args)
                     tool_sid = root_sid if name in ctx.mcp_client.display_names else sid
                     return await ctx.execute_tool(name, args, session_id=tool_sid)
 
@@ -683,9 +756,13 @@ async def _execute_subagent_task(
                 # Fix 8-2: Sliding window — cap session history to reduce token usage
                 _hist = child_service._sessions.get(session_id)
                 if _hist and len(_hist) > settings.SUBAGENT_MAX_HISTORY_SIZE:
-                    child_service._sessions[session_id] = (
-                        _hist[:1] + _hist[-(settings.SUBAGENT_MAX_HISTORY_SIZE - 1):]
-                    )
+                    _tail = _hist[-(settings.SUBAGENT_MAX_HISTORY_SIZE - 1):]
+                    # Strip orphaned leading ToolMessages — they have no preceding
+                    # AIMessage(tool_calls) in the retained window, which causes
+                    # OpenAI "messages with role 'tool' must follow tool_calls" errors.
+                    while _tail and isinstance(_tail[0], ToolMessage):
+                        _tail = _tail[1:]
+                    child_service._sessions[session_id] = _hist[:1] + _tail
 
                 # Fix 8-3: Polling throttle — slow down if only polling status
                 is_poll_only = all(
@@ -706,6 +783,7 @@ async def _execute_subagent_task(
             return max_iterations_message, total_usage
         return "Sub-agent reached maximum iterations.", total_usage
     finally:
+        _subagent_services.pop(session_id, None)
         await child_service.aclose()
 
 
@@ -737,7 +815,11 @@ async def _announce_completion(
     for attempt in range(max_retries):
         try:
             ctx = _get_context()
-            lc_sessions = ctx.agent_service._sessions
+            # Check sub-agent service registry first (for depth-2 → depth-1 announcements).
+            # Depth-1 orchestrators store their history in their own isolated child_service,
+            # not in ctx.agent_service._sessions, so we must check the registry.
+            _parent_svc = _subagent_services.get(record.parent_session_id)
+            lc_sessions = _parent_svc._sessions if _parent_svc is not None else ctx.agent_service._sessions
             if record.parent_session_id in lc_sessions:
                 lc_sessions[record.parent_session_id].append(msg)
                 logger.info(
@@ -749,7 +831,8 @@ async def _announce_completion(
                 # Multiple sub-agents completing simultaneously can cause
                 # context to spike unpredictably; this keeps it bounded.
                 try:
-                    await ctx.agent_service._maybe_proactive_compact(
+                    parent_svc_for_compact = _parent_svc or ctx.agent_service
+                    await parent_svc_for_compact._maybe_proactive_compact(
                         record.parent_session_id, []
                     )
                 except Exception:

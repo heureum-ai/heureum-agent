@@ -8,6 +8,7 @@ HTTP endpoints that import and call into the loop engine.
 """
 
 import asyncio
+import json
 import logging
 import time
 
@@ -40,11 +41,13 @@ from app.services.agent_loop import (
     skill_controller,
     tool_controller,
 )
+from app.services.client_relay import relay
 from app.services.tools import clear_session_loop_state
 from app.skills.plan_task.service import get_registry as get_subagent_registry
 from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, ToolMessage
+from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -245,13 +248,14 @@ async def create_response(request: ResponseRequest) -> ResponseObject:
     # Extract skills_prompt from client skills snapshot (if provided)
     skills_prompt = SkillsSnapshot.extract_prompt(request.skills_snapshot)
 
-    # Propagate skills_prompt to subagent context so child agents inherit it.
-    # NOTE: This is a per-request mutation on a global singleton. While asyncio
-    # is single-threaded, concurrent requests can interleave at await points.
-    # The per-request LoopContext.skills_prompt is the canonical source;
-    # the global is set here as a best-effort for sub-agent spawning.
+    # Propagate skills_prompt and client tool info to subagent context so child
+    # agents inherit them.  Per-request mutation on a global singleton — safe
+    # under asyncio's cooperative scheduling model (single-threaded).
     try:
-        _get_subagent_context().skills_prompt = skills_prompt
+        sa_ctx = _get_subagent_context()
+        sa_ctx.skills_prompt = skills_prompt
+        sa_ctx.client_tool_schemas = client_tool_schemas
+        sa_ctx.client_tool_names = client_tool_names
     except RuntimeError:
         pass
 
@@ -352,6 +356,7 @@ async def delete_session(session_id: str) -> dict:
     tool_controller.clear_session(session_id)
     skill_controller.clear_session(session_id)
     clear_session_loop_state(session_id)
+    relay.clear_session(session_id)
     return {"session_id": session_id, "removed": removed}
 
 
@@ -404,3 +409,53 @@ async def generate_title(request: dict) -> dict:
         first = next((m["text"] for m in messages if m.get("role") == "user"), "New Chat")
         title = first[:60] + ("..." if len(first) > 60 else "")
         return {"title": title}
+
+
+# ---------------------------------------------------------------------------
+# Sub-agent client tool relay
+# ---------------------------------------------------------------------------
+
+
+class RelayResultBody(BaseModel):
+    call_id: str
+    output: str
+
+
+@router.get("/relay/{session_id}")
+async def relay_stream(session_id: str) -> StreamingResponse:
+    """SSE stream that Electron subscribes to for sub-agent client tool requests.
+
+    Yields one SSE event per pending tool call:
+      data: {"call_id": "...", "tool": "bash", "args": {...}}
+
+    The stream ends when ``relay.clear_session()`` is called (sentinel ``None``).
+    """
+    queue = relay.get_or_create_queue(session_id)
+
+    async def _gen():
+        in_flight = None
+        try:
+            while True:
+                in_flight = None
+                call = await queue.get()
+                if call is None:
+                    # Sentinel — session cleaned up, close the stream
+                    break
+                in_flight = call
+                yield (
+                    f"data: {json.dumps({'call_id': call.call_id, 'tool': call.tool_name, 'args': call.args})}\n\n"
+                )
+                in_flight = None  # Successfully delivered
+        finally:
+            if in_flight is not None:
+                # Connection dropped while call was in-flight — re-queue for next subscriber
+                queue.put_nowait(in_flight)
+
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers=SSE_HEADERS)
+
+
+@router.post("/relay/result")
+async def relay_result(body: RelayResultBody) -> dict:
+    """Receive tool execution result from Electron and unblock the waiting sub-agent."""
+    ok = relay.submit_result(body.call_id, body.output)
+    return {"ok": ok}

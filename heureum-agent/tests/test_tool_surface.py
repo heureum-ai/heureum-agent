@@ -35,11 +35,11 @@ def _make_snapshot(*skill_defs):
 class TestBuildSnapshotSkillMap:
     def test_basic_mapping(self, provider):
         snapshot = _make_snapshot(
-            ("coding_task", ["bash", "write_file"]),
+            ("coding_task", ["bash", "write"]),
             ("web_task", ["web_search", "web_fetch"]),
         )
         mapping = provider._build_snapshot_skill_map(snapshot)
-        assert mapping["coding_task"] == ["bash", "write_file"]
+        assert mapping["coding_task"] == ["bash", "write"]
         assert mapping["web_task"] == ["web_search", "web_fetch"]
 
     def test_none_snapshot_returns_empty(self, provider):
@@ -62,14 +62,14 @@ class TestBuildSnapshotSkillMap:
 class TestActivateSkills:
     def test_activate_valid_skill(self, provider):
         session_id = "test_activate"
-        snapshot = _make_snapshot(("coding_task", ["bash", "write_file"]))
+        snapshot = _make_snapshot(("coding_task", ["bash", "write"]))
         provider._session_snapshots[session_id] = snapshot
         # Ensure session has initial active set (server skills only)
         provider.get_active_tool_names(session_id, snapshot)
 
         activated = provider.activate_skills(session_id, ["coding_task"])
         assert "coding_task" in activated
-        assert activated["coding_task"] == ["bash", "write_file"]
+        assert activated["coding_task"] == ["bash", "write"]
 
     def test_activate_invalid_skill_ignored(self, provider):
         session_id = "test_invalid"
@@ -105,7 +105,7 @@ class TestGetActiveToolNames:
         """On first call, only server skill tools should be active."""
         session_id = "test_initial"
         snapshot = _make_snapshot(
-            ("coding_task", ["bash", "write_file"]),
+            ("coding_task", ["bash", "write"]),
             ("web_task", ["web_search", "web_fetch"]),
         )
         tools = provider.get_active_tool_names(session_id, snapshot)
@@ -113,14 +113,14 @@ class TestGetActiveToolNames:
         # Server tools (manage_todo, activate_skill, etc.) should be present
         assert "manage_todo" in tools or "activate_skill" in tools
         # Client tools should NOT be present initially
-        assert "bash" not in tools
+        assert "write" not in tools
         assert "web_search" not in tools
 
     def test_after_activation_includes_client_tools(self, provider):
         """After activating a skill, its tools should appear."""
         session_id = "test_after_activate"
         snapshot = _make_snapshot(
-            ("coding_task", ["bash", "write_file"]),
+            ("coding_task", ["bash", "write"]),
             ("web_task", ["web_search"]),
         )
         provider._session_snapshots[session_id] = snapshot
@@ -130,7 +130,7 @@ class TestGetActiveToolNames:
 
         tools = provider.get_active_tool_names(session_id, snapshot)
         assert "bash" in tools
-        assert "write_file" in tools
+        assert "write" in tools
         # web_task not activated
         assert "web_search" not in tools
 
@@ -220,7 +220,7 @@ class TestActivateSkillService:
             create_subagent_task_fn=lambda *a, **kw: mock_task,
         )
         session_id = "test_exec_activate"
-        snapshot = _make_snapshot(("coding_task", ["bash"]))
+        snapshot = _make_snapshot(("coding_task", ["bash", "write"]))
         provider._session_snapshots[session_id] = snapshot
         provider.get_active_tool_names(session_id, snapshot)
 
@@ -237,7 +237,7 @@ class TestActivateSkillService:
         # PSA activation on the main session is no longer performed;
         # subagent tool resolution is handled by _resolve_child_tools.
         tools = provider.get_active_tool_names(session_id, snapshot)
-        assert "bash" not in tools
+        assert "write" not in tools
 
     @pytest.mark.asyncio
     async def test_activate_skill_empty_names_error(self, provider):
@@ -293,7 +293,7 @@ class TestGetActiveSkillNames:
         """Only client skills are returned, server skill keys excluded."""
         session_id = "test_active_names"
         snapshot = _make_snapshot(
-            ("coding_task", ["bash", "write_file"]),
+            ("coding_task", ["bash", "write"]),
             ("web_task", ["web_search"]),
         )
         provider._session_snapshots[session_id] = snapshot

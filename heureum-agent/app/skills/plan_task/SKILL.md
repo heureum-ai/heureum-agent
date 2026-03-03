@@ -17,7 +17,8 @@ You have `manage_todo`, `sessions_spawn`, `sessions_spawn_status`, and `ask_ques
 ## When NOT to use
 
 - Simple questions that need only a text response.
-- Single-step tasks (one tool call and done).
+- Single-step tasks (one tool call and done) — e.g. "list files", "read a file", "search for a pattern". Call the tool directly.
+- Direct file/directory operations: `ls`, `read`, `grep`, `find`, `write` — these are single tool calls, not plans.
 - Sequential tasks with no parallelism benefit — use a flat approach instead.
 
 ## When to use ask_question
