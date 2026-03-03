@@ -23,7 +23,7 @@ from chat_messages.views import (
 )
 from django.contrib import admin
 from django.urls import include, path
-from proxy.views import proxy_subagent_status, proxy_to_agent
+from proxy.views import proxy_relay_result, proxy_relay_stream, proxy_subagent_status, proxy_to_agent
 from rest_framework.routers import DefaultRouter
 
 router = DefaultRouter()
@@ -44,6 +44,20 @@ urlpatterns = [
         "api/v1/subagent/status/<str:session_id>/",
         proxy_subagent_status,
         name="subagent_status",
+    ),
+    # Sub-agent client tool relay
+    # NOTE: the static "result" route MUST come before the dynamic
+    # <session_id> route so Django does not swallow POST /relay/result
+    # as a relay-stream request with session_id="result".
+    path(
+        "api/v1/proxy/relay/result",
+        proxy_relay_result,
+        name="relay_result",
+    ),
+    path(
+        "api/v1/proxy/relay/<str:session_id>",
+        proxy_relay_stream,
+        name="relay_stream",
     ),
     # Authentication
     path("accounts/", include("allauth.urls")),

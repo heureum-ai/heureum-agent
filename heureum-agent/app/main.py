@@ -16,6 +16,8 @@ from app.routers import agent
 from app.routers.agent import (
     create_response,
     generate_title,
+    relay_result,
+    relay_stream,
     subagent_status,
 )
 from app.services.agent_loop import (
@@ -169,6 +171,19 @@ open_responses_router.add_api_route(
     "/subagent/status/{session_id}",
     subagent_status,
     methods=["GET"],
+    tags=["open-responses"],
+)
+open_responses_router.add_api_route(
+    "/relay/{session_id}",
+    relay_stream,
+    methods=["GET"],
+    response_model=None,
+    tags=["open-responses"],
+)
+open_responses_router.add_api_route(
+    "/relay/result",
+    relay_result,
+    methods=["POST"],
     tags=["open-responses"],
 )
 app.include_router(open_responses_router, prefix="/v1")

@@ -607,6 +607,57 @@ def _persist_output(response_data, session_id, response_obj, item_usages=None, t
         pass
 
 
+def proxy_relay_stream(request, session_id: str):
+    """Proxy the relay SSE stream from agent to Electron.
+
+    Forwards ``GET /api/v1/proxy/relay/{session_id}`` to the agent's
+    ``GET /v1/relay/{session_id}`` SSE endpoint and streams the response
+    directly to the Electron client.
+    """
+    agent_url = f"{settings.AGENT_SERVICE_URL}/v1/relay/{session_id}"
+
+    def _stream():
+        try:
+            with _agent_client.stream("GET", agent_url, timeout=3600.0) as resp:
+                resp.raise_for_status()
+                for line in resp.iter_lines():
+                    yield line + "\n"
+        except Exception as e:
+            logger.warning("Relay stream error for session %s: %s", session_id, e)
+
+    response = StreamingHttpResponse(_stream(), content_type="text/event-stream")
+    response["Cache-Control"] = "no-cache"
+    response["X-Accel-Buffering"] = "no"
+    return response
+
+
+@api_view(["POST"])
+def proxy_relay_result(request) -> Response:
+    """Forward relay tool result from Electron to the agent service.
+
+    Proxies ``POST /api/v1/proxy/relay/result`` to the agent's
+    ``POST /v1/relay/result`` endpoint.
+    """
+    try:
+        agent_url = f"{settings.AGENT_SERVICE_URL}/v1/relay/result"
+        agent_response = _agent_client.post(agent_url, json=request.data)
+        try:
+            payload = agent_response.json()
+        except ValueError:
+            payload = {"detail": agent_response.text}
+        return Response(payload, status=agent_response.status_code)
+    except httpx.HTTPError as e:
+        return Response(
+            {"type": "server_error", "message": f"Agent service error: {str(e)}"},
+            status=http_status.HTTP_502_BAD_GATEWAY,
+        )
+    except Exception as e:
+        return Response(
+            {"type": "server_error", "message": f"Server error: {str(e)}"},
+            status=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
 def _proxy_streaming(request_data, session_id, response_obj):
     """Stream SSE events from agent to client, persisting after completion."""
     agent_url = f"{settings.AGENT_SERVICE_URL}/v1/responses"

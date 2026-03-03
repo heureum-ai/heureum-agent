@@ -57,6 +57,19 @@ apiClient.interceptors.request.use((config: import('axios').InternalAxiosRequest
   return config;
 });
 
+// --- Session-level relay abort controllers ---
+// Keyed by session_id. Each entry lives for the lifetime of the session so
+// that the Relay SSE is NOT closed when the main SSE request ends.
+const _sessionRelayAborts = new Map<string, AbortController>();
+
+export function stopSessionRelay(sessionId: string): void {
+  const ctl = _sessionRelayAborts.get(sessionId);
+  if (ctl) {
+    ctl.abort();
+    _sessionRelayAborts.delete(sessionId);
+  }
+}
+
 // --- Session CWD state ---
 let sessionCwd: string | null = null;
 let cwdSelectionDeclined = false;
@@ -527,6 +540,104 @@ export async function fetchSubagentStatus(
   return response.data;
 }
 
+// ---------------------------------------------------------------------------
+// Sub-agent client tool relay (Electron-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read the sub-agent relay SSE stream and execute each requested tool locally.
+ *
+ * Runs concurrently with the main streaming loop.  Each SSE event carries a
+ * tool call from a sub-agent that has no Electron IPC access.  We execute it
+ * here and POST the result back to the server so the sub-agent can resume.
+ *
+ * Only active when running inside Electron (``canExecuteTools() === true``).
+ */
+async function _runRelaySSE(sessionId: string, signal: AbortSignal): Promise<void> {
+  if (!canExecuteTools()) return;
+
+  const csrfToken = getCsrfToken();
+  const headers: Record<string, string> = {};
+  if (csrfToken) headers['X-CSRFToken'] = csrfToken;
+
+  let resp: Response;
+  try {
+    resp = await fetch(`${API_BASE_URL}/api/v1/proxy/relay/${sessionId}`, {
+      credentials: 'include',
+      signal,
+    });
+    if (!resp.ok || !resp.body) return;
+  } catch {
+    return; // aborted or network error — exit silently
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop()!;
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) continue;
+        const payload = trimmed.slice(6);
+        if (payload === '[DONE]') return;
+
+        let callData: { call_id: string; tool: string; args: Record<string, unknown> };
+        try {
+          callData = JSON.parse(payload);
+        } catch {
+          continue;
+        }
+
+        const { call_id, tool, args } = callData;
+        let output = '';
+
+        try {
+          // Execute the tool locally via Electron IPC
+          if (CODING_TOOL_NAMES.has(tool)) {
+            if (!sessionCwd) {
+              output = `Error: No working directory selected. The main agent must call select_cwd before file tools can be used by sub-agents.`;
+            } else {
+              const result = await window.api!.codingTool(tool, args as Record<string, string>, sessionCwd);
+              output = result.success
+                ? result.output || '(no output)'
+                : `Error: ${result.output || 'Tool execution failed'}`;
+            }
+          } else {
+            output = `Error: Tool '${tool}' not available in sub-agent relay context`;
+          }
+        } catch (err: unknown) {
+          output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+        }
+
+        // POST result back to the server so the sub-agent can resume
+        try {
+          await fetch(`${API_BASE_URL}/api/v1/proxy/relay/result`, {
+            method: 'POST',
+            credentials: 'include',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify({ call_id, output }),
+          });
+        } catch {
+          // best-effort — sub-agent will time out on its own if this fails
+        }
+      }
+    }
+  } catch {
+    // reader cancelled (AbortController) or stream closed — exit cleanly
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export const chatAPI = {
   sendMessage: async (
     request: ChatRequest,
@@ -870,27 +981,20 @@ export const chatAPI = {
         // --- Handle coding tool calls (read, edit, write, grep, find, ls) ---
         if (CODING_TOOL_NAMES.has(tc.name)) {
           if (!sessionCwd) {
-            // Auto-trigger select_cwd when a coding tool is called without CWD
-            const cwdResult = await window.api!.selectCwd();
-            if (cwdResult.path) {
-              setSessionCwd(cwdResult.path);
-            } else {
-              cwdSelectionDeclined = true;
-              const deniedInfo: ToolCallInfo = {
-                command: tc.name,
-                status: 'failed',
-                output: 'User declined to select a working directory.',
-                exitCode: 1,
-              };
-              onToolCall?.({ ...deniedInfo });
-              collectedToolCalls.push(deniedInfo);
-              toolResults.push({
-                type: 'function_call_output',
-                call_id: tc.call_id,
-                output: 'Error: No working directory set. User declined folder selection.',
-              });
-              continue;
-            }
+            const errInfo: ToolCallInfo = {
+              command: tc.name,
+              status: 'failed',
+              output: 'Error: Working directory not set. Call select_cwd tool first, then retry.',
+              exitCode: 1,
+            };
+            onToolCall?.({ ...errInfo });
+            collectedToolCalls.push(errInfo);
+            toolResults.push({
+              type: 'function_call_output',
+              call_id: tc.call_id,
+              output: 'Error: Working directory not set. Call select_cwd tool first, then retry.',
+            });
+            continue;
           }
 
           const codingArgs = JSON.parse(tc.arguments);
@@ -1033,34 +1137,53 @@ export const chatAPI = {
     let buffer = '';
     let finalResponse: ResponseObject | null = null;
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop()!; // keep incomplete line in buffer
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop()!; // keep incomplete line in buffer
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith('data: ')) continue;
-        const payload = trimmed.slice(6);
-        if (payload === '[DONE]') continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || !trimmed.startsWith('data: ')) continue;
+          const payload = trimmed.slice(6);
+          if (payload === '[DONE]') continue;
 
-        try {
-          const event: StreamEvent = JSON.parse(payload);
-          onEvent(event);
-          if (
-            event.type === 'response.completed' ||
-            event.type === 'response.incomplete' ||
-            event.type === 'response.failed'
-          ) {
-            finalResponse = event.response;
+          try {
+            const event: StreamEvent = JSON.parse(payload);
+            onEvent(event);
+
+            if (event.type === 'response.created' && canExecuteTools()) {
+              const sid = (event.response as { metadata?: { session_id?: string } }).metadata?.session_id
+                || request.session_id || '';
+              // Session-level relay: keep open across multiple main-SSE requests
+              if (sid && !_sessionRelayAborts.has(sid)) {
+                const ctl = new AbortController();
+                _sessionRelayAborts.set(sid, ctl);
+                _runRelaySSE(sid, ctl.signal)
+                  .catch(() => {})
+                  .finally(() => _sessionRelayAborts.delete(sid)); // remove on abnormal close
+              }
+            }
+
+            if (
+              event.type === 'response.completed' ||
+              event.type === 'response.incomplete' ||
+              event.type === 'response.failed'
+            ) {
+              finalResponse = event.response;
+            }
+          } catch {
+            // skip unparseable lines
           }
-        } catch {
-          // skip unparseable lines
         }
       }
+    } finally {
+      // Do NOT abort the relay here — it must outlive each main-SSE request.
+      // The relay is terminated by stopSessionRelay() when the session is deleted.
     }
 
     if (!finalResponse) {
