@@ -1,9 +1,16 @@
 # Copyright (c) 2026 Heureum AI. All rights reserved.
 
+import logging
 import re
+import time
 
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
+
+logger = logging.getLogger(__name__)
+
+_SAVE_MAX_RETRIES = 3
+_SAVE_RETRY_DELAY = 0.05  # 50ms
 
 
 class SessionFileStorage:
@@ -45,13 +52,31 @@ class SessionFileStorage:
 
     @classmethod
     def save(cls, session_id: str, path: str, content: bytes) -> str:
-        """Save file content to storage. Returns the storage name."""
+        """Save file content to storage. Returns the storage name.
+
+        Retries on FileNotFoundError to handle race conditions when
+        concurrent requests delete/recreate the same file path (the
+        Django FileSystemStorage ``os.chmod`` call can fail if another
+        request deletes the file between the write and chmod).
+        """
         name = cls._blob_name(session_id, path)
-        # Delete existing file first to allow overwrite
-        if default_storage.exists(name):
-            default_storage.delete(name)
-        saved_name = default_storage.save(name, ContentFile(content))
-        return saved_name
+        last_err: Exception | None = None
+        for attempt in range(_SAVE_MAX_RETRIES):
+            try:
+                if default_storage.exists(name):
+                    default_storage.delete(name)
+                saved_name = default_storage.save(name, ContentFile(content))
+                return saved_name
+            except FileNotFoundError as exc:
+                last_err = exc
+                logger.debug(
+                    "Session file save race (attempt %d/%d): %s",
+                    attempt + 1,
+                    _SAVE_MAX_RETRIES,
+                    name,
+                )
+                time.sleep(_SAVE_RETRY_DELAY)
+        raise last_err  # type: ignore[misc]
 
     @classmethod
     def read(cls, session_id: str, path: str) -> bytes:

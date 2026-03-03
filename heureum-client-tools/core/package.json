@@ -7,6 +7,10 @@
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
+      "import": {
+        "types": "./dist/browser.d.ts",
+        "default": "./dist/browser.js"
+      },
       "node": {
         "types": "./dist/index.d.ts",
         "default": "./dist/index.js"

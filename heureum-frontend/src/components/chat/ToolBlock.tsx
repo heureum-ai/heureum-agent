@@ -1,8 +1,10 @@
 // Copyright (c) 2026 Heureum AI. All rights reserved.
 
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import type { ToolCallInfo } from '../../types';
 import { getToolDisplay } from '../../lib/tools';
+
+const PlacesMapResult = lazy(() => import('./PlacesMap'));
 
 /* ── Periodic task result parser ── */
 
@@ -73,12 +75,17 @@ export default function ToolBlock({ toolCall }: { toolCall: ToolCallInfo }) {
   const [expanded, setExpanded] = useState(false);
   const hasOutput = !!toolCall.output;
   const isPeriodicTask = toolCall.toolName === 'manage_periodic_task';
+  const isPlacesSearch = toolCall.toolName === 'travel_search_places';
+  const isItineraryView = toolCall.toolName === 'travel_manage_itinerary' && hasOutput && (() => {
+    try { return !!JSON.parse(toolCall.output!).map_places; } catch { return false; }
+  })();
+  const hasMap = isPlacesSearch || isItineraryView;
   const { action, detail } = getToolDisplay(toolCall);
 
-  const showExpanded = isPeriodicTask && toolCall.status === 'completed' && hasOutput;
+  const showExpanded = (isPeriodicTask || hasMap) && toolCall.status === 'completed' && hasOutput;
 
   return (
-    <div className={`ac-tool ac-tool-${toolCall.status}`}>
+    <div className={`ac-tool ac-tool-${toolCall.status}${hasMap ? ' ac-tool-has-map' : ''}`}>
       <div className="ac-tool-dot" />
       <div className="ac-tool-content">
         <div className="ac-tool-header" onClick={() => hasOutput && setExpanded(!expanded)}>
@@ -87,7 +94,10 @@ export default function ToolBlock({ toolCall }: { toolCall: ToolCallInfo }) {
           {hasOutput && !showExpanded && <span className={`ac-tool-chevron ${expanded ? 'expanded' : ''}`}>&#x25B6;</span>}
         </div>
         {(showExpanded || expanded) && toolCall.output && (
-          isPeriodicTask ? <PeriodicTaskResult output={toolCall.output} /> : <pre className="ac-tool-output">{toolCall.output}</pre>
+          isPlacesSearch ? <Suspense fallback={<pre className="ac-tool-output">{toolCall.output}</pre>}><PlacesMapResult output={toolCall.output} /></Suspense>
+          : isItineraryView ? <Suspense fallback={<pre className="ac-tool-output">{toolCall.output}</pre>}><PlacesMapResult output={JSON.stringify({ query: 'Itinerary', results: JSON.parse(toolCall.output).map_places })} /></Suspense>
+          : isPeriodicTask ? <PeriodicTaskResult output={toolCall.output} />
+          : <pre className="ac-tool-output">{toolCall.output}</pre>
         )}
       </div>
     </div>
