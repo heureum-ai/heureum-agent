@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_AGENT = "simple"
+_DEFAULT_AGENT = None  # None = use default main agent flow (activate_skill + ask_question)
 
 ROUTER_CLASSIFICATION_PROMPT = """\
 You are a request router. Analyze the user's latest message in the context \
@@ -25,10 +25,11 @@ of the conversation and select the most appropriate agent.
 </agents>
 
 Rules:
-- Simple greetings, factual questions from memory, single-step tasks -> simple
-- Tasks requiring web search for current/real-time information -> web_search
+- Simple greetings, chitchat, factual questions answerable from memory alone -> simple
+- Travel planning, restaurant/place recommendations, weather, directions, flights -> travel
+- Tasks requiring web search for current/real-time information (not travel-related) -> web_search
 - Multi-step analysis, research, comparison, or tasks needing planning -> complex
-- When uncertain, prefer simple over complex
+- Everything else (file operations, coding, general tool tasks) -> default
 
 Respond with ONLY a JSON object: {{"agent": "agent_name"}}
 Do not include any other text."""
@@ -51,7 +52,7 @@ async def classify_request(
     messages: list[BaseMessage],
     agent_registry: "AgentRegistry",
     agent_service: "AgentService",
-) -> str:
+) -> str | None:
     """Classify a user request into an agent name via a single lightweight LLM call.
 
     Args:
@@ -60,8 +61,8 @@ async def classify_request(
         agent_service: AgentService instance (for LLM access).
 
     Returns:
-        Agent name string (e.g. "simple", "complex", "web_search").
-        Falls back to "simple" on any error.
+        Agent name string (e.g. "simple", "complex", "web_search"),
+        or None to use the default main agent flow.
     """
     catalog = agent_registry.get_router_catalog()
     if not catalog:
@@ -93,20 +94,24 @@ async def classify_request(
             raw = raw.strip()
 
         parsed = json.loads(raw)
-        agent_name = parsed.get("agent", _DEFAULT_AGENT)
+        agent_name = parsed.get("agent")
+
+        # "default" means use the original main agent flow
+        if not agent_name or agent_name == "default":
+            logger.info("Router chose default flow (user: %s)", user_text[:80])
+            return None
 
         # Validate agent exists
         if agent_registry.get_agent(agent_name) is None:
             logger.warning(
-                "Router returned unknown agent '%s', falling back to '%s'",
+                "Router returned unknown agent '%s', using default flow",
                 agent_name,
-                _DEFAULT_AGENT,
             )
-            return _DEFAULT_AGENT
+            return None
 
         logger.info("Router classified request as '%s' (user: %s)", agent_name, user_text[:80])
         return agent_name
 
     except Exception:
-        logger.warning("Router classification failed, using default '%s'", _DEFAULT_AGENT, exc_info=True)
-        return _DEFAULT_AGENT
+        logger.warning("Router classification failed, using default flow", exc_info=True)
+        return None

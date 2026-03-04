@@ -126,6 +126,13 @@ class AgentLoopRunner:
             self._controller.agent_registry,
             self._service,
         )
+        if agent_name is None:
+            # Use default main agent flow (activate_skill + ask_question)
+            logger.info(
+                "CLASSIFY session=%s path=default_flow",
+                self.ctx.session_id,
+            )
+            return
         agent_def = self._controller.agent_registry.get_agent(agent_name)
         if agent_def:
             self.ctx.agent_config = agent_def
@@ -189,7 +196,7 @@ class AgentLoopRunner:
             self.ctx.skills_prompt = None
             return
 
-        # For agents without skills catalog, suppress it
+        # For agents without explicit skills, suppress the skills catalog
         if not config.skills:
             self.ctx.skills_prompt = None
 
