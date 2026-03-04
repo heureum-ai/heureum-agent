@@ -8,7 +8,7 @@ import { WebSocketServer, WebSocket } from 'ws'
 import { autoUpdater } from 'electron-updater'
 import http from 'http'
 import https from 'https'
-import { getExecutableTools, handleToolExecution, getSkillsSnapshot, writeSkillFiles } from './tools'
+import { getExecutableTools, handleToolExecution, getSkillsSnapshot, writeSkillFiles, WEB_TOOL_NAMES } from './tools'
 import { BROWSER_TOOLS as BROWSER_TOOL_DEFS } from '@heureum/browser'
 
 // --- Deep link protocol registration ---
@@ -403,6 +403,10 @@ ipcMain.handle('get-client-id', async () => {
 
 ipcMain.handle('get-coding-tools', () => {
   return getExecutableTools()
+})
+
+ipcMain.handle('get-web-tool-names', () => {
+  return Array.from(WEB_TOOL_NAMES)
 })
 
 ipcMain.handle('get-browser-tools', () => {

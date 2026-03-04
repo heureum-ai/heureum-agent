@@ -14,6 +14,9 @@ const api = {
   getCodingTools: (): Promise<Array<{ type: string; name: string; description?: string; parameters?: Record<string, any> }>> => {
     return ipcRenderer.invoke('get-coding-tools')
   },
+  getWebToolNames: (): Promise<string[]> => {
+    return ipcRenderer.invoke('get-web-tool-names')
+  },
   codingTool: (
     toolName: string,
     args: Record<string, unknown>,

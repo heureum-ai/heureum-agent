@@ -12,6 +12,7 @@ import {
   isMobileApp,
   MOBILE_TOOL_NAMES,
   CODING_TOOL_NAMES,
+  WEB_TOOL_NAMES_SET,
   fetchSessionFiles,
 } from '../lib/api';
 import { FILE_MUTATION_TOOLS } from '../lib/tools';
@@ -399,7 +400,13 @@ export function useStreamingChat({
           results.push({ type: 'function_call_output', call_id: tc.call_id, output: 'Error: Desktop app required for file operations.' });
           continue;
         }
-        if (!getSessionCwd()) {
+
+        // Web tools (e.g. web_fetch) fetch remote URLs and save to a session-specific
+        // temp path — they don't operate on the local project filesystem, so they must
+        // NOT trigger the working-directory folder picker.
+        const isWebTool = WEB_TOOL_NAMES_SET.size > 0 && WEB_TOOL_NAMES_SET.has(tc.name);
+
+        if (!isWebTool && !getSessionCwd()) {
           const cwdResult = await window.api!.selectCwd();
           if (cwdResult.path) {
             setSessionCwd(cwdResult.path);
@@ -421,7 +428,7 @@ export function useStreamingChat({
           continue;
         }
 
-        const codingResult = await window.api!.codingTool(tc.name, codingArgs, getSessionCwd()!);
+        const codingResult = await window.api!.codingTool(tc.name, codingArgs, getSessionCwd() || undefined);
         const codingOutput = codingResult.success
           ? codingResult.output
           : `Error: ${codingResult.output || 'Coding tool execution failed'}`;

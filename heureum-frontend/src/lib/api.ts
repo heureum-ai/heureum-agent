@@ -156,16 +156,21 @@ function canExecuteTools(): boolean {
 // --- Coding tools (read, edit, write, grep, find, ls) from central tools.ts via IPC ---
 let cachedCodingTools: ToolDefinition[] | null = null;
 export let CODING_TOOL_NAMES: Set<string> = new Set();
+export let WEB_TOOL_NAMES_SET: Set<string> = new Set();
 
 export async function initCodingTools(): Promise<void> {
   if (!canExecuteTools()) return;
   try {
-    const schemas = await window.api!.getCodingTools();
+    const [schemas, webNames] = await Promise.all([
+      window.api!.getCodingTools(),
+      window.api!.getWebToolNames?.() ?? [],
+    ]);
     cachedCodingTools = schemas.map(s => ({
       ...s,
       type: 'function' as const,
     })) as ToolDefinition[];
     CODING_TOOL_NAMES = new Set(cachedCodingTools!.map(t => t.name));
+    WEB_TOOL_NAMES_SET = new Set(webNames);
   } catch {
     cachedCodingTools = [];
   }

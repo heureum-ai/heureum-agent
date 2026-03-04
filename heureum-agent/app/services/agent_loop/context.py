@@ -13,6 +13,10 @@ from app.schemas.open_responses import (
     ResponseRequest,
     Usage,
 )
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.agents.types import AgentDefinition
 
 
 @dataclass
@@ -37,6 +41,8 @@ class LoopContext:
     msg_seq: int = 0
     # AgentLoopController instance (injected at creation time)
     ctrl: Optional[Any] = None
+    # Router-selected agent configuration (None = legacy behavior)
+    agent_config: Optional["AgentDefinition"] = None
 
 
 def is_tool_error(output: str) -> bool:
